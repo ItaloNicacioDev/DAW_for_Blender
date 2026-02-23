@@ -1,0 +1,79 @@
+╔══════════════════════════════════════════════════════════════╗
+║                  BLENDER DAW — INSTALAÇÃO                   ║
+╚══════════════════════════════════════════════════════════════╝
+
+ESTRUTURA DO ZIP:
+  daw/                          → Addon principal
+  DAW_Template/                 → Template da splash screen
+
+
+══════════════════════════════════════════════════════════════
+  PARTE 1 — COMPILAR O MOTOR DE ÁUDIO (só na primeira vez)
+══════════════════════════════════════════════════════════════
+
+  PRE-REQUISITO: MinGW instalado
+    Verifique: gcc --version
+    Se não tiver: https://winlibs.com
+
+  1. Abra um terminal CMD dentro de:
+       daw\daw_engine\daw_engine_final\
+
+  2. Execute:
+       build.bat
+
+  3. Isso gera:
+       daw\daw_engine\daw_engine_final\bin\daw_engine.dll
+
+
+══════════════════════════════════════════════════════════════
+  PARTE 2 — INSTALAR O ADDON
+══════════════════════════════════════════════════════════════
+
+  Copie a pasta "daw" para:
+    %APPDATA%\Blender Foundation\Blender\5.0\scripts\addons\daw\
+
+  Via PowerShell (ajuste o caminho):
+    Copy-Item -Recurse -Force "caminho\daw" `
+      "$env:APPDATA\Blender Foundation\Blender\5.0\scripts\addons\daw"
+
+  No Blender:
+    Edit → Preferences → Add-ons → desmarque "Enabled Only"
+    Pesquise "daw" → ative o checkbox
+
+
+══════════════════════════════════════════════════════════════
+  PARTE 3 — INSTALAR O TEMPLATE DA SPLASH SCREEN
+══════════════════════════════════════════════════════════════
+
+  1. Copie a pasta "DAW_Template\DAW" para:
+       %APPDATA%\Blender Foundation\Blender\5.0\scripts\startup\bl_app_templates_user\DAW\
+
+  2. Abra o Blender → Scripting
+     Abra o arquivo: DAW_Template\gerar_startup_blend.py
+     Clique Run Script (▶)
+
+  3. Reinicie o Blender
+     "DAW" aparecerá na splash screen!
+
+
+══════════════════════════════════════════════════════════════
+  PARTE 4 — USAR A DAW
+══════════════════════════════════════════════════════════════
+
+  Splash Screen → DAW → abre o workspace
+
+  N-Panel (tecla N) → aba DAW:
+    • "Iniciar Motor de Áudio" → ativa o engine C
+    • "Abrir Piano Roll"       → abre o piano roll
+    • "Carregar Arquivo"       → importa WAV/FLAC/MP3
+
+  Piano Roll:
+    LMB + arrastar   → desenha nota
+    RMB              → apaga nota
+    Ctrl + Scroll    → zoom horizontal
+    Shift + Scroll   → zoom vertical
+    MMB + arrastar   → scroll livre
+    Teclas 1-5       → snap (1/1 até 1/16)
+    ESC              → fecha
+
+══════════════════════════════════════════════════════════════
