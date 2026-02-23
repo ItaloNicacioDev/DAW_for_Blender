@@ -1,53 +1,111 @@
+🎛️ Blender DAW
+
+
+
+
+
+
+
+
+A modular Digital Audio Workstation integrated directly into Blender.
+
+📌 Overview
+
+Blender DAW is an experimental addon that transforms Blender into a modular Digital Audio Workstation (DAW), enabling music production directly inside the 3D environment.
+
+The goal is to unify audio production and visual workflows, creating a hybrid creative pipeline inside a single software ecosystem.
+
+The project includes:
+
+🔊 A custom-built audio engine (currently experimental)
+
+🧩 Modular architecture
+
+🎹 MIDI-based workflow
+
+🔄 External audio processing integration
+
+🏗️ Architecture
 Blender DAW
+│
+├── Core Audio Engine (Experimental)
+├── MIDI System (Piano Roll)
+├── Mixer Module
+├── Sampler Module
+├── Audio Converter
+│   └── AudioMax (External Plugin)
+└── UI Integration (Splash Session + Panels)
+🚀 Features
+Module	Status
+🎹 Piano Roll	🟡 In Development
+🎚️ Control Mixer	🟡 Partial
+🎛️ Sampler	🟡 Partial
+🔄 Audio Converter	🟢 Functional (via AudioMax)
+🔊 Custom Audio Engine	🔴 Experimental
+🖥️ Dedicated Splash Screen Session	🟢 Active
+🧩 Modular System	🟡 Expanding
+🔌 External Dependency
 
-Digital Audio Workstation integrada ao Blender
-🚧 Em desenvolvimento – Versão BETA
+The Audio Converter module relies on:
 
-🎧 Sobre o Projeto
+Audio Max for Blender 5.0
+🔗 https://github.com/ItaloNicacioDev/audio_max_for_blender5.0
 
-O Blender DAW é um addon que transforma o Blender em uma estação de trabalho de áudio modular, permitindo produção musical diretamente dentro do ambiente 3D.
+This plugin is responsible for auxiliary audio processing and optimization inside Blender.
 
-A proposta é integrar criação sonora + workflow visual, unificando produção musical e audiovisual em um único software.
+⚠️ Beta Notice
 
-🚀 Recursos Atuais (BETA)
+This project is currently in active BETA development.
 
-🎹 Piano Roll – Edição MIDI integrada
+Some features may not function properly.
 
-🎚️ Control Mixer – Controle de volumes e roteamento
+Certain modules may be incomplete or temporarily disabled.
 
-🎛️ Sampler – Carregamento e manipulação de samples
+The custom audio engine is still under testing.
 
-🔄 Conversor de Áudio – Processamento e adaptação de arquivos
+Structural changes may occur between versions.
 
-🔌 Utiliza o plugin auxiliar Audio Max for Blender 5.0
+Use in production environments is not recommended at this stage.
 
-🖥️ Sessão dedicada no Splash Screen – Acesso direto ao modo DAW
+🎯 Project Goals
 
-🧩 Sistema Modular – Estrutura expansível para novos módulos
+Integrate music production into Blender
 
-🔌 Plugin Auxiliar – AudioMax
+Develop a fully modular open-source DAW system
 
-O módulo de conversão de áudio depende do:
+Enable advanced synchronization between audio and animation
 
-👉 Audio Max for Blender 5.0
-Repositório oficial:
-https://github.com/ItaloNicacioDev/audio_max_for_blender5.0
+Expand MIDI capabilities
 
-Ele atua como complemento responsável pelo processamento e otimização de áudio dentro do ambiente Blender.
+Explore experimental VST integration
 
-⚠️ Status
+📦 Installation (Preview)
 
-Projeto em fase ativa de desenvolvimento.
-Algumas funcionalidades podem estar instáveis ou incompletas.
+Download or clone the repository
 
-🎯 Objetivo
+Install it as a Blender addon
 
-Criar uma solução open-source que permita:
+Install the AudioMax plugin
 
-Produção musical dentro do Blender
+Enable both addons in
+Edit → Preferences → Add-ons
 
-Integração com animação e vídeo
+🗺️ Roadmap
 
-Expansão via módulos personalizados
+ Audio engine optimization
 
-Workflow híbrido para criadores audiovisuais
+ Advanced MIDI implementation
+
+ Multi-track export
+
+ Experimental VST support
+
+ Dedicated DAW-style workspace
+
+ Performance improvements
+
+🤝 Contributing
+
+Contributions, feedback, and experimental ideas are welcome.
+
+This project aims to push the boundaries of Blender as a multimedia production platform.
