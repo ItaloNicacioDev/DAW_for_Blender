@@ -598,7 +598,7 @@ class DAW_PT_PianoRoll(bpy.types.Panel):
             layout.separator()
 
         # Botão abrir piano roll (fallback sem strip)
-        layout.operator("daw.open_piano_roll", icon='PIANO', text="Abrir Piano Roll")
+        layout.operator("daw.open_piano_roll", icon='SEQUENCE', text="Abrir Piano Roll")
         layout.separator()
 
         box2 = layout.box()
