@@ -123,6 +123,21 @@ class PianoRollState(bpy.types.PropertyGroup):
                ('ERASE','Apagar',''),('PAN','Pan','')],
         default='DRAW', name="Ferramenta")
     show_velocity: BoolProperty(default=True, name="Velocity")
+    # Synth interno
+    instrument: EnumProperty(
+        items=[
+            ('0', 'Acoustic Piano',  ''),
+            ('1', 'Electric Piano',  ''),
+            ('2', 'Strings',         ''),
+            ('3', 'Organ',           ''),
+            ('4', 'Bass',            ''),
+            ('5', 'Synth Lead',      ''),
+            ('6', 'Vibraphone',      ''),
+            ('7', 'Choir',           ''),
+        ],
+        default='0', name="Instrumento")
+    progression: StringProperty(default="", name="Progressão")
+
 
 
 def _get_active_notes(state):
@@ -718,6 +733,28 @@ class DAW_OT_PianoRollModal(bpy.types.Operator):
             if self._in_grid(mx, my, region, state):
                 self._remove(self._beat(mx, state, region),
                              self._pitch(my, state, region), state)
+            # Clique no teclado lateral → preview de nota
+            elif mx < PIANO_W:
+                pitch = self._pitch(my, state, region)
+                if 0 <= pitch <= 127:
+                    try:
+                        from ..synth import preview_note, set_instrument
+                        set_instrument(int(state.instrument))
+                        preview_note(pitch)
+                    except Exception as e:
+                        print(f"[DAW Synth] {e}")
+            return {'RUNNING_MODAL'}
+
+        # Clique no teclado lateral (LMB) → preview de nota
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS' and mx < PIANO_W:
+            pitch = self._pitch(my, state, region)
+            if 0 <= pitch <= 127:
+                try:
+                    from ..synth import preview_note, set_instrument
+                    set_instrument(int(state.instrument))
+                    preview_note(pitch)
+                except Exception as e:
+                    print(f"[DAW Synth] {e}")
             return {'RUNNING_MODAL'}
 
         return {'PASS_THROUGH'}
@@ -819,19 +856,37 @@ class DAW_OT_NewMidiStrip(bpy.types.Operator):
         state = scene.piano_roll
         seq   = scene.sequence_editor_create()
 
-        used = {s.channel for s in seq.sequences_all}
+        # Blender 5.1: apenas seq.strips (sequences foi removido)
+        try:
+            all_strips = seq.strips
+        except AttributeError:
+            all_strips = []
+
+        used = {s.channel for s in all_strips}
         ch   = 1
         while ch in used:
             ch += 1
 
-        idx   = len(state.midi_strips) + 1
-        name  = f"MIDI {idx:02d}"
-        start = scene.frame_current
-        end   = start + scene.render.fps * 4
+        idx      = len(state.midi_strips) + 1
+        name     = f"MIDI {idx:02d}"
+        start    = scene.frame_current
+        duration = scene.render.fps * 4  # 4 segundos em frames
 
-        strip = seq.sequences.new_effect(
-            name=name, type='COLOR', channel=ch,
-            frame_start=start, frame_end=end)
+        # Blender 5.1: new_effect usa length= em vez de frame_end=
+        try:
+            strip = seq.strips.new_effect(
+                name=name, type='COLOR', channel=ch,
+                frame_start=start, frame_end=start + duration)
+        except TypeError:
+            try:
+                strip = seq.strips.new_effect(
+                    name=name, type='COLOR', channel=ch,
+                    frame_start=start, length=duration)
+            except Exception:
+                strip = seq.sequences.new_effect(
+                    name=name, type='COLOR', channel=ch,
+                    frame_start=start, frame_end=start + duration)
+
         strip.color = (0.08, 0.45, 0.26)
 
         ms = state.midi_strips.add()
@@ -913,22 +968,105 @@ class DAW_PT_PianoRoll(bpy.types.Panel):
                         text="Abrir Piano Roll ↗")
         layout.separator()
 
-        box2 = layout.box()
-        box2.label(text="Controles rápidos", icon='INFO')
-        col = box2.column(align=True)
+        # ── Synth Interno ─────────────────────────────────────
+        box_synth = layout.box()
+        box_synth.label(text="Synth Interno (GM)", icon='SOUND')
+        box_synth.prop(state, "instrument", text="")
+
+        # ── Progressões de Acordes ────────────────────────────
+        box_prog = layout.box()
+        box_prog.label(text="Progressões de Acordes", icon='PRESET')
+
+        try:
+            from ..synth import CHORD_PROGRESSIONS
+            for prog_name, prog_data in CHORD_PROGRESSIONS.items():
+                row = box_prog.row(align=True)
+                row.scale_y = 0.85
+
+                op_load = row.operator("daw.load_progression",
+                                       text=prog_name, icon='IMPORT')
+                op_load.progression_name = prog_name
+
+                op_prev = row.operator("daw.preview_chord",
+                                       text="", icon='PLAY')
+                op_prev.progression_name = prog_name
+
+            if state.progression:
+                box_prog.separator()
+                box_prog.label(text=f"Ativo: {state.progression}",
+                               icon='CHECKMARK')
+        except Exception as e:
+            box_prog.label(text=f"synth.py não encontrado: {e}", icon='ERROR')
+
+        layout.separator()
+
+        # ── Controles ─────────────────────────────────────────
+        box_ctrl = layout.box()
+        box_ctrl.label(text="Controles", icon='INFO')
+        col = box_ctrl.column(align=True)
         col.scale_y = 0.75
+        col.label(text="LMB piano: Ouvir nota")
         col.label(text="D/S/E/P: Ferramenta")
         col.label(text="1-5: Snap")
         col.label(text="Ctrl+Scroll: Zoom X")
         col.label(text="Shift+Scroll: Zoom Y")
-        col.label(text="MMB: Pan  |  ESC: Fechar")
         col.label(text="Del: Apagar selecionadas")
+        col.label(text="ESC: Fechar")
 
         notes = _get_active_notes(state)
         if len(notes) > 0:
             layout.separator()
             layout.operator("daw.clear_notes", icon='TRASH',
                             text=f"Limpar {len(notes)} notas")
+
+
+class DAW_OT_LoadProgression(bpy.types.Operator):
+    bl_idname      = "daw.load_progression"
+    bl_label       = "Carregar Progressão"
+    bl_description = "Insere progressão de acordes no Piano Roll"
+    progression_name: StringProperty()
+
+    def execute(self, context):
+        state = context.scene.piano_roll
+        try:
+            from ..synth import progression_to_midi_notes, preview_chord_by_name
+            midi_notes = progression_to_midi_notes(self.progression_name)
+            if not midi_notes:
+                self.report({'WARNING'}, "Progressão não encontrada")
+                return {'CANCELLED'}
+
+            notes = _get_active_notes(state)
+            notes.clear()
+            for nd in midi_notes:
+                n          = notes.add()
+                n.pitch    = nd["pitch"]
+                n.start    = nd["start"]
+                n.length   = nd["length"]
+                n.velocity = nd["velocity"]
+
+            state.progression = self.progression_name
+            # Preview do primeiro acorde
+            preview_chord_by_name(self.progression_name)
+            self.report({'INFO'}, f"✅ {len(midi_notes)} notas carregadas")
+        except Exception as e:
+            self.report({'ERROR'}, f"Erro: {e}")
+        return {'FINISHED'}
+
+
+class DAW_OT_PreviewChord(bpy.types.Operator):
+    bl_idname      = "daw.preview_chord"
+    bl_label       = "Preview"
+    bl_description = "Toca o primeiro acorde da progressão"
+    progression_name: StringProperty()
+
+    def execute(self, context):
+        try:
+            from ..synth import preview_chord_by_name, set_instrument
+            set_instrument(int(context.scene.piano_roll.instrument))
+            preview_chord_by_name(self.progression_name)
+        except Exception as e:
+            self.report({'WARNING'}, str(e))
+        return {'FINISHED'}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -939,7 +1077,9 @@ classes = [
     MidiNote, MidiStripData, PianoRollState,
     DAW_OT_PianoRollModal, DAW_OT_OpenPianoRoll,
     DAW_OT_NewMidiStrip, DAW_OT_SelectMidiStrip,
-    DAW_OT_ClearNotes, DAW_PT_PianoRoll,
+    DAW_OT_ClearNotes,
+    DAW_OT_LoadProgression, DAW_OT_PreviewChord,
+    DAW_PT_PianoRoll,
 ]
 
 
