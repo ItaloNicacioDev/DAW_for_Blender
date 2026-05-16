@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender DAW",
     "author": "DAW Project",
-    "version": (0, 16, 1),
+    "version": (0, 16, 3),
     "blender": (5, 0, 0),
     "location": "DAW Workspace",
     "description": "DAW completa integrada ao Blender",
