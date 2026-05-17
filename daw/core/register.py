@@ -9,6 +9,8 @@ Reconecta automaticamente se a DLL cair.
 import bpy
 import os
 import sys
+import ctypes
+import traceback
 from pathlib import Path
 from bpy.props import FloatProperty, IntProperty, StringProperty, BoolProperty
 
@@ -18,6 +20,7 @@ from bpy.props import FloatProperty, IntProperty, StringProperty, BoolProperty
 
 _engine = None          # instância DAWEngine
 _engine_ok = False      # True = rodando sem erros
+_dll_directory_handle = None  # Guarda o handle do diretório de DLLs do Windows
 
 
 def get_engine():
@@ -54,27 +57,35 @@ def _find_dll() -> Path | None:
 
 
 def _preload_deps(dll_path: Path):
-    """Pré-carrega DLLs do MinGW que daw_engine.dll precisa."""
-    import sys
+    """Pré-carrega o diretório e dependências que daw_engine.dll precisa."""
+    global _dll_directory_handle
     if sys.platform != 'win32':
         return
 
-    # Adiciona pasta da DLL ao PATH do processo
     bin_dir = str(dll_path.parent)
+
+    # Injeta a pasta bin diretamente no buscador de DLLs do Windows para este processo
+    if hasattr(os, "add_dll_directory") and _dll_directory_handle is None:
+        try:
+            _dll_directory_handle = os.add_dll_directory(bin_dir)
+            print(f"[DAW Engine] Diretório de DLLs adicionado ao runtime: {bin_dir}")
+        except Exception as e:
+            print(f"[DAW Engine] Erro ao adicionar add_dll_directory: {e}")
+
+    # Fallback clássico modificando o PATH do ambiente
     if bin_dir not in os.environ.get('PATH', ''):
         os.environ['PATH'] = bin_dir + os.pathsep + os.environ.get('PATH', '')
 
-    # Tenta pré-carregar dependências comuns do MinGW
-    deps = ['libwinpthread-1.dll', 'libgcc_s_seh-1.dll',
-            'libstdc++-6.dll', 'libgomp-1.dll']
+    # Tenta carregar explicitamente as dependências comuns do MinGW se estiverem na pasta
+    deps = ['libwinpthread-1.dll', 'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libgomp-1.dll']
     for dep in deps:
         dep_path = dll_path.parent / dep
         if dep_path.exists():
             try:
                 ctypes.CDLL(str(dep_path))
-                print(f"[DAW Engine] Dep carregada: {dep}")
-            except Exception:
-                pass
+                print(f"[DAW Engine] Dependência carregada com sucesso: {dep}")
+            except Exception as e:
+                print(f"[DAW Engine] Falha interna ao pré-carregar {dep}: {e}")
 
 
 def _start_engine() -> bool:
@@ -85,23 +96,23 @@ def _start_engine() -> bool:
         dll = _find_dll()
         if dll is None:
             print("[DAW Engine] DLL não encontrada — motor de áudio desativado")
-            print(f"[DAW Engine] Procurado em: {Path(__file__).parent.parent}")
             _engine_ok = False
             return False
 
-        # Pré-carrega dependências do MinGW (Windows)
+        # Configura o ambiente e pré-carrega runtime do C++/MinGW
         _preload_deps(dll)
 
-        # Adiciona o diretório python ao sys.path
+        # Adiciona o diretório python do seu addon ao sys.path para achar o 'daw_bridge'
         py_dir = dll.parent.parent / "python"
         if str(py_dir) not in sys.path:
             sys.path.insert(0, str(py_dir))
 
+        # Importação dinâmica da ponte python/C++
         from daw_bridge import DAWEngine
         e = DAWEngine(str(dll))
 
         if not e.init(sample_rate=44100, buffer_size=512):
-            print("[DAW Engine] Falha na inicialização do motor")
+            print("[DAW Engine] Falha na inicialização interna do motor (init retornou falso)")
             _engine_ok = False
             return False
 
@@ -110,24 +121,34 @@ def _start_engine() -> bool:
 
         _engine    = e
         _engine_ok = True
-        print(f"[DAW Engine] ✅ Motor iniciado — {dll.name}")
+        print(f"[DAW Engine] ✅ Motor iniciado com sucesso — {dll.name}")
         return True
 
     except Exception as ex:
-        print(f"[DAW Engine] Erro ao iniciar: {ex}")
+        print("[DAW Engine] ❌ ERRO CRÍTICO ao iniciar o motor:")
+        traceback.print_exc()  # Exibe o erro real e a linha exata no Console do Sistema
         _engine_ok = False
         return False
 
 
 def _stop_engine():
     """Para o motor com segurança."""
-    global _engine, _engine_ok
+    global _engine, _engine_ok, _dll_directory_handle
     if _engine and _engine_ok:
         try:
             _engine.shutdown()
             print("[DAW Engine] Motor parado")
         except Exception as e:
             print(f"[DAW Engine] Aviso ao parar: {e}")
+
+    # Fecha o handle do diretório do Windows se existir
+    if _dll_directory_handle:
+        try:
+            _dll_directory_handle.close()
+        except Exception:
+            pass
+        _dll_directory_handle = None
+
     _engine    = None
     _engine_ok = False
 
@@ -137,15 +158,12 @@ def _stop_engine():
 # ═══════════════════════════════════════════════════════════════
 
 def _watchdog():
-    """
-    Roda a cada 5s verificando se o motor ainda está ativo.
-    Se caiu, tenta reiniciar automaticamente.
-    """
+    """Roda a cada 5s verificando se o motor ainda está ativo."""
     global _engine_ok
     if not _engine_ok:
-        print("[DAW Engine] Watchdog: tentando reconectar...")
+        print("[DAW Engine] Watchdog: detectou motor offline. Tentando reconectar...")
         _start_engine()
-    return 5.0  # re-agenda para daqui 5s
+    return 5.0
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -161,31 +179,25 @@ class DAWProperties(bpy.types.PropertyGroup):
         name="Volume", default=0.85, min=0.0, max=1.0,
         update=lambda self, ctx: _on_volume_change(self, ctx))
 
-    def _transport_update(self, ctx): pass
-
     status: StringProperty(default="Iniciando...")
 
 
 def _on_bpm_change(self, context):
     e = get_engine()
     if e:
-        try:
-            e.set_bpm(self.bpm)
-        except Exception:
-            pass
+        try: e.set_bpm(self.bpm)
+        except Exception: pass
 
 
 def _on_volume_change(self, context):
     e = get_engine()
     if e:
-        try:
-            e.set_master_volume(self.master_volume)
-        except Exception:
-            pass
+        try: e.set_master_volume(self.master_volume)
+        except Exception: pass
 
 
 # ═══════════════════════════════════════════════════════════════
-#  OPERADORES DE TRANSPORT  (play/pause/stop sem botão de init)
+#  OPERADORES DE TRANSPORT
 # ═══════════════════════════════════════════════════════════════
 
 class DAW_OT_Play(bpy.types.Operator):
@@ -224,10 +236,8 @@ class DAW_OT_Record(bpy.types.Operator):
     def execute(self, context):
         e = get_engine()
         if e:
-            try:
-                e.record()
-            except Exception:
-                e.play()
+            try: e.record()
+            except Exception: e.play()
             self.report({'INFO'}, "● Record")
         else:
             self.report({'WARNING'}, "Motor de áudio não disponível")
@@ -259,7 +269,7 @@ class DAW_OT_LoadAudio(bpy.types.Operator):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  PANEL  (status do motor + transport)
+#  PANEL
 # ═══════════════════════════════════════════════════════════════
 
 class DAW_PT_Engine(bpy.types.Panel):
@@ -274,23 +284,20 @@ class DAW_PT_Engine(bpy.types.Panel):
         layout = self.layout
         daw    = context.scene.daw
 
-        # ── Status do motor ───────────────────────────────────
         box = layout.box()
         row = box.row()
         if _engine_ok:
             row.label(text="Motor: Ativo", icon='CHECKMARK')
         else:
             row.label(text="Motor: Sem DLL", icon='ERROR')
-            box.label(text="Compile daw_engine.dll", icon='INFO')
+            box.label(text="Verifique o Console do Sistema para detalhes", icon='INFO')
 
-        # ── BPM e Volume ──────────────────────────────────────
         box2 = layout.box()
         box2.label(text="Configurações", icon='PREFERENCES')
         row2 = box2.row(align=True)
         row2.prop(daw, "bpm", text="BPM")
         box2.prop(daw, "master_volume", text="Volume Master", slider=True)
 
-        # ── Transport ─────────────────────────────────────────
         box3 = layout.box()
         box3.label(text="Transport", icon='PLAY')
         row3 = box3.row(align=True)
@@ -299,7 +306,6 @@ class DAW_PT_Engine(bpy.types.Panel):
         row3.operator("daw.stop",   icon='SNAP_FACE_CENTER', text="")
         row3.operator("daw.record", icon='REC',            text="")
 
-        # ── VU Meter ──────────────────────────────────────────
         if _engine_ok and _engine:
             try:
                 s = _engine.get_state()
@@ -327,37 +333,31 @@ classes = [
 
 def register():
     for cls in classes:
-        try:
-            bpy.utils.unregister_class(cls)
-        except Exception:
-            pass
+        try: bpy.utils.unregister_class(cls)
+        except Exception: pass
         bpy.utils.register_class(cls)
 
     bpy.types.Scene.daw = bpy.props.PointerProperty(type=DAWProperties)
 
-    # Inicia o motor automaticamente com delay de 0.5s
-    # (garante que o Blender terminou de carregar)
     def _auto_start():
         _start_engine()
-        # Ativa o watchdog após o primeiro start
         if not bpy.app.timers.is_registered(_watchdog):
             bpy.app.timers.register(_watchdog, first_interval=5.0, persistent=True)
         return None
 
     bpy.app.timers.register(_auto_start, first_interval=0.5)
-    print("[DAW Engine] Auto-start agendado")
+    print("[DAW Engine] Addon Registrado — Auto-start agendado")
 
 
 def unregister():
-    # Para watchdog
     if bpy.app.timers.is_registered(_watchdog):
         bpy.app.timers.unregister(_watchdog)
 
-    # Para o motor
     _stop_engine()
 
     if hasattr(bpy.types.Scene, 'daw'):
         del bpy.types.Scene.daw
 
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        try: bpy.utils.unregister_class(cls)
+        except Exception: pass
