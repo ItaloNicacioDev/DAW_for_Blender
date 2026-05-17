@@ -266,7 +266,18 @@ def play_note(midi_note: int, instrument_id: int = 0,
             return
 
         pcm  = generate_note_pcm(midi_note, instrument_id, duration, velocity)
-        snd  = aud.Sound.buffer(pcm, SAMPLE_RATE, CHANNELS, aud.FORMAT_S16)
+        try:
+            snd = aud.Sound.data(pcm, SAMPLE_RATE, CHANNELS, aud.FORMAT_S16)
+        except AttributeError:
+            try:
+                snd = aud.Sound.buffer(pcm, SAMPLE_RATE, CHANNELS, aud.FORMAT_S16)
+            except Exception:
+                import tempfile, wave
+                tmp = tempfile.mktemp(suffix='.wav')
+                with wave.open(tmp, 'w') as wf:
+                    wf.setnchannels(CHANNELS); wf.setsampwidth(2)
+                    wf.setframerate(SAMPLE_RATE); wf.writeframes(pcm)
+                snd = aud.Sound(tmp)
         dev.play(snd)
 
     except Exception as e:

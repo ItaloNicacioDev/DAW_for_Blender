@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender DAW",
-    "author": "DAW Project",
-    "version": (0, 16, 3),
+    "author": "Italo Nicacio Dev ",
+    "version": (0, 16, 3, 'beta'),
     "blender": (5, 0, 0),
     "location": "DAW Workspace",
     "description": "DAW completa integrada ao Blender",
@@ -9,7 +9,7 @@ bl_info = {
 }
 
 import bpy
-from . ui   import panels, workspace, piano_roll
+from . ui   import panels, workspace, piano_roll, beat_grid
 from . core import register as core_register
 
 
@@ -21,13 +21,12 @@ def on_load_post(scene, depsgraph=None):
         pass
 
 
-# [NOVO] Instala o template 1s após o registro
 def _install_template():
     try:
         from .template_installer import install_template
         install_template()
     except Exception as e:
-        print(f"[DAW] Aviso na instalação do template: {e}")
+        print(f"[DAW] Template: {e}")
     return None
 
 
@@ -35,6 +34,7 @@ def register():
     panels.register()
     workspace.register()
     piano_roll.register()
+    beat_grid.register()
     core_register.register()
 
     if on_load_post not in bpy.app.handlers.load_post:
@@ -47,32 +47,29 @@ def register():
     except Exception:
         pass
 
-    print("[DAW] Addon registrado")
+    print("[DAW] Addon v0.3.0 registrado")
 
 
 def unregister():
-    # Remove handler
     if on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(on_load_post)
 
-    # [NOVO] Remove template e workspace ao desinstalar
     def _cleanup():
         try:
             from .template_installer import uninstall_template
             uninstall_template()
-        except Exception as e:
-            print(f"[DAW] Aviso ao remover template: {e}")
+        except Exception:
+            pass
         try:
             workspace.remove_daw_workspace()
-        except Exception as e:
-            print(f"[DAW] Aviso ao remover workspace: {e}")
+        except Exception:
+            pass
         return None
 
     bpy.app.timers.register(_cleanup, first_interval=0.1)
 
     core_register.unregister()
+    beat_grid.unregister()
     piano_roll.unregister()
     workspace.unregister()
     panels.unregister()
-
-    print("[DAW] Addon desregistrado — ambiente restaurado")

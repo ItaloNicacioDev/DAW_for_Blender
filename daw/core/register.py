@@ -26,18 +26,30 @@ def get_engine():
 
 def _find_dll() -> Path | None:
     """Procura a DLL em todos os locais possíveis."""
-    addon_dir = Path(__file__).parent.parent  # raiz do addon daw/
+    addon_dir = Path(__file__).resolve().parent.parent  # raiz: addons/daw/
+    print(f"[DAW Engine] Buscando DLL em: {addon_dir}")
 
     candidates = [
         addon_dir / "daw_engine" / "daw_engine_final" / "bin" / "daw_engine.dll",
+        addon_dir / "daw_engine" / "daw_engine_final" / "bin" / "daw_engine.so",
         addon_dir / "daw_engine" / "daw_engine_final" / "bin" / "libdaw_engine.so",
         addon_dir / "daw_engine" / "daw_engine_final" / "bin" / "libdaw_engine.dylib",
         addon_dir / "bin" / "daw_engine.dll",
         addon_dir / "bin" / "libdaw_engine.so",
     ]
     for p in candidates:
-        if p.exists():
+        exists = p.exists()
+        print(f"[DAW Engine]   {p.name}: {'✅' if exists else '✗'}")
+        if exists:
             return p
+
+    print(f"[DAW Engine] ⚠ DLL não encontrada. Conteúdo de bin/:")
+    bin_dir = addon_dir / "daw_engine" / "daw_engine_final" / "bin"
+    if bin_dir.exists():
+        for f in bin_dir.iterdir():
+            print(f"[DAW Engine]     {f.name}")
+    else:
+        print(f"[DAW Engine]     pasta bin/ não existe")
     return None
 
 
@@ -288,6 +300,10 @@ classes = [
 
 def register():
     for cls in classes:
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass
         bpy.utils.register_class(cls)
 
     bpy.types.Scene.daw = bpy.props.PointerProperty(type=DAWProperties)
