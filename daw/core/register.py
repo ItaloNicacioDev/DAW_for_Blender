@@ -53,6 +53,30 @@ def _find_dll() -> Path | None:
     return None
 
 
+def _preload_deps(dll_path: Path):
+    """Pré-carrega DLLs do MinGW que daw_engine.dll precisa."""
+    import sys
+    if sys.platform != 'win32':
+        return
+
+    # Adiciona pasta da DLL ao PATH do processo
+    bin_dir = str(dll_path.parent)
+    if bin_dir not in os.environ.get('PATH', ''):
+        os.environ['PATH'] = bin_dir + os.pathsep + os.environ.get('PATH', '')
+
+    # Tenta pré-carregar dependências comuns do MinGW
+    deps = ['libwinpthread-1.dll', 'libgcc_s_seh-1.dll',
+            'libstdc++-6.dll', 'libgomp-1.dll']
+    for dep in deps:
+        dep_path = dll_path.parent / dep
+        if dep_path.exists():
+            try:
+                ctypes.CDLL(str(dep_path))
+                print(f"[DAW Engine] Dep carregada: {dep}")
+            except Exception:
+                pass
+
+
 def _start_engine() -> bool:
     """Inicia o motor de áudio. Retorna True se bem-sucedido."""
     global _engine, _engine_ok
@@ -64,6 +88,9 @@ def _start_engine() -> bool:
             print(f"[DAW Engine] Procurado em: {Path(__file__).parent.parent}")
             _engine_ok = False
             return False
+
+        # Pré-carrega dependências do MinGW (Windows)
+        _preload_deps(dll)
 
         # Adiciona o diretório python ao sys.path
         py_dir = dll.parent.parent / "python"
