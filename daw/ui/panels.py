@@ -1,85 +1,11 @@
+"""
+ui/panels.py
+
+Interface visual da DAW — Painéis e Barras de Ferramentas.
+Apenas desenha os elementos na tela e chama os operadores centrais.
+"""
+
 import bpy
-from bpy.props import FloatProperty, BoolProperty, IntProperty, StringProperty
-
-
-# ──────────────────────────────────────────────
-#  Properties globais da DAW
-# ──────────────────────────────────────────────
-class DAWProperties(bpy.types.PropertyGroup):
-    # Transport
-    bpm: FloatProperty(
-        name="BPM",
-        default=120.0,
-        min=20.0,
-        max=999.0,
-        description="Batidas por minuto"
-    )
-    is_playing: BoolProperty(name="Tocando", default=False)
-    is_recording: BoolProperty(name="Gravando", default=False)
-    loop_enabled: BoolProperty(name="Loop", default=False)
-    metronome: BoolProperty(name="Metrônomo", default=False)
-
-    # Master
-    master_volume: FloatProperty(
-        name="Volume Master",
-        default=1.0,
-        min=0.0,
-        max=2.0,
-        subtype='FACTOR'
-    )
-
-    # Playhead
-    current_bar: IntProperty(name="Compasso Atual", default=1, min=1)
-    current_beat: IntProperty(name="Beat Atual", default=1, min=1)
-
-    # Projeto
-    project_name: StringProperty(name="Projeto", default="Sem Título")
-    sample_rate: IntProperty(name="Sample Rate", default=44100)
-    bit_depth: IntProperty(name="Bit Depth", default=24)
-
-
-# ──────────────────────────────────────────────
-#  Operadores de Transport
-# ──────────────────────────────────────────────
-class DAW_OT_Play(bpy.types.Operator):
-    bl_idname = "daw.play"
-    bl_label = "Play"
-    bl_description = "Iniciar reprodução"
-
-    def execute(self, context):
-        props = context.scene.daw
-        props.is_playing = not props.is_playing
-        action = "▶ Reproduzindo" if props.is_playing else "⏸ Pausado"
-        self.report({'INFO'}, action)
-        return {'FINISHED'}
-
-
-class DAW_OT_Stop(bpy.types.Operator):
-    bl_idname = "daw.stop"
-    bl_label = "Stop"
-    bl_description = "Parar reprodução e voltar ao início"
-
-    def execute(self, context):
-        props = context.scene.daw
-        props.is_playing = False
-        props.current_bar = 1
-        props.current_beat = 1
-        self.report({'INFO'}, "⏹ Parado")
-        return {'FINISHED'}
-
-
-class DAW_OT_Record(bpy.types.Operator):
-    bl_idname = "daw.record"
-    bl_label = "Record"
-    bl_description = "Iniciar/parar gravação"
-
-    def execute(self, context):
-        props = context.scene.daw
-        props.is_recording = not props.is_recording
-        action = "🔴 Gravando" if props.is_recording else "⏹ Gravação parada"
-        self.report({'INFO'}, action)
-        return {'FINISHED'}
-
 
 # ──────────────────────────────────────────────
 #  Panel: Transport Bar (aparece no Header do Sequencer)
@@ -110,12 +36,11 @@ class DAW_PT_TransportBar(bpy.types.Panel):
         row.label(text=f"{props.current_bar:03d} | {props.current_beat}")
         row.separator()
 
-        # Botões de transporte
+        # Botões de transporte (Chamam os operadores do Core)
         sub = row.row(align=True)
         sub.operator("daw.stop", text="", icon='REW')
 
         play_icon = 'PAUSE' if props.is_playing else 'PLAY'
-        play_text = "Pause" if props.is_playing else "Play"
         sub.operator("daw.play", text="", icon=play_icon)
 
         rec_icon = 'CANCEL' if props.is_recording else 'REC'
@@ -173,12 +98,12 @@ class DAW_PT_ProjectInfo(bpy.types.Panel):
         if props.loop_enabled:
             col.label(text="🔁 Loop ativado")
 
-        # Ações rápidas
+        # Ações rápidas (Chamam os operadores do Core)
         layout.separator()
         layout.label(text="Ações Rápidas:")
         col = layout.column(align=True)
         col.operator("daw.play", icon='PLAY')
-        col.operator("daw.stop", icon='SNAP_FACE')
+        col.operator("daw.stop", icon='QUIT')  # Ícone quadrado padrão de Stop
         col.operator("daw.record", icon='REC')
 
 
@@ -208,13 +133,9 @@ class DAW_PT_MixerPanel(bpy.types.Panel):
 
 
 # ──────────────────────────────────────────────
-#  Registro
+#  Registro Isolado da UI
 # ──────────────────────────────────────────────
 classes = [
-    DAWProperties,
-    DAW_OT_Play,
-    DAW_OT_Stop,
-    DAW_OT_Record,
     DAW_PT_TransportBar,
     DAW_PT_ProjectInfo,
     DAW_PT_MixerPanel,
@@ -223,11 +144,12 @@ classes = [
 
 def register():
     for cls in classes:
+        try: bpy.utils.unregister_class(cls)
+        except Exception: pass
         bpy.utils.register_class(cls)
-    bpy.types.Scene.daw = bpy.props.PointerProperty(type=DAWProperties)
 
 
 def unregister():
-    del bpy.types.Scene.daw
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        try: bpy.utils.unregister_class(cls)
+        except Exception: pass

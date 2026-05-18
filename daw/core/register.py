@@ -174,16 +174,65 @@ def _watchdog():
 
 
 # ═══════════════════════════════════════════════════════════════
-#  PROPRIEDADES DA CENA
+#  PROPRIEDADES DA CENA (Mapeamento RNA do Blender)
 # ═══════════════════════════════════════════════════════════════
 
 class DAWProperties(bpy.types.PropertyGroup):
+    project_name: StringProperty(
+        name="Nome do Projeto",
+        default="Novo Projeto"
+    )
+
+    sample_rate: IntProperty(
+        name="Sample Rate",
+        default=44100
+    )
+
+    bit_depth: IntProperty(
+        name="Bit Depth",
+        default=24
+    )
+
+    is_playing: BoolProperty(
+        name="Executando",
+        default=False
+    )
+
+    is_recording: BoolProperty(
+        name="Gravando",
+        default=False
+    )
+
+    # 📁 NOVAS PROPRIEDADES REQUISITADAS PELA UI (ui/panels.py)
+    loop_enabled: BoolProperty(
+        name="Loop Ativado",
+        default=False
+    )
+
+    metronome: BoolProperty(
+        name="Metrônomo",
+        default=False
+    )
+
+    current_bar: IntProperty(
+        name="Compasso Atual",
+        default=1,
+        min=1
+    )
+
+    current_beat: IntProperty(
+        name="Beat Atual",
+        default=1,
+        min=1
+    )
+
     bpm: FloatProperty(
-        name="BPM", default=120.0, min=20.0, max=300.0,
+        name="BPM", default=120.0, min=20.0, max=999.0,
         update=lambda self, ctx: _on_bpm_change(self, ctx))
 
     master_volume: FloatProperty(
-        name="Volume", default=0.85, min=0.0, max=1.0,
+        name="Volume", default=0.85, min=0.0, max=2.0,
+        subtype='FACTOR',
         update=lambda self, ctx: _on_volume_change(self, ctx))
 
     status: StringProperty(default="Iniciando...")
@@ -214,11 +263,16 @@ class DAW_OT_Play(bpy.types.Operator):
 
     def execute(self, context):
         e = get_engine()
+        props = context.scene.daw
         if e:
             e.play()
+            props.is_playing = True
+            props.is_recording = False
             self.report({'INFO'}, "▶ Play")
         else:
-            self.report({'WARNING'}, "Motor de áudio não disponível")
+            # Fallback para simulação visual de desenvolvimento se a DLL não carregar
+            props.is_playing = not props.is_playing
+            self.report({'WARNING'}, f"Modo Local — Reprodução: {props.is_playing}")
         return {'FINISHED'}
 
 
@@ -231,7 +285,13 @@ class DAW_OT_Stop(bpy.types.Operator):
         e = get_engine()
         if e:
             e.stop()
-            self.report({'INFO'}, "■ Stop")
+
+        props = context.scene.daw
+        props.is_playing = False
+        props.is_recording = False
+        props.current_bar = 1
+        props.current_beat = 1
+        self.report({'INFO'}, "■ Stop")
         return {'FINISHED'}
 
 
@@ -242,12 +302,18 @@ class DAW_OT_Record(bpy.types.Operator):
 
     def execute(self, context):
         e = get_engine()
+        props = context.scene.daw
         if e:
             try: e.record()
             except Exception: e.play()
+            props.is_playing = True
+            props.is_recording = True
             self.report({'INFO'}, "● Record")
         else:
-            self.report({'WARNING'}, "Motor de áudio não disponível")
+            props.is_recording = not props.is_recording
+            if props.is_recording:
+                props.is_playing = True
+            self.report({'WARNING'}, f"Modo Local — Gravação: {props.is_recording}")
         return {'FINISHED'}
 
 
@@ -276,11 +342,11 @@ class DAW_OT_LoadAudio(bpy.types.Operator):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  PANEL
+#  PANEL (Mantido como redundância ou painel de debug do Motor)
 # ═══════════════════════════════════════════════════════════════
 
 class DAW_PT_Engine(bpy.types.Panel):
-    bl_label       = "Projeto DAW"
+    bl_label       = "Status do Motor DAW"
     bl_idname      = "DAW_PT_engine"
     bl_space_type  = 'SEQUENCE_EDITOR'
     bl_region_type = 'UI'
@@ -294,24 +360,10 @@ class DAW_PT_Engine(bpy.types.Panel):
         box = layout.box()
         row = box.row()
         if _engine_ok:
-            row.label(text="Motor: Ativo", icon='CHECKMARK')
+            row.label(text="Motor C++: Conectado", icon='CHECKMARK')
         else:
-            row.label(text="Motor: Sem DLL", icon='ERROR')
-            box.label(text="Verifique o Console do Sistema para detalhes", icon='INFO')
-
-        box2 = layout.box()
-        box2.label(text="Configurações", icon='PREFERENCES')
-        row2 = box2.row(align=True)
-        row2.prop(daw, "bpm", text="BPM")
-        box2.prop(daw, "master_volume", text="Volume Master", slider=True)
-
-        box3 = layout.box()
-        box3.label(text="Transport", icon='PLAY')
-        row3 = box3.row(align=True)
-        row3.scale_y = 1.4
-        row3.operator("daw.play",   icon='PLAY',           text="")
-        row3.operator("daw.stop",   icon='SNAP_FACE_CENTER', text="")
-        row3.operator("daw.record", icon='REC',            text="")
+            row.label(text="Motor C++: Desconectado (Sem DLL)", icon='ERROR')
+            box.label(text="Verifique o Console do Sistema", icon='INFO')
 
         if _engine_ok and _engine:
             try:
@@ -319,12 +371,9 @@ class DAW_PT_Engine(bpy.types.Panel):
                 if s:
                     box4 = layout.box()
                     box4.label(text=f"Peak  L:{s.peak_left:.3f}  R:{s.peak_right:.3f}")
-                    box4.label(text=f"BPM: {s.bpm:.1f}  Tracks: {s.track_count}")
+                    box4.label(text=f"Tracks Ativas: {s.track_count}")
             except Exception:
                 pass
-
-        layout.separator()
-        layout.operator("daw.load_audio", icon='FILE_SOUND')
 
 
 # ═══════════════════════════════════════════════════════════════
