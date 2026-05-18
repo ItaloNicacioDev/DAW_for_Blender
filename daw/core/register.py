@@ -111,7 +111,14 @@ def _start_engine() -> bool:
         from daw_bridge import DAWEngine
         e = DAWEngine(str(dll))
 
-        if not e.init(sample_rate=44100, buffer_size=512):
+        # 1. Executa o mapeamento obrigatório de tipos via ctypes
+        if not e.load():
+            print("[DAW Engine] Falha ao executar e.load() no bridge")
+            _engine_ok = False
+            return False
+
+        # 2. Inicializa passando as assinaturas e chaves idênticas do daw_bridge.py
+        if not e.init(sample_rate=44100, bit_depth=24, buffer_frames=512, bpm=120.0):
             print("[DAW Engine] Falha na inicialização interna do motor (init retornou falso)")
             _engine_ok = False
             return False
