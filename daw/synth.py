@@ -245,6 +245,8 @@ def generate_note_pcm(midi_note: int, instrument_id: int = 0,
 # ═══════════════════════════════════════════════════════════════
 
 _device: aud.Device = None
+_play_handles = []
+_last_sound = None
 
 
 def _get_device() -> aud.Device:
