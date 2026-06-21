@@ -6,6 +6,7 @@ bl_info = {
     "location": "DAW Workspace",
     "description": "DAW completa integrada ao Blender",
     "category": "Audio",
+
 }
 
 import bpy
