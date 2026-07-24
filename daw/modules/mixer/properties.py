@@ -1,13 +1,28 @@
-# modules/effects/properties.py
+# modules/mixer/properties.py
 """
-Propriedades RNA do Blender para o módulo de Efeitos.
+Propriedades RNA do Blender para o módulo Mixer.
 
-Cada tipo de efeito tem seu próprio PropertyGroup (espelhando os
-dataclasses de chorus.py, compressor.py, etc). Um EffectSlotProperties
-guarda todos eles como PointerProperty e usa `effect_type` para saber
-qual exibir/usar — é o jeito padrão de simular um "union type" em RNA.
+Responsabilidade:
+    Espelhar em PropertyGroups (RNA) o modelo puro definido em tracks.py,
+    routing.py e sends.py, para que a UI (ui.py) e os operadores
+    (operators.py) do Blender possam ler/editar o estado do mixer.
+    Este é o "dado vivo": fica em context.scene.daw_mixer.
 
-Estado real fica em context.scene.daw_effects.
+    meters.py lê e escreve diretamente nestas propriedades (mixer_props.
+    channels/master/meter) para animar os VU meters; utils.py (funções
+    unique_track_name, unique_bus_name, any_solo_active, is_track_audible)
+    também opera sobre estas mesmas propriedades — por isso os nomes de
+    atributo aqui (tracks/buses/name/solo/mute/volume/pan) são mantidos
+    idênticos ao que aqueles dois módulos esperam.
+
+Arquitetura (ver mixer/__init__.py para o mapa completo do módulo):
+    tracks.py    — MixerTrack: modelo puro de uma faixa (sem bpy)
+    routing.py   — MixerBus: buses/roteamento (sem bpy)
+    sends.py     — Send: envio auxiliar de uma faixa (sem bpy)
+    effects.py   — catálogo de tipos de efeito para os inserts
+    utils.py     — ponte com o motor de áudio + utilitários sobre RNA
+    meters.py    — VU meters, lê/escreve nestas propriedades
+    properties.py — este arquivo: espelho RNA de tudo isso
 """
 from __future__ import annotations
 
@@ -17,184 +32,305 @@ from bpy.props import (
     CollectionProperty,
     EnumProperty,
     FloatProperty,
+    FloatVectorProperty,
     IntProperty,
     PointerProperty,
     StringProperty,
 )
 from bpy.types import PropertyGroup
 
-from .delay import SYNC_DIVISIONS
-from .distortion import DISTORTION_MODES
-from .eq import BAND_TYPES, MAX_BANDS
-from .rack import EFFECT_TYPES
-
-EFFECT_TYPE_ITEMS = (
-    ("CHORUS", "Chorus", "Duplica e modula o sinal para um efeito de coro"),
-    ("COMPRESSOR", "Compressor", "Reduz a faixa dinâmica do sinal"),
-    ("DELAY", "Delay", "Repetições atrasadas do sinal"),
-    ("DISTORTION", "Distorção", "Satura/distorce o sinal"),
-    ("EQ", "EQ", "Equalizador paramétrico multibanda"),
-    ("FLANGER", "Flanger", "Modulação de fase com regeneração metálica"),
-    ("LIMITER", "Limiter", "Limita o pico máximo do sinal"),
-    ("PHASER", "Phaser", "Modulação de fase em múltiplos estágios"),
-    ("REVERB", "Reverb", "Simula a reverberação de um ambiente"),
+from .tracks import MASTER_TRACK_NAME, get_color_by_index
+from .effects import EFFECT_TYPE_ITEMS
+from .sends import MAX_SENDS_PER_TRACK
+from .utils import (
+    any_solo_active,
+    is_track_audible,
+    push_volume_to_engine,
+    push_pan_to_engine,
+    push_mute_to_engine,
+    push_solo_to_engine,
+    push_master_volume_to_engine,
 )
 
 
 # ------------------------------------------------------------------ #
-# Um PropertyGroup por tipo de efeito (espelha o dataclass correspondente)
+# Callbacks de update — ponte com o motor de áudio (ver utils.py)
 # ------------------------------------------------------------------ #
-class ChorusProperties(PropertyGroup):
-    rate: FloatProperty(name="Velocidade", default=1.2, min=0.05, max=10.0, unit='NONE')
-    depth: FloatProperty(name="Profundidade", default=0.35, min=0.0, max=1.0, subtype='FACTOR')
-    voices: IntProperty(name="Vozes", default=2, min=1, max=4)
-    feedback: FloatProperty(name="Feedback", default=0.15, min=0.0, max=0.9, subtype='FACTOR')
-    mix: FloatProperty(name="Mix", default=0.5, min=0.0, max=1.0, subtype='FACTOR')
+def _on_track_volume_change(self: "MixerTrackProperties", context) -> None:
+    push_volume_to_engine(self.source_index, self.volume)
 
 
-class CompressorProperties(PropertyGroup):
-    threshold_db: FloatProperty(name="Threshold (dB)", default=-18.0, min=-60.0, max=0.0)
-    ratio: FloatProperty(name="Ratio", default=4.0, min=1.0, max=20.0)
-    attack_ms: FloatProperty(name="Attack (ms)", default=10.0, min=0.1, max=200.0)
-    release_ms: FloatProperty(name="Release (ms)", default=120.0, min=5.0, max=2000.0)
-    knee_db: FloatProperty(name="Knee (dB)", default=6.0, min=0.0, max=24.0)
-    makeup_gain_db: FloatProperty(name="Makeup Gain (dB)", default=0.0, min=-12.0, max=24.0)
-    mix: FloatProperty(name="Mix", default=1.0, min=0.0, max=1.0, subtype='FACTOR')
+def _on_track_pan_change(self: "MixerTrackProperties", context) -> None:
+    push_pan_to_engine(self.source_index, self.pan)
 
 
-class DelayProperties(PropertyGroup):
-    time_ms: FloatProperty(name="Tempo (ms)", default=350.0, min=1.0, max=4000.0)
-    sync: BoolProperty(name="Sincronizar com BPM", default=False)
-    sync_division: EnumProperty(
-        name="Divisão", items=[(d, d, "") for d in SYNC_DIVISIONS], default="1/4"
-    )
-    feedback: FloatProperty(name="Feedback", default=0.35, min=0.0, max=0.95, subtype='FACTOR')
-    ping_pong: BoolProperty(name="Ping Pong", default=False)
-    mix: FloatProperty(name="Mix", default=0.35, min=0.0, max=1.0, subtype='FACTOR')
+def _on_track_mute_change(self: "MixerTrackProperties", context) -> None:
+    push_mute_to_engine(self.source_index, self.mute)
 
 
-class DistortionProperties(PropertyGroup):
-    drive: FloatProperty(name="Drive", default=0.4, min=0.0, max=1.0, subtype='FACTOR')
-    tone: FloatProperty(name="Tom", default=0.5, min=0.0, max=1.0, subtype='FACTOR')
-    mode: EnumProperty(
-        name="Modo", items=[(m, m.title(), "") for m in DISTORTION_MODES], default="SOFT"
-    )
-    output_gain_db: FloatProperty(name="Ganho de Saída (dB)", default=0.0, min=-24.0, max=24.0)
-    mix: FloatProperty(name="Mix", default=1.0, min=0.0, max=1.0, subtype='FACTOR')
+def _on_track_solo_change(self: "MixerTrackProperties", context) -> None:
+    push_solo_to_engine(self.source_index, self.solo)
 
 
-class EQBandProperties(PropertyGroup):
-    enabled: BoolProperty(name="Ativa", default=True)
-    band_type: EnumProperty(
-        name="Tipo", items=[(t, t.title(), "") for t in BAND_TYPES], default="PEAK"
-    )
-    freq: FloatProperty(name="Frequência (Hz)", default=1000.0, min=20.0, max=20000.0)
-    gain_db: FloatProperty(name="Ganho (dB)", default=0.0, min=-24.0, max=24.0)
-    q: FloatProperty(name="Q", default=0.71, min=0.1, max=10.0)
+def _on_master_volume_change(self: "MixerProperties", context) -> None:
+    push_master_volume_to_engine(self.master_volume)
 
 
-class EQProperties(PropertyGroup):
-    bands: CollectionProperty(type=EQBandProperties)
-    active_band_index: IntProperty(name="Banda Ativa", default=0, min=0)
+def _on_active_track_index_change(self: "MixerProperties", context) -> None:
+    """Garante que o índice ativo nunca fique fora do range da coleção."""
+    if len(self.tracks) == 0:
+        return
+    if self.active_track_index >= len(self.tracks):
+        self.active_track_index = len(self.tracks) - 1
 
 
-class FlangerProperties(PropertyGroup):
-    rate: FloatProperty(name="Velocidade", default=0.25, min=0.02, max=10.0)
-    depth: FloatProperty(name="Profundidade", default=0.5, min=0.0, max=1.0, subtype='FACTOR')
-    feedback: FloatProperty(name="Feedback", default=0.4, min=0.0, max=0.95, subtype='FACTOR')
-    manual_ms: FloatProperty(name="Manual (ms)", default=1.0, min=0.1, max=20.0)
-    mix: FloatProperty(name="Mix", default=0.5, min=0.0, max=1.0, subtype='FACTOR')
-
-
-class LimiterProperties(PropertyGroup):
-    ceiling_db: FloatProperty(name="Teto (dB)", default=-0.3, min=-12.0, max=0.0)
-    release_ms: FloatProperty(name="Release (ms)", default=50.0, min=1.0, max=1000.0)
-    lookahead_ms: FloatProperty(name="Lookahead (ms)", default=5.0, min=0.0, max=20.0)
-    input_gain_db: FloatProperty(name="Ganho de Entrada (dB)", default=0.0, min=-12.0, max=24.0)
-
-
-class PhaserProperties(PropertyGroup):
-    rate: FloatProperty(name="Velocidade", default=0.5, min=0.02, max=10.0)
-    depth: FloatProperty(name="Profundidade", default=0.6, min=0.0, max=1.0, subtype='FACTOR')
-    feedback: FloatProperty(name="Feedback", default=0.3, min=0.0, max=0.95, subtype='FACTOR')
-    stages: IntProperty(name="Estágios", default=4, min=2, max=12, step=2)
-    mix: FloatProperty(name="Mix", default=0.5, min=0.0, max=1.0, subtype='FACTOR')
-
-
-class ReverbProperties(PropertyGroup):
-    room_size: FloatProperty(name="Tamanho da Sala", default=0.5, min=0.0, max=1.0, subtype='FACTOR')
-    damping: FloatProperty(name="Amortecimento", default=0.5, min=0.0, max=1.0, subtype='FACTOR')
-    width: FloatProperty(name="Largura Estéreo", default=1.0, min=0.0, max=1.0, subtype='FACTOR')
-    pre_delay_ms: FloatProperty(name="Pre-Delay (ms)", default=20.0, min=0.0, max=200.0)
-    mix: FloatProperty(name="Mix", default=0.3, min=0.0, max=1.0, subtype='FACTOR')
+def _on_active_bus_index_change(self: "MixerProperties", context) -> None:
+    if len(self.buses) == 0:
+        return
+    if self.active_bus_index >= len(self.buses):
+        self.active_bus_index = len(self.buses) - 1
 
 
 # ------------------------------------------------------------------ #
-# Slot / Cadeia / Rack
+# Medidor (VU meter) — lido/escrito por meters.py
 # ------------------------------------------------------------------ #
-class EffectSlotProperties(PropertyGroup):
-    """Um efeito dentro da cadeia de inserts de um canal."""
+class MixerMeterProperties(PropertyGroup):
+    """Estado de um medidor de nível (canal ou master)."""
 
-    effect_type: EnumProperty(name="Tipo", items=EFFECT_TYPE_ITEMS, default="EQ")
+    peak_left: FloatProperty(name="Pico Esquerda", default=0.0, min=0.0)
+    peak_right: FloatProperty(name="Pico Direita", default=0.0, min=0.0)
+
+    peak_hold_left: FloatProperty(name="Hold Esquerda", default=0.0, min=0.0)
+    peak_hold_right: FloatProperty(name="Hold Direita", default=0.0, min=0.0)
+
+    rms_left: FloatProperty(name="RMS Esquerda", default=0.0, min=0.0)
+    rms_right: FloatProperty(name="RMS Direita", default=0.0, min=0.0)
+
+    clipping: BoolProperty(name="Clipping", default=False)
+
+
+# ------------------------------------------------------------------ #
+# Inserts (efeitos) — catálogo genérico (ver effects.py)
+# ------------------------------------------------------------------ #
+class MixerInsertParamProperties(PropertyGroup):
+    """Um parâmetro (nome/valor) genérico de um insert de efeito."""
+
+    name: StringProperty(name="Parâmetro", default="")
+    value: FloatProperty(name="Valor", default=0.0)
+
+
+class MixerInsertSlotProperties(PropertyGroup):
+    """Um slot de efeito na cadeia de inserts de uma faixa do mixer."""
+
+    effect_type: EnumProperty(
+        name="Tipo",
+        description="Tipo de efeito deste insert",
+        items=EFFECT_TYPE_ITEMS,
+        default="EQ",
+    )
     enabled: BoolProperty(name="Ativo", default=True)
     bypass: BoolProperty(name="Bypass", default=False)
 
-    # Um PointerProperty por tipo — só o que corresponde a `effect_type` é usado
-    chorus: PointerProperty(type=ChorusProperties)
-    compressor: PointerProperty(type=CompressorProperties)
-    delay: PointerProperty(type=DelayProperties)
-    distortion: PointerProperty(type=DistortionProperties)
-    eq: PointerProperty(type=EQProperties)
-    flanger: PointerProperty(type=FlangerProperties)
-    limiter: PointerProperty(type=LimiterProperties)
-    phaser: PointerProperty(type=PhaserProperties)
-    reverb: PointerProperty(type=ReverbProperties)
+    params: CollectionProperty(type=MixerInsertParamProperties)
 
-    def get_active_params(self):
-        """Retorna o PropertyGroup correspondente ao `effect_type` atual."""
-        return getattr(self, self.effect_type.lower())
+    def get_param(self, name: str, default: float = 0.0) -> float:
+        for p in self.params:
+            if p.name == name:
+                return p.value
+        return default
 
-
-class EffectsChainProperties(PropertyGroup):
-    """Cadeia de efeitos associada a um canal do Channel Rack."""
-
-    channel_index: IntProperty(name="Índice do Canal", default=-1)
-    slots: CollectionProperty(type=EffectSlotProperties)
-    active_slot_index: IntProperty(name="Slot Ativo", default=0, min=0)
+    def set_param(self, name: str, value: float) -> None:
+        for p in self.params:
+            if p.name == name:
+                p.value = value
+                return
+        p = self.params.add()
+        p.name = name
+        p.value = value
 
 
-class EffectsRackProperties(PropertyGroup):
-    """Estado global do módulo de Efeitos — anexado a context.scene.daw_effects."""
+# ------------------------------------------------------------------ #
+# Sends (envios auxiliares)
+# ------------------------------------------------------------------ #
+class MixerSendProperties(PropertyGroup):
+    """Um envio auxiliar de uma faixa para um bus (ver sends.py)."""
 
-    chains: CollectionProperty(type=EffectsChainProperties)
-    active_chain_index: IntProperty(name="Cadeia Ativa", default=0, min=0)
+    bus_name: StringProperty(name="Bus", default="")
+    level: FloatProperty(
+        name="Nível", default=0.0, min=0.0, max=1.0, subtype='FACTOR'
+    )
+    pre_fader: BoolProperty(name="Pré-Fader", default=False)
+    enabled: BoolProperty(name="Ativo", default=True)
+
+
+# ------------------------------------------------------------------ #
+# Faixa (channel strip)
+# ------------------------------------------------------------------ #
+class MixerTrackProperties(PropertyGroup):
+    """Uma faixa do mixer — espelho RNA de tracks.MixerTrack."""
+
+    name: StringProperty(name="Nome", default="Nova Faixa")
+
+    color: FloatVectorProperty(
+        name="Cor",
+        subtype='COLOR',
+        size=3,
+        min=0.0,
+        max=1.0,
+        default=get_color_by_index(0),
+    )
+
+    volume: FloatProperty(
+        name="Volume",
+        default=0.78,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
+        update=_on_track_volume_change,
+    )
+    pan: FloatProperty(
+        name="Pan",
+        default=0.0,
+        min=-1.0,
+        max=1.0,
+        subtype='FACTOR',
+        update=_on_track_pan_change,
+    )
+    mute: BoolProperty(name="Mudo", default=False, update=_on_track_mute_change)
+    solo: BoolProperty(name="Solo", default=False, update=_on_track_solo_change)
+
+    output_bus: StringProperty(name="Saída", default=MASTER_TRACK_NAME)
+
+    # Índice do canal correspondente no motor de áudio (ver utils.get_engine).
+    # -1 = faixa ainda não vinculada a um canal real (modo local/simulado).
+    source_index: IntProperty(name="Canal do Motor", default=-1, min=-1)
+
+    inserts: CollectionProperty(type=MixerInsertSlotProperties)
+    active_insert_index: IntProperty(name="Insert Ativo", default=0, min=0)
+
+    sends: CollectionProperty(type=MixerSendProperties)
+    active_send_index: IntProperty(name="Send Ativo", default=0, min=0)
+
+    meter: PointerProperty(type=MixerMeterProperties)
+
+    @property
+    def is_audible(self) -> bool:
+        """Mesma regra de tracks.MixerTrack.is_audible, aplicada à faixa RNA."""
+        mixer_props = getattr(self.id_data, "daw_mixer", None)
+        solo_active = any_solo_active(mixer_props) if mixer_props is not None else self.solo
+        return is_track_audible(self, solo_active)
+
+    def get_send(self, bus_name: str):
+        for send in self.sends:
+            if send.bus_name == bus_name:
+                return send
+        return None
+
+    def can_add_send(self) -> bool:
+        return len(self.sends) < MAX_SENDS_PER_TRACK
+
+
+# ------------------------------------------------------------------ #
+# Bus (Master + auxiliares)
+# ------------------------------------------------------------------ #
+class MixerBusProperties(PropertyGroup):
+    """Um bus de saída (Master ou auxiliar) — espelho RNA de routing.MixerBus."""
+
+    name: StringProperty(name="Nome", default="Bus")
+    volume: FloatProperty(
+        name="Volume", default=0.8, min=0.0, max=1.0, subtype='FACTOR'
+    )
+    mute: BoolProperty(name="Mudo", default=False)
+    is_master: BoolProperty(name="É o Master", default=False)
+
+    meter: PointerProperty(type=MixerMeterProperties)
+
+
+# ------------------------------------------------------------------ #
+# Estado global do Mixer — anexado a context.scene.daw_mixer
+# ------------------------------------------------------------------ #
+class MixerProperties(PropertyGroup):
+    """Estado completo do Mixer para uma cena."""
+
+    tracks: CollectionProperty(type=MixerTrackProperties)
+    active_track_index: IntProperty(
+        name="Faixa Ativa", default=0, min=0, update=_on_active_track_index_change
+    )
+
+    buses: CollectionProperty(type=MixerBusProperties)
+    active_bus_index: IntProperty(
+        name="Bus Ativo", default=0, min=0, update=_on_active_bus_index_change
+    )
+
+    master_volume: FloatProperty(
+        name="Volume Master",
+        default=0.85,
+        min=0.0,
+        max=2.0,
+        subtype='FACTOR',
+        update=_on_master_volume_change,
+    )
+
+    # --- Medição (usado por meters.py) ---
+    meters_enabled: BoolProperty(name="Medidores Ativos", default=True)
+    meter_decay_speed: FloatProperty(
+        name="Velocidade de Decaimento", default=8.0, min=0.1, max=60.0
+    )
+
+    # ------------------------------------------------------------------
+    # Conveniências
+    # ------------------------------------------------------------------
+    @property
+    def active_track(self):
+        if 0 <= self.active_track_index < len(self.tracks):
+            return self.tracks[self.active_track_index]
+        return None
+
+    @property
+    def active_bus(self):
+        if 0 <= self.active_bus_index < len(self.buses):
+            return self.buses[self.active_bus_index]
+        return None
+
+    @property
+    def channels(self):
+        """Alias esperado por meters.py (mixer_props.channels)."""
+        return self.tracks
+
+    @property
+    def master(self):
+        """Alias esperado por meters.py (mixer_props.master.meter / .volume).
+
+        O bus Master é sempre o índice 0 de `buses` (ver register.py, que
+        garante sua criação ao registrar o addon / carregar um arquivo).
+        """
+        if len(self.buses) > 0:
+            return self.buses[0]
+        return None
+
+    def any_solo_active(self) -> bool:
+        return any(t.solo for t in self.tracks)
 
 
 _ALL_CLASSES = [
-    ChorusProperties,
-    CompressorProperties,
-    DelayProperties,
-    DistortionProperties,
-    EQBandProperties,
-    EQProperties,
-    FlangerProperties,
-    LimiterProperties,
-    PhaserProperties,
-    ReverbProperties,
-    EffectSlotProperties,
-    EffectsChainProperties,
-    EffectsRackProperties,
+    MixerMeterProperties,
+    MixerInsertParamProperties,
+    MixerInsertSlotProperties,
+    MixerSendProperties,
+    MixerTrackProperties,
+    MixerBusProperties,
+    MixerProperties,
 ]
 
 
 def register() -> None:
     for cls in _ALL_CLASSES:
         bpy.utils.register_class(cls)
-    bpy.types.Scene.daw_effects = bpy.props.PointerProperty(type=EffectsRackProperties)
+    bpy.types.Scene.daw_mixer = bpy.props.PointerProperty(type=MixerProperties)
 
 
 def unregister() -> None:
-    if hasattr(bpy.types.Scene, "daw_effects"):
-        del bpy.types.Scene.daw_effects
+    if hasattr(bpy.types.Scene, "daw_mixer"):
+        del bpy.types.Scene.daw_mixer
     for cls in reversed(_ALL_CLASSES):
         bpy.utils.unregister_class(cls)
