@@ -58,7 +58,7 @@ class SETTINGS_PT_Audio(Panel):
         col.prop(audio_prefs, "samplerate", text="Sample Rate (Hz)")
 
         box = layout.box()
-        box.label(text="Buffer", icon='DCURVE')
+        box.label(text="Buffer", icon='FCURVE')
 
         col = box.column(align=True)
         col.prop(audio_prefs, "buffer_size", text="Tamanho do Buffer")
@@ -91,7 +91,7 @@ class SETTINGS_PT_UI(Panel):
 
         # === Tema ===
         box = layout.box()
-        box.label(text="Tema Visual", icon='APPEARANCE')
+        box.label(text="Tema Visual", icon='COLOR')
 
         row = box.row()
         row.prop(ui_prefs, "theme", text="Tema")
@@ -256,7 +256,7 @@ class SETTINGS_PT_About(Panel):
         layout = self.layout
 
         box = layout.box()
-        box.label(text="DAW Addon for Blender", icon='STUDIO')
+        box.label(text="DAW Addon for Blender", icon='BLENDER')
 
         col = box.column(align=True)
         col.label(text="Versão: 1.0.0")

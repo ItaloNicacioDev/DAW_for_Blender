@@ -76,7 +76,7 @@ class SAMPLER_PT_SampleSettings(Panel):
 
         # === Afinação ===
         box = layout.box()
-        box.label(text="Afinação", icon='MUSIC')
+        box.label(text="Afinação", icon='SOUND')
 
         col = box.column(align=True)
         col.prop(sample, "root_note", text="Nota Raiz")
@@ -157,7 +157,7 @@ class SAMPLER_PT_Slicing(Panel):
 
         # === Métodos de Slicing ===
         box = layout.box()
-        box.label(text="Métodos de Slicing", icon='KNIFE')
+        box.label(text="Métodos de Slicing", icon='MOD_EDGESPLIT')
 
         row = box.row(align=True)
         row.operator("sampler.slice_equal", text="Dividir (Igual)")

@@ -891,7 +891,7 @@ class DAW_PT_PianoRollPanel(bpy.types.Panel):
                 row.label(text=f"{len(ms.notes)} notas")
             layout.separator()
 
-        layout.operator("daw.open_piano_roll", icon='PIANO', text="Abrir Piano Roll ↗")
+        layout.operator("daw.open_piano_roll", icon='SOUND', text="Abrir Piano Roll ↗")
         layout.separator()
 
         box2 = layout.box()
