@@ -1,17 +1,100 @@
 bl_info = {
     "name": "Blender DAW",
     "author": "Italo Nicacio Dev ",
-    "version": (0, 16, 5, 'beta'),
+    "version": (0, 17, 0, 'beta'),
     "blender": (5, 0, 0),
     "location": "DAW Workspace",
     "description": "DAW completa integrada ao Blender",
     "category": "Audio",
-
 }
 
 import bpy
-from . ui   import panels, workspace, piano_roll, beat_grid
-from . core import register as core_register
+import importlib
+import traceback
+
+# ─────────────────────────────────────────────────────────────────
+#  UI "legada" (workspace, painéis simples, editores modais)
+# ─────────────────────────────────────────────────────────────────
+from .ui import panels, workspace, beat_grid
+from .ui import piano_roll as legacy_piano_roll
+
+# ─────────────────────────────────────────────────────────────────
+#  Motor de áudio / propriedades centrais da cena (scene.daw)
+# ─────────────────────────────────────────────────────────────────
+from .core import register as core_register
+
+# ─────────────────────────────────────────────────────────────────
+#  Módulos funcionais da DAW (daw/modules/*)
+#
+#  Cada módulo expõe register()/unregister() no seu __init__.py.
+#  A importação é feita de forma defensiva (importlib + try/except):
+#  se um módulo tiver um bug de import (ex.: um arquivo referenciando
+#  um nome que não existe), o restante da DAW continua funcionando
+#  em vez do addon inteiro falhar ao carregar no Blender.
+# ─────────────────────────────────────────────────────────────────
+_MODULE_NAMES = [
+    "settings",
+    "project",
+    "transport",
+    "timeline",
+    "mixer",
+    "channel_rack",
+    "patterns",
+    "piano_roll",
+    "instruments",
+    "sampler",
+    "effects",
+    "automation",
+    "metronome",
+    "recorder",
+    "render",
+    "export",
+    "playlist",
+    "browser",
+]
+
+_SUBMODULES = []  # preenchido em _import_submodules(): lista de (name, module | None)
+
+
+def _import_submodules():
+    _SUBMODULES.clear()
+    for name in _MODULE_NAMES:
+        try:
+            module = importlib.import_module(f".modules.{name}", package=__name__)
+        except Exception:
+            print(f"[DAW] ⚠ Falha ao importar o módulo '{name}' — ele ficará indisponível:")
+            traceback.print_exc()
+            module = None
+        _SUBMODULES.append((name, module))
+
+
+def _register_submodules():
+    for name, module in _SUBMODULES:
+        if module is None:
+            continue
+        func = getattr(module, "register", None)
+        if not callable(func):
+            print(f"[DAW] Módulo '{name}' ainda não implementa register() — pulando.")
+            continue
+        try:
+            func()
+        except Exception:
+            print(f"[DAW] ⚠ Falha ao registrar o módulo '{name}':")
+            traceback.print_exc()
+
+
+def _unregister_submodules():
+    for name, module in reversed(_SUBMODULES):
+        if module is None:
+            continue
+        func = getattr(module, "unregister", None)
+        if not callable(func):
+            continue
+        try:
+            func()
+        except Exception:
+            print(f"[DAW] ⚠ Falha ao desregistrar o módulo '{name}':")
+            traceback.print_exc()
 
 
 @bpy.app.handlers.persistent
@@ -32,11 +115,18 @@ def _install_template():
 
 
 def register():
+    # 1. UI legada (janela/workspace + editores modais próprios)
     panels.register()
     workspace.register()
-    piano_roll.register()
+    legacy_piano_roll.register()
     beat_grid.register()
+
+    # 2. Motor de áudio + propriedades centrais (scene.daw)
     core_register.register()
+
+    # 3. Módulos funcionais (transport, mixer, patterns, piano_roll, etc.)
+    _import_submodules()
+    _register_submodules()
 
     if on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(on_load_post)
@@ -48,7 +138,8 @@ def register():
     except Exception:
         pass
 
-    print("[DAW] Addon v0.3.0 registrado")
+    version_str = ".".join(str(v) for v in bl_info["version"])
+    print(f"[DAW] Addon v{version_str} registrado")
 
 
 def unregister():
@@ -69,8 +160,12 @@ def unregister():
 
     bpy.app.timers.register(_cleanup, first_interval=0.1)
 
+    # Ordem inversa do register()
+    _unregister_submodules()
+
     core_register.unregister()
+
     beat_grid.unregister()
-    piano_roll.unregister()
+    legacy_piano_roll.unregister()
     workspace.unregister()
     panels.unregister()
