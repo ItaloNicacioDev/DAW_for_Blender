@@ -12,7 +12,11 @@ import bpy
 # ──────────────────────────────────────────────
 class DAW_PT_TransportBar(bpy.types.Panel):
     bl_label = "Transport"
-    bl_idname = "DAW_PT_transport"
+    # NOTA: renomeado de "DAW_PT_transport" para evitar colisão de
+    # bl_idname com o painel equivalente em modules/transport/ui.py
+    # (DAW_PT_transport), que agora é a implementação completa de
+    # transporte usada na aba "DAW" da 3D Viewport.
+    bl_idname = "DAW_PT_transport_header_bar"
     bl_space_type = 'SEQUENCE_EDITOR'
     bl_region_type = 'HEADER'
     bl_options = {'HIDE_HEADER'}
@@ -112,7 +116,11 @@ class DAW_PT_ProjectInfo(bpy.types.Panel):
 # ──────────────────────────────────────────────
 class DAW_PT_MixerPanel(bpy.types.Panel):
     bl_label = "DAW Mixer"
-    bl_idname = "DAW_PT_mixer"
+    # NOTA: este painel era um placeholder ("Em desenvolvimento") e
+    # colidia com o bl_idname "DAW_PT_mixer" do painel completo em
+    # modules/mixer/ui.py. Renomeado e removido de `classes` abaixo —
+    # o módulo modules.mixer substitui esta funcionalidade.
+    bl_idname = "DAW_PT_mixer_legacy_placeholder"
     bl_space_type = 'NODE_EDITOR'
     bl_region_type = 'UI'
     bl_category = "DAW"
@@ -135,10 +143,11 @@ class DAW_PT_MixerPanel(bpy.types.Panel):
 # ──────────────────────────────────────────────
 #  Registro Isolado da UI
 # ──────────────────────────────────────────────
+# DAW_PT_MixerPanel não é registrado: era um placeholder substituído
+# pela implementação completa em modules/mixer.
 classes = [
     DAW_PT_TransportBar,
     DAW_PT_ProjectInfo,
-    DAW_PT_MixerPanel,
 ]
 
 
