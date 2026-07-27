@@ -15,8 +15,6 @@ import gpu
 import blf
 import math
 import struct
-import time
-import threading
 import aud
 from gpu_extras.batch import batch_for_shader
 from bpy.props import (BoolProperty, FloatProperty, IntProperty,
@@ -199,6 +197,12 @@ _SYNTH_MAP = {
 # Cache de sons compilados
 _sound_cache = {}
 
+# Mantém referência aos Handles em reprodução. Sem isso, o objeto Handle
+# retornado por Device.play() perde todas as referências assim que a
+# função termina e o Python o coleta (GC) — o que faz o Audaspace
+# interromper o som quase instantaneamente (efeito: "nenhum som toca").
+_active_handles = []
+
 def _get_sound(stype: str, vel: float = 1.0):
     key = (stype, round(vel, 2))
     if key not in _sound_cache:
@@ -235,7 +239,10 @@ def play_drum(stype: str, vel: float = 1.0):
         dev = _device()
         if dev:
             snd = _get_sound(stype, vel)
-            dev.play(snd)
+            handle = dev.play(snd)
+            _active_handles.append(handle)
+            if len(_active_handles) > 64:
+                del _active_handles[:len(_active_handles) - 64]
     except Exception as e:
         print(f"[BeatGrid] play_drum erro: {e}")
 
@@ -290,83 +297,87 @@ def _init_rows(state):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  SEQUENCER THREAD — playback em tempo real
+#  SEQUENCER — playback em tempo real via bpy.app.timers
+#
+#  IMPORTANTE: a implementação anterior rodava num threading.Thread
+#  separado e acessava bpy.context.scene / propriedades da cena a
+#  partir dessa thread. A API do Blender (bpy) NÃO é thread-safe:
+#  ler/escrever bpy.data ou bpy.context fora da thread principal não
+#  tem efeito garantido (o "current_step" nunca era atualizado de
+#  forma confiável na UI) e os sons nunca chegavam a ser disparados
+#  de forma consistente — daí o Beat Grid parecer "mudo" mesmo com o
+#  Play ativo. bpy.app.timers roda sempre na thread principal do
+#  Blender, então é o jeito correto/suportado de fazer um loop
+#  temporizado que mexe em dados da cena.
 # ═══════════════════════════════════════════════════════════════
 
-_seq_thread  = None
 _seq_running = False
+_seq_step    = 0
 
 
-def _seq_loop(state_ref):
-    """Thread de sequenciamento — dispara sons nos steps ativos."""
-    global _seq_running
-    step = 0
+def _seq_tick():
+    """Callback do bpy.app.timers — dispara sons do step atual e agenda o próximo."""
+    global _seq_running, _seq_step
 
-    while _seq_running:
-        try:
-            scene   = bpy.context.scene
-            bg      = scene.beat_grid
-            bpm     = bg.bpm
-            n_steps = bg.steps
-            swing   = bg.swing
+    if not _seq_running:
+        return None  # retornar None cancela o timer
 
-            # Duração de um step (semínima = 1 beat, step = 1/4 beat)
-            step_dur = 60.0 / bpm / 4.0
-
-            # Swing: steps ímpares atrasam ligeiramente
-            if step % 2 == 1:
-                swing_delay = step_dur * swing
-            else:
-                swing_delay = 0.0
-
-            # Atualiza step atual para o redraw
-            bg.current_step = step % n_steps
-
-            # Verifica se há solo ativo
-            has_solo = any(r.solo for r in bg.rows)
-
-            # Dispara sons das linhas ativas neste step
-            for row in bg.rows:
-                if row.muted:
-                    continue
-                if has_solo and not row.solo:
-                    continue
-                if row.get_step(step % n_steps):
-                    play_drum(row.drum_type, row.volume)
-
-            # Aguarda duração do step (com swing)
-            time.sleep(step_dur + swing_delay)
-            step = (step + 1) % n_steps
-
-        except Exception as e:
-            print(f"[BeatGrid] Seq error: {e}")
-            time.sleep(0.1)
-
-    # Reset ao parar
     try:
-        bpy.context.scene.beat_grid.current_step = -1
-    except Exception:
-        pass
+        scene   = bpy.context.scene
+        bg      = scene.beat_grid
+        bpm     = max(1.0, bg.bpm)
+        n_steps = max(1, bg.steps)
+        swing   = bg.swing
+
+        cur = _seq_step % n_steps
+
+        # Duração de um step (semínima = 1 beat, step = 1/4 beat)
+        step_dur = 60.0 / bpm / 4.0
+
+        # Swing: steps ímpares atrasam ligeiramente
+        swing_delay = step_dur * swing if cur % 2 == 1 else 0.0
+
+        # Atualiza step atual para o redraw
+        bg.current_step = cur
+
+        # Verifica se há solo ativo
+        has_solo = any(r.solo for r in bg.rows)
+
+        # Dispara sons das linhas ativas neste step
+        for row in bg.rows:
+            if row.muted:
+                continue
+            if has_solo and not row.solo:
+                continue
+            if row.get_step(cur):
+                play_drum(row.drum_type, row.volume)
+
+        _seq_step = (cur + 1) % n_steps
+        return max(0.001, step_dur + swing_delay)
+
+    except Exception as e:
+        print(f"[BeatGrid] Seq error: {e}")
+        return 0.1
 
 
 def start_sequencer():
-    global _seq_thread, _seq_running
+    global _seq_running, _seq_step
     if _seq_running:
         return
     _seq_running = True
-    scene_ref    = None  # acessado via bpy.context na thread
-    _seq_thread  = threading.Thread(target=_seq_loop,
-                                    args=(scene_ref,), daemon=True)
-    _seq_thread.start()
+    _seq_step    = 0
+    if not bpy.app.timers.is_registered(_seq_tick):
+        bpy.app.timers.register(_seq_tick, first_interval=0.0)
     print("[BeatGrid] Sequenciador iniciado")
 
 
 def stop_sequencer():
-    global _seq_running, _seq_thread
+    global _seq_running
     _seq_running = False
-    if _seq_thread:
-        _seq_thread.join(timeout=1.0)
-        _seq_thread = None
+    try:
+        bpy.context.scene.beat_grid.current_step = -1
+    except Exception:
+        pass
     print("[BeatGrid] Sequenciador parado")
 
 
@@ -828,6 +839,3 @@ def unregister():
         pass
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
-
-
-        #modulo incompleto
