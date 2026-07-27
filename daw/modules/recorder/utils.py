@@ -41,9 +41,16 @@ def get_sequencer(context):
 
 
 def create_sound_strip(context, filepath: str, channel: int, frame_start: int):
-    """Cria uma strip de áudio no sequencer."""
+    """Cria uma strip de áudio no sequencer.
+
+    A partir do Blender 4.4, `SequenceEditor.sequences` foi renomeado
+    para `SequenceEditor.strips` (breaking change do VSE). Tentamos o
+    nome novo primeiro e caímos para o antigo para manter compatibilidade
+    com versões anteriores.
+    """
     seq = get_sequencer(context)
-    strip = seq.sequences.new_sound(
+    strips = getattr(seq, 'strips', None) or seq.sequences
+    strip = strips.new_sound(
         name=f"Rec_{frame_start}",
         filepath=filepath,
         channel=channel,
