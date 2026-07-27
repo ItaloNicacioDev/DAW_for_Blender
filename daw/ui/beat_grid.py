@@ -828,3 +828,6 @@ def unregister():
         pass
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+
+
+        #modulo incompleto
