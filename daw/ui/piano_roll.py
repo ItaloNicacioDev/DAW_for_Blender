@@ -135,6 +135,9 @@ import math, struct, tempfile
 SAMPLE_RATE = 44100
 _aud_device  = None
 _note_cache: dict = {}
+_active_handles: list = []   # mantém referência aos Handles em reprodução
+                              # (sem isso o Python coleta o Handle e o som
+                              #  para de tocar quase instantaneamente)
 
 _INSTRUMENTS = {
     0: {"harmonics":[(1,1.0,0),(2,0.5,0.3),(3,0.25,0),(4,0.12,-0.2),(5,0.06,0.1),(6,0.03,0),(7,0.015,0.2)],
@@ -219,7 +222,13 @@ def _play_note_sound(midi: int, inst_id: int, dur: float = 0.6, vel: int = 100):
                     _write_wav_simple(tmp, samples)
                     snd = aud.Sound(tmp)
             _note_cache[key] = snd
-        dev.play(_note_cache[key])
+        handle = dev.play(_note_cache[key])
+        # Guarda o Handle vivo até o fim da reprodução: se nada referenciar
+        # o objeto retornado por dev.play(), o Python o coleta (GC) e o
+        # Audaspace interrompe o som quase imediatamente (som "mudo").
+        _active_handles.append(handle)
+        if len(_active_handles) > 64:
+            del _active_handles[:len(_active_handles) - 64]
     except Exception as e:
         print(f"[Piano] _play_note_sound: {e}")
 
