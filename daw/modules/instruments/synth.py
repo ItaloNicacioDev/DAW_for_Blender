@@ -280,7 +280,14 @@ def play_note(midi_note: int, instrument_id: int = 0,
                     wf.setnchannels(CHANNELS); wf.setsampwidth(2)
                     wf.setframerate(SAMPLE_RATE); wf.writeframes(pcm)
                 snd = aud.Sound(tmp)
-        dev.play(snd)
+        handle = dev.play(snd)
+        # Guarda o Handle em _play_handles: sem uma referência viva, o
+        # Python coleta o objeto Handle assim que a função retorna e o
+        # Audaspace para a reprodução quase instantaneamente — o som
+        # nunca chega a ser ouvido, mesmo com dev.play() "funcionando".
+        _play_handles.append(handle)
+        if len(_play_handles) > 64:
+            del _play_handles[:len(_play_handles) - 64]
 
     except Exception as e:
         print(f"[DAW Synth] Erro ao tocar nota {midi_note}: {e}")
