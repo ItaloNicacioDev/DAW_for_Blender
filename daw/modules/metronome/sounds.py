@@ -19,6 +19,10 @@ from .click import generate_click_pcm, SOUND_STYLES, SAMPLE_RATE
 
 _device: Optional["aud.Device"] = None
 _sound_cache: Dict[Tuple[str, bool], "aud.Sound"] = {}
+# Mantém referência aos Handles em reprodução (ver play_click) — sem isso
+# o Handle retornado por dev.play() é coletado pelo Python assim que a
+# função termina e o clique é cortado antes de ser ouvido.
+_active_handles: list = []
 
 
 def _get_device() -> Optional["aud.Device"]:
@@ -76,6 +80,10 @@ def play_click(style: str = "CLICK", accent: bool = False, volume: float = 0.8) 
             handle.volume = max(0.0, min(1.0, volume))
         except Exception:
             pass
+
+        _active_handles.append(handle)
+        if len(_active_handles) > 64:
+            del _active_handles[:len(_active_handles) - 64]
 
     except Exception as e:
         print(f"[DAW Metronome] Erro ao tocar clique ({style}, accent={accent}): {e}")
