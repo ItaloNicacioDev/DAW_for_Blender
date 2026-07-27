@@ -7,14 +7,14 @@ from __future__ import annotations
 import os
 
 from .audio import render_mixdown, normalize_wav_file
-from .utils import sanitize_filename, refresh_stem_list
+from .utils import sanitize_filename, refresh_stem_list, get_all_strips
 
 
 def _get_sound_strips(context):
     seq = context.scene.sequence_editor
     if seq is None:
         return []
-    return [s for s in seq.sequences_all if s.type == 'SOUND']
+    return [s for s in get_all_strips(seq) if s.type == 'SOUND']
 
 
 def _solo_channel(strips, channel_index: int) -> dict:

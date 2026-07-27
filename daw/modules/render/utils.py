@@ -13,6 +13,24 @@ from pathlib import Path
 import bpy
 
 
+def get_all_strips(seq):
+    """Retorna todas as strips do sequencer (recursivo), compatível com
+    qualquer versão do Blender.
+
+    A partir do Blender 4.4, a API do VSE foi renomeada:
+    `SequenceEditor.sequences_all` -> `SequenceEditor.strips_all`.
+    Esta função tenta primeiro o nome novo e cai para o antigo se
+    necessário, para funcionar tanto em 4.5+ quanto em versões mais
+    antigas.
+    """
+    if seq is None:
+        return []
+    strips = getattr(seq, 'strips_all', None)
+    if strips is not None:
+        return strips
+    return getattr(seq, 'sequences_all', [])
+
+
 def ensure_render_dir(context) -> str:
     """Garante que o diretório de saída de render exista e retorna o caminho absoluto."""
     settings = context.scene.daw_render_settings
@@ -43,7 +61,7 @@ def get_sequencer_channels(context) -> list[tuple[int, str]]:
         return []
 
     channels: dict[int, str] = {}
-    for strip in seq.sequences_all:
+    for strip in get_all_strips(seq):
         if strip.type == 'SOUND':
             channels.setdefault(strip.channel, strip.name)
 
