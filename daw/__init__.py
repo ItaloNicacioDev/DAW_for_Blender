@@ -2,7 +2,7 @@ bl_info = {
     "name": "Blender DAW",
     "author": "Italo Nicacio Dev ",
     "version": (0, 17, 0, 'beta'),
-    "blender": (5, 0, 0),
+    "blender": (4, 5, 0),
     "location": "DAW Workspace",
     "description": "DAW completa integrada ao Blender",
     "category": "Audio",
