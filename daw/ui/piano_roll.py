@@ -159,6 +159,64 @@ _INSTRUMENTS = {
 }
 
 
+import os
+
+# ═══════════════════════════════════════════════════════════════
+#  SAMPLES REAIS (opcional) — daw/assets/samples/instruments/
+#
+#  Se existir um .wav pra um instrumento, ele é usado no lugar da
+#  síntese. Se não existir (ex: vibraphone/choir), cai automaticamente
+#  para o sintetizador abaixo — nenhum slot fica mudo.
+# ═══════════════════════════════════════════════════════════════
+
+_SAMPLES_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "assets", "samples", "instruments",
+)
+
+_SAMPLE_FILENAMES = {
+    0: "0_acoustic_piano.wav",
+    1: "1_electric_piano.wav",
+    2: "2_strings.wav",
+    3: "3_organ.wav",
+    4: "4_bass.wav",
+    5: "5_synth_lead.wav",
+    6: "6_vibraphone.wav",
+    7: "7_choir.wav",
+}
+
+# Nota MIDI em que cada sample foi gravado (C4 = 60). Se a nota que você
+# baixou não for exatamente essa, ajuste aqui para afinar o pitch-shift.
+_SAMPLE_ROOT_NOTE = {i: 60 for i in _SAMPLE_FILENAMES}
+
+_sample_cache: dict = {}   # inst_id -> aud.Sound | False (tentado e ausente)
+
+
+def _load_instrument_sample(inst_id: int):
+    """Carrega (com cache) o .wav do instrumento, se existir. Retorna None
+    se não houver arquivo para esse slot (uso do sintetizador)."""
+    if inst_id in _sample_cache:
+        cached = _sample_cache[inst_id]
+        return cached if cached is not False else None
+
+    filename = _SAMPLE_FILENAMES.get(inst_id)
+    path = os.path.join(_SAMPLES_DIR, filename) if filename else None
+
+    if not path or not os.path.isfile(path):
+        _sample_cache[inst_id] = False
+        return None
+
+    try:
+        import aud
+        snd = aud.Sound(path)
+        _sample_cache[inst_id] = snd
+        return snd
+    except Exception as e:
+        print(f"[Piano] Falha ao carregar sample '{path}': {e}")
+        _sample_cache[inst_id] = False
+        return None
+
+
 def _midi_to_freq(n): return 440.0 * (2.0 ** ((n - 69) / 12.0))
 def _cents(c): return 2.0 ** (c / 1200.0)
 
@@ -208,6 +266,20 @@ def _play_note_sound(midi: int, inst_id: int, dur: float = 0.6, vel: int = 100):
         dev = _get_aud_device()
         if not dev:
             return
+
+        # 1) Tenta sample real (com pitch-shift a partir da nota raiz)
+        sample = _load_instrument_sample(inst_id)
+        if sample is not None:
+            handle = dev.play(sample)
+            root = _SAMPLE_ROOT_NOTE.get(inst_id, 60)
+            handle.pitch = 2.0 ** ((midi - root) / 12.0)
+            handle.volume = max(0.0, min(1.0, vel / 127.0))
+            _active_handles.append(handle)
+            if len(_active_handles) > 64:
+                del _active_handles[:len(_active_handles) - 64]
+            return
+
+        # 2) Sem sample para esse slot -> síntese (comportamento original)
         key = (midi, inst_id, round(dur, 2))
         if key not in _note_cache:
             pcm = _synth_note(midi, inst_id, dur, vel)

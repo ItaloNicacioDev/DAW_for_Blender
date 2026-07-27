@@ -234,15 +234,81 @@ def _device():
             print(f"[BeatGrid] aud.Device falhou: {e}")
     return _aud_device
 
+# ═══════════════════════════════════════════════════════════════
+#  SAMPLES REAIS (opcional) — daw/assets/samples/drums/
+#
+#  Se existir um .wav pro tipo de tambor, ele é usado no lugar da
+#  síntese. Tipos sem arquivo (ex: "ride") caem automaticamente para
+#  o sintetizador acima — nenhuma linha do Beat Grid fica muda.
+# ═══════════════════════════════════════════════════════════════
+
+import os
+
+_DRUM_SAMPLES_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "assets", "samples", "drums",
+)
+
+_DRUM_SAMPLE_FILENAMES = {
+    "kick":    "kick.wav",
+    "clap":    "clap.wav",
+    "hihat":   "hihat.wav",
+    "snare":   "snare.wav",
+    "openhat": "openhat.wav",
+    "ride":    "ride.wav",
+    "tom":     "tom.wav",
+    "perc":    "perc.wav",
+}
+
+_drum_sample_cache: dict = {}   # stype -> aud.Sound | False (tentado e ausente)
+
+
+def _load_drum_sample(stype: str):
+    """Carrega (com cache) o .wav do tambor, se existir. Retorna None se
+    não houver arquivo para esse tipo (uso do sintetizador)."""
+    if stype in _drum_sample_cache:
+        cached = _drum_sample_cache[stype]
+        return cached if cached is not False else None
+
+    filename = _DRUM_SAMPLE_FILENAMES.get(stype)
+    path = os.path.join(_DRUM_SAMPLES_DIR, filename) if filename else None
+
+    if not path or not os.path.isfile(path):
+        _drum_sample_cache[stype] = False
+        return None
+
+    try:
+        snd = aud.Sound(path)
+        _drum_sample_cache[stype] = snd
+        return snd
+    except Exception as e:
+        print(f"[BeatGrid] Falha ao carregar sample '{path}': {e}")
+        _drum_sample_cache[stype] = False
+        return None
+
+
 def play_drum(stype: str, vel: float = 1.0):
     try:
         dev = _device()
-        if dev:
-            snd = _get_sound(stype, vel)
-            handle = dev.play(snd)
+        if not dev:
+            return
+
+        # 1) Tenta sample real
+        sample = _load_drum_sample(stype)
+        if sample is not None:
+            handle = dev.play(sample)
+            handle.volume = max(0.0, min(1.0, vel))
             _active_handles.append(handle)
             if len(_active_handles) > 64:
                 del _active_handles[:len(_active_handles) - 64]
+            return
+
+        # 2) Sem sample para esse tipo -> síntese (comportamento original)
+        snd = _get_sound(stype, vel)
+        handle = dev.play(snd)
+        _active_handles.append(handle)
+        if len(_active_handles) > 64:
+            del _active_handles[:len(_active_handles) - 64]
     except Exception as e:
         print(f"[BeatGrid] play_drum erro: {e}")
 
@@ -838,4 +904,4 @@ def unregister():
     except Exception:
         pass
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        bpy.utils.unregister_class(cls) 
