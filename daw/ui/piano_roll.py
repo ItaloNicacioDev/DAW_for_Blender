@@ -1,5 +1,5 @@
 """
-ui/piano_roll.py — v5
+ui/piano_roll.py — v6
 
 Piano Roll com som e integração completa com o Sequencer:
 - Som ao desenhar nota (síntese interna via aud)
@@ -10,6 +10,7 @@ Piano Roll com som e integração completa com o Sequencer:
 - Toolbar: Desenhar / Selecionar / Apagar / Pan
 - Velocity lane
 - Janela flutuante
+- [FIX v6] Scheduler de notas: dispara sons reais na timeline ao dar play
 """
 
 import bpy
@@ -295,9 +296,6 @@ def _play_note_sound(midi: int, inst_id: int, dur: float = 0.6, vel: int = 100):
                     snd = aud.Sound(tmp)
             _note_cache[key] = snd
         handle = dev.play(_note_cache[key])
-        # Guarda o Handle vivo até o fim da reprodução: se nada referenciar
-        # o objeto retornado por dev.play(), o Python o coleta (GC) e o
-        # Audaspace interrompe o som quase imediatamente (som "mudo").
         _active_handles.append(handle)
         if len(_active_handles) > 64:
             del _active_handles[:len(_active_handles) - 64]
@@ -368,6 +366,95 @@ def _upsert_midi_strip(context, strip_name: str, n_notes: int):
 
     strip.color = (0.08, 0.45, 0.26)
     print(f"[Piano] Strip '{strip_name}' criado no canal {ch} ✅")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SCHEDULER DE NOTAS NA TIMELINE  [FIX v6]
+#
+#  Problema original: as notas ficavam em PianoRollState.notes mas
+#  nenhum código as lia durante o play da timeline do Blender.
+#  O playhead se movia visualmente, mas nada disparava sons.
+#
+#  Solução: bpy.app.handlers.frame_change_post dispara a cada frame
+#  que o Blender avança (manualmente OU em play). O handler converte
+#  o frame atual em beats e verifica quais notas começam nesse beat.
+#  Para evitar disparos duplicados no mesmo beat, mantemos um set de
+#  notas já tocadas que é resetado quando a posição volta (loop/rewind).
+# ═══════════════════════════════════════════════════════════════
+
+# Conjunto de (strip_name_ou_"", note_idx) já tocados nesta passagem.
+# Resetado quando o playhead volta (loop ou rewind).
+_triggered_notes: set = set()
+_last_playhead_beat: float = -1.0
+
+
+def _frame_to_beat(scene) -> float:
+    """Converte frame atual em beats, usando BPM do transport se disponível."""
+    fps = scene.render.fps
+    frame = scene.frame_current
+    # Tenta pegar BPM do beat_grid (única fonte de BPM por enquanto)
+    try:
+        bpm = scene.beat_grid.bpm
+    except Exception:
+        bpm = 120.0
+    seconds = frame / fps
+    return seconds * (bpm / 60.0)
+
+
+def _piano_roll_frame_handler(scene):
+    """
+    Handler de frame_change_post: dispara sons das notas do Piano Roll
+    cuja posição de início coincide com o beat atual da timeline.
+    """
+    global _triggered_notes, _last_playhead_beat
+
+    # Só atua quando o Blender está em playback (is_frame_changing garante
+    # que não executamos em frames setados manualmente pelo usuário)
+    if not bpy.context.screen or not bpy.context.screen.is_animation_playing:
+        return
+
+    state = scene.piano_roll
+    current_beat = _frame_to_beat(scene)
+
+    # Detecta rewind / loop: reseta notas disparadas
+    if current_beat < _last_playhead_beat - 0.5:
+        _triggered_notes.clear()
+    _last_playhead_beat = current_beat
+
+    # Janela de tolerância: um beat_window de meio step (1/8 beat = 1/32 nota)
+    # para não perder notas por imprecisão de frame rate
+    try:
+        fps = scene.render.fps
+        bpm = scene.beat_grid.bpm
+    except Exception:
+        fps = 24
+        bpm = 120.0
+    beat_per_frame = bpm / 60.0 / fps
+    window = beat_per_frame * 1.5   # margem de 1.5 frames
+
+    inst_id = int(state.instrument)
+
+    # Itera sobre todos os strips MIDI registrados
+    for ms in state.midi_strips:
+        for i, note in enumerate(ms.notes):
+            key = (ms.strip_name, i)
+            if key in _triggered_notes:
+                continue
+            # Nota começa dentro da janela atual?
+            if note.start <= current_beat < note.start + window:
+                dur = max(note.length * (60.0 / bpm), 0.05)
+                _play_note_sound(note.pitch, inst_id, dur, note.velocity)
+                _triggered_notes.add(key)
+
+    # Também itera sobre notas soltas (sem strip associado)
+    for i, note in enumerate(state.notes):
+        key = ("__global__", i)
+        if key in _triggered_notes:
+            continue
+        if note.start <= current_beat < note.start + window:
+            dur = max(note.length * (60.0 / bpm), 0.05)
+            _play_note_sound(note.pitch, inst_id, dur, note.velocity)
+            _triggered_notes.add(key)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -575,7 +662,11 @@ def _get_playhead_beat(context):
     except Exception:
         pass
     fps = context.scene.render.fps
-    return (context.scene.frame_current / fps) * (120.0 / 60.0)
+    try:
+        bpm = context.scene.beat_grid.bpm
+    except Exception:
+        bpm = 120.0
+    return (context.scene.frame_current / fps) * (bpm / 60.0)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1047,8 +1138,15 @@ def register():
         except Exception: pass
         bpy.utils.register_class(cls)
     bpy.types.Scene.piano_roll = bpy.props.PointerProperty(type=PianoRollState)
+
+    # Timer de redraw
     if not bpy.app.timers.is_registered(_pr_redraw):
         bpy.app.timers.register(_pr_redraw, persistent=True)
+
+    # [FIX v6] Registra o scheduler de notas na timeline
+    if _piano_roll_frame_handler not in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.append(_piano_roll_frame_handler)
+
     wm = bpy.context.window_manager
     kc = wm.keyconfigs.addon
     if kc:
@@ -1059,6 +1157,10 @@ def register():
 
 
 def unregister():
+    # [FIX v6] Remove o scheduler da timeline
+    if _piano_roll_frame_handler in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.remove(_piano_roll_frame_handler)
+
     for km, kmi in addon_keymaps:
         km.keymap_items.remove(kmi)
     addon_keymaps.clear()
