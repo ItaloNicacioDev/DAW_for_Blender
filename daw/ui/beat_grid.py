@@ -8,6 +8,13 @@ Inspirado no Beat+Bassline do FL Studio:
 - Playback em loop com BPM sincronizado
 - Botões de mute/solo por linha
 - Abre como janela flutuante
+
+[FIX v2]
+- start_sequencer() agora é chamado também pelo handler frame_change_post
+  quando a timeline do Blender começa a rodar — Beat Grid sincroniza com play global
+- _add_beat_strip() usa API correta para Blender 4.x e 5.x com fallback robusto
+  e exibe mensagem de erro na UI quando falha (em vez de apenas console)
+- stop_sequencer() é chamado quando a timeline para
 """
 
 import bpy
@@ -99,10 +106,8 @@ def _make_kick(dur=0.45, vel=1.0):
     for i in range(n):
         t   = i / SAMPLE_RATE
         env = _env(i, n, 0.001, 0.05, 0.0, 0.95)
-        # Freq cai de 180 → 40Hz
         freq = 180 * math.exp(-t * 18) + 40
         s    = math.sin(2 * math.pi * freq * t)
-        # Clique transiente
         click = math.exp(-t * 300) * 0.6
         out.append((s * 0.85 + click * 0.15) * env * vel)
     return _pack(out)
@@ -114,7 +119,6 @@ def _make_snare(dur=0.20, vel=1.0):
     for i in range(n):
         t   = i / SAMPLE_RATE
         env = _env(i, n, 0.001, 0.02, 0.3, 0.7)
-        # Tom + noise
         tone  = math.sin(2 * math.pi * 200 * t) * 0.4
         noise = (rng.random() * 2 - 1) * 0.6
         out.append((tone + noise) * env * vel)
@@ -127,7 +131,6 @@ def _make_hihat(dur=0.08, vel=1.0):
     for i in range(n):
         env = _env(i, n, 0.001, 0.01, 0.0, 0.99)
         noise = (rng.random() * 2 - 1)
-        # Passa-alta simulado: subtrai versão suavizada
         out.append(noise * env * 0.65 * vel)
     return _pack(out)
 
@@ -137,7 +140,6 @@ def _make_clap(dur=0.15, vel=1.0):
     out = []
     for i in range(n):
         t   = i / SAMPLE_RATE
-        # Três bursts rápidos
         b1  = math.exp(-t * 120) * (rng.random() * 2 - 1)
         b2  = math.exp(-(t - 0.012) * 100) * (rng.random() * 2 - 1) if t > 0.012 else 0
         b3  = math.exp(-(t - 0.024) * 80)  * (rng.random() * 2 - 1) if t > 0.024 else 0
@@ -236,10 +238,6 @@ def _device():
 
 # ═══════════════════════════════════════════════════════════════
 #  SAMPLES REAIS (opcional) — daw/assets/samples/drums/
-#
-#  Se existir um .wav pro tipo de tambor, ele é usado no lugar da
-#  síntese. Tipos sem arquivo (ex: "ride") caem automaticamente para
-#  o sintetizador acima — nenhuma linha do Beat Grid fica muda.
 # ═══════════════════════════════════════════════════════════════
 
 import os
@@ -260,12 +258,10 @@ _DRUM_SAMPLE_FILENAMES = {
     "perc":    "perc.wav",
 }
 
-_drum_sample_cache: dict = {}   # stype -> aud.Sound | False (tentado e ausente)
+_drum_sample_cache: dict = {}
 
 
 def _load_drum_sample(stype: str):
-    """Carrega (com cache) o .wav do tambor, se existir. Retorna None se
-    não houver arquivo para esse tipo (uso do sintetizador)."""
     if stype in _drum_sample_cache:
         cached = _drum_sample_cache[stype]
         return cached if cached is not False else None
@@ -303,7 +299,7 @@ def play_drum(stype: str, vel: float = 1.0):
                 del _active_handles[:len(_active_handles) - 64]
             return
 
-        # 2) Sem sample para esse tipo -> síntese (comportamento original)
+        # 2) Sem sample -> síntese
         snd = _get_sound(stype, vel)
         handle = dev.play(snd)
         _active_handles.append(handle)
@@ -323,7 +319,6 @@ class BeatRow(bpy.types.PropertyGroup):
     muted:     BoolProperty(default=False)
     solo:      BoolProperty(default=False)
     volume:    FloatProperty(default=1.0, min=0.0, max=1.0)
-    # 16 steps como booleans individuais
     s00: BoolProperty(default=False); s01: BoolProperty(default=False)
     s02: BoolProperty(default=False); s03: BoolProperty(default=False)
     s04: BoolProperty(default=False); s05: BoolProperty(default=False)
@@ -350,10 +345,11 @@ class BeatGridState(bpy.types.PropertyGroup):
     playing:     BoolProperty(default=False)
     steps:       IntProperty(default=16, min=4, max=32, name="Steps")
     swing:       FloatProperty(default=0.0, min=0.0, max=0.5, name="Swing")
+    # [FIX v2] Mensagem de erro do strip visível na UI
+    strip_error: StringProperty(default="")
 
 
 def _init_rows(state):
-    """Popula com os instrumentos padrão se ainda estiver vazio."""
     if len(state.rows) > 0:
         return
     for inst in DEFAULT_INSTRUMENTS:
@@ -365,16 +361,9 @@ def _init_rows(state):
 # ═══════════════════════════════════════════════════════════════
 #  SEQUENCER — playback em tempo real via bpy.app.timers
 #
-#  IMPORTANTE: a implementação anterior rodava num threading.Thread
-#  separado e acessava bpy.context.scene / propriedades da cena a
-#  partir dessa thread. A API do Blender (bpy) NÃO é thread-safe:
-#  ler/escrever bpy.data ou bpy.context fora da thread principal não
-#  tem efeito garantido (o "current_step" nunca era atualizado de
-#  forma confiável na UI) e os sons nunca chegavam a ser disparados
-#  de forma consistente — daí o Beat Grid parecer "mudo" mesmo com o
-#  Play ativo. bpy.app.timers roda sempre na thread principal do
-#  Blender, então é o jeito correto/suportado de fazer um loop
-#  temporizado que mexe em dados da cena.
+#  bpy.app.timers roda sempre na thread principal do Blender, então
+#  é o jeito correto/suportado de fazer um loop temporizado que mexe
+#  em dados da cena.
 # ═══════════════════════════════════════════════════════════════
 
 _seq_running = False
@@ -397,19 +386,15 @@ def _seq_tick():
 
         cur = _seq_step % n_steps
 
-        # Duração de um step (semínima = 1 beat, step = 1/4 beat)
         step_dur = 60.0 / bpm / 4.0
 
         # Swing: steps ímpares atrasam ligeiramente
         swing_delay = step_dur * swing if cur % 2 == 1 else 0.0
 
-        # Atualiza step atual para o redraw
         bg.current_step = cur
 
-        # Verifica se há solo ativo
         has_solo = any(r.solo for r in bg.rows)
 
-        # Dispara sons das linhas ativas neste step
         for row in bg.rows:
             if row.muted:
                 continue
@@ -445,6 +430,46 @@ def stop_sequencer():
     except Exception:
         pass
     print("[BeatGrid] Sequenciador parado")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SINCRONIZAÇÃO COM A TIMELINE DO BLENDER  [FIX v2]
+#
+#  Problema original: o Beat Grid só iniciava quando o usuário
+#  clicava no botão PLAY interno da janela flutuante. Apertar
+#  play na timeline do Blender não fazia nada.
+#
+#  Solução: dois handlers — playback_pre detecta início do play
+#  da timeline e inicia o sequenciador; frame_change_post detecta
+#  quando a timeline para (is_animation_playing == False após
+#  ter estado True) e para o sequenciador.
+# ═══════════════════════════════════════════════════════════════
+
+_was_playing = False
+
+
+def _beat_grid_playback_pre(scene):
+    """
+    Handler de render_pre / frame_change_pre:
+    quando a timeline começa a tocar, inicia o sequenciador.
+    """
+    global _was_playing
+    try:
+        is_playing = bpy.context.screen and bpy.context.screen.is_animation_playing
+        if is_playing and not _was_playing:
+            # Timeline acabou de iniciar
+            bg = scene.beat_grid
+            if len(bg.rows) > 0:  # só inicia se Beat Grid tem linhas configuradas
+                bg.playing = True
+                start_sequencer()
+        elif not is_playing and _was_playing:
+            # Timeline parou
+            bg = scene.beat_grid
+            bg.playing = False
+            stop_sequencer()
+        _was_playing = bool(is_playing)
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -503,10 +528,7 @@ def _draw_beat_grid(context):
     _rect(0, ty, W, TOOLBAR_H, C['toolbar'])
     _line(0, ty, W, ty, C['separator'])
 
-    # BPM
     _txt(f"BPM: {bg.bpm:.0f}", 10, ty + 12, 13, C['text'])
-
-    # Steps
     _txt(f"Steps: {n_steps}", 120, ty + 12, 12, C['text_dim'])
 
     # Play/Stop button
@@ -516,8 +538,11 @@ def _draw_beat_grid(context):
     label = "■ STOP" if bg.playing else "▶ PLAY"
     _txt(label, pb_x + 8, pb_y + 7, 11, C['text'])
 
-    # Swing
     _txt(f"Swing: {bg.swing:.0%}", W - 120, ty + 12, 11, C['text_dim'])
+
+    # [FIX v2] Mostra erro de strip na UI se houver
+    if bg.strip_error:
+        _txt(f"⚠ {bg.strip_error[:40]}", W // 2 - 100, ty - 14, 9, (1.0, 0.4, 0.2, 1.0))
 
     # ── Header (numeração dos steps) ─────────────────────────
     hy = H - TOOLBAR_H - HEADER_H
@@ -573,17 +598,14 @@ def _draw_beat_grid(context):
 
             _rect(sx, ry + 3, sw, STEP_H - 6, col)
 
-            # Borda superior nos ativos
             if active:
                 _rect(sx, ry + STEP_H - 7, sw, 3, C['step_on2'])
 
-            # Separador de beat (a cada 4 steps)
             if si % 4 == 0 and si > 0:
                 _line(sx - 1, ry, sx - 1, ry + STEP_H, C['beat_line'])
             elif si % 2 == 0 and si > 0:
                 _line(sx - 1, ry + 4, sx - 1, ry + STEP_H - 4, C['group_line'])
 
-        # Linha separadora inferior
         _line(0, ry, W, ry, C['separator'])
 
     gpu.state.blend_set('NONE')
@@ -594,7 +616,6 @@ def _draw_beat_grid(context):
 # ═══════════════════════════════════════════════════════════════
 
 def _hit_test(mx, my, region, bg):
-    """Retorna (tipo, row_idx, step_idx) do clique."""
     W, H = region.width, region.height
     n_rows   = len(bg.rows)
     n_steps  = bg.steps
@@ -602,33 +623,26 @@ def _hit_test(mx, my, region, bg):
     grid_top = H - TOOLBAR_H - HEADER_H
     step_w   = (W - LABEL_W - BTN_SIDE * 2 - 8) / n_steps
 
-    # Toolbar
     ty = H - TOOLBAR_H
     if my >= ty:
-        # Play/Stop
         pb_x = W // 2 - 30
         if pb_x <= mx <= pb_x + 58 and ty + 6 <= my <= ty + 32:
             return ('PLAYSTOP', -1, -1)
-        # BPM scroll será tratado no modal
         if 10 <= mx <= 100 and ty + 6 <= my <= ty + 26:
             return ('BPM', -1, -1)
         return ('TOOLBAR', -1, -1)
 
-    # Linhas
     for ri in range(n_rows):
         ry = grid_top - (ri + 1) * row_h + ROW_PAD // 2
         if not (ry <= my <= ry + STEP_H):
             continue
 
         btn_y = ry + (STEP_H - BTN_SIDE) // 2
-        # Mute
         if LABEL_W + 2 <= mx <= LABEL_W + 2 + BTN_SIDE and btn_y <= my <= btn_y + BTN_SIDE:
             return ('MUTE', ri, -1)
-        # Solo
         if LABEL_W + BTN_SIDE + 4 <= mx <= LABEL_W + BTN_SIDE * 2 + 4 and btn_y <= my <= btn_y + BTN_SIDE:
             return ('SOLO', ri, -1)
 
-        # Steps
         step_start = LABEL_W + BTN_SIDE * 2
         if mx >= step_start:
             si = int((mx - step_start) / step_w)
@@ -653,48 +667,108 @@ def _beat_grid_redraw():
     return 1 / 30
 
 
-def _add_beat_strip(context):
-    """Cria ou atualiza um strip COLOR no Sequencer representando o padrão de bateria."""
-    try:
-        scene = context.scene
-        seq   = scene.sequence_editor_create()
-        bg    = scene.beat_grid
-        name  = "BeatGrid"
-        fps   = scene.render.fps
-        bpm   = bg.bpm
-        n_steps = bg.steps
-        # Duração total: n_steps * (1 beat / 4) em frames
-        beat_frames = int((60.0 / bpm) * fps)
-        total_frames = int(beat_frames * n_steps / 4)
+# ═══════════════════════════════════════════════════════════════
+#  CRIAR STRIP NO SEQUENCER  [FIX v2]
+#
+#  Problema original:
+#  1. Blender 4.x usa frame_end; Blender 5.x usa length.
+#     O código tentava só uma API e falhava silenciosamente.
+#  2. Erros iam apenas para o console — usuário não sabia.
+#
+#  Solução:
+#  - Testa 3 formas de criar o strip (length / frame_end / sequences)
+#  - Salva mensagem de erro em bg.strip_error (exibida na UI)
+#  - Remove strip antigo antes de recriar (garante canal correto)
+# ═══════════════════════════════════════════════════════════════
 
-        # Remove strip antigo se existir
+def _add_beat_strip(context):
+    """Cria ou recria o strip COLOR no Sequencer representando o padrão de bateria."""
+    scene = context.scene
+    bg    = scene.beat_grid
+    bg.strip_error = ""  # limpa erro anterior
+
+    try:
+        seq = scene.sequence_editor_create()
+        name = "BeatGrid"
+        fps  = scene.render.fps
+        bpm  = max(1.0, bg.bpm)
+        n_steps = bg.steps
+
+        # Duração total: n_steps * (1 beat / 4) em frames
+        beat_frames  = (60.0 / bpm) * fps
+        total_frames = max(1, int(beat_frames * n_steps / 4))
+
+        # ── Remove strip antigo se existir ──
+        strips_attr = getattr(seq, 'strips', None) or getattr(seq, 'sequences_all', [])
         try:
-            strips = getattr(seq, 'strips', None) or getattr(seq, 'sequences_all', [])
-            for s in list(strips):
+            for s in list(strips_attr):
                 if s.name == name:
-                    try: seq.strips.remove(s)
-                    except: pass
+                    try:
+                        seq.strips.remove(s)
+                    except AttributeError:
+                        try:
+                            seq.sequences.remove(s)
+                        except Exception:
+                            pass
         except Exception:
             pass
 
+        # ── Encontra canal livre ──
+        try:
+            used = {s.channel for s in (getattr(seq, 'strips', None) or [])}
+        except Exception:
+            used = set()
+        ch = 1
+        while ch in used:
+            ch += 1
+
         start = scene.frame_current
-        # Blender 5.1 API
+        strip = None
+        err_msgs = []
+
+        # Tentativa 1: API Blender 5.x (length=)
         try:
             strip = seq.strips.new_effect(
-                name=name, type='COLOR', channel=1,
+                name=name, type='COLOR', channel=ch,
                 frame_start=start, length=total_frames)
-        except TypeError:
+        except TypeError as e:
+            err_msgs.append(f"API5: {e}")
+        except AttributeError as e:
+            err_msgs.append(f"strips: {e}")
+
+        # Tentativa 2: API Blender 4.x (frame_end=)
+        if strip is None:
             try:
                 strip = seq.strips.new_effect(
-                    name=name, type='COLOR', channel=1,
+                    name=name, type='COLOR', channel=ch,
                     frame_start=start, frame_end=start + total_frames)
             except Exception as e:
-                print(f"[BeatGrid] Strip: {e}")
-                return
+                err_msgs.append(f"API4: {e}")
+
+        # Tentativa 3: sequences (API legada)
+        if strip is None:
+            try:
+                strip = seq.sequences.new_effect(
+                    name=name, type='COLOR', channel=ch,
+                    frame_start=start, frame_end=start + total_frames)
+            except Exception as e:
+                err_msgs.append(f"seq_legacy: {e}")
+
+        if strip is None:
+            msg = " | ".join(err_msgs)
+            print(f"[BeatGrid] Falha ao criar strip: {msg}")
+            bg.strip_error = "Strip falhou — veja console"
+            return
+
         strip.color = (0.82, 0.38, 0.12)
-        print(f"[BeatGrid] Strip '{name}' criado ({total_frames} frames)")
+        print(f"[BeatGrid] Strip '{name}' criado no canal {ch} ({total_frames} frames) ✅")
+
     except Exception as e:
-        print(f"[BeatGrid] Erro ao criar strip: {e}")
+        print(f"[BeatGrid] Erro inesperado ao criar strip: {e}")
+        try:
+            bg.strip_error = str(e)[:60]
+        except Exception:
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -708,7 +782,7 @@ class DAW_OT_BeatGridModal(bpy.types.Operator):
 
     _handle  = None
     _drag    = False
-    _drag_val = None   # True/False: valor que estamos pintando
+    _drag_val = None
 
     def invoke(self, context, event):
         if context.area.type != 'VIEW_3D':
@@ -730,12 +804,10 @@ class DAW_OT_BeatGridModal(bpy.types.Operator):
         region = context.region
         mx, my = event.mouse_region_x, event.mouse_region_y
 
-        # ESC — fecha
         if event.type == 'ESC':
             self._cleanup(context)
             return {'FINISHED'}
 
-        # Scroll BPM com roda do mouse
         if event.type == 'WHEELUPMOUSE':
             bg.bpm = min(300, bg.bpm + 1)
             return {'RUNNING_MODAL'}
@@ -743,7 +815,6 @@ class DAW_OT_BeatGridModal(bpy.types.Operator):
             bg.bpm = max(40, bg.bpm - 1)
             return {'RUNNING_MODAL'}
 
-        # LMB
         if event.type == 'LEFTMOUSE':
             typ, ri, si = _hit_test(mx, my, region, bg)
 
@@ -764,11 +835,9 @@ class DAW_OT_BeatGridModal(bpy.types.Operator):
                     bg.rows[ri].solo = not bg.rows[ri].solo
 
                 elif typ == 'STEP' and ri >= 0 and si >= 0:
-                    # Define direção do arrasto baseado no estado atual
                     cur = bg.rows[ri].get_step(si)
                     self._drag_val = not cur
                     bg.rows[ri].toggle_step(si)
-                    # Preview do som
                     if self._drag_val:
                         play_drum(bg.rows[ri].drum_type, bg.rows[ri].volume)
                     self._drag = True
@@ -778,7 +847,6 @@ class DAW_OT_BeatGridModal(bpy.types.Operator):
                 self._drag_val = None
             return {'RUNNING_MODAL'}
 
-        # Arrasto — pinta steps
         if event.type == 'MOUSEMOVE' and self._drag and self._drag_val is not None:
             typ, ri, si = _hit_test(mx, my, region, bg)
             if typ == 'STEP' and ri >= 0 and si >= 0:
@@ -863,13 +931,16 @@ class DAW_PT_BeatGrid(bpy.types.Panel):
         box.prop(bg, "steps", text="Steps")
         box.prop(bg, "swing", text="Swing", slider=True)
 
-        # Status
         row = layout.row()
         if bg.playing:
             row.label(text=f"● Tocando  Step: {bg.current_step + 1}",
                       icon='PLAY')
         else:
             row.label(text="■ Parado", icon='SNAP_FACE_CENTER')
+
+        # [FIX v2] Mostra erro de strip no painel
+        if bg.strip_error:
+            layout.label(text=f"⚠ {bg.strip_error}", icon='ERROR')
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -894,8 +965,16 @@ def register():
     if not bpy.app.timers.is_registered(_beat_grid_redraw):
         bpy.app.timers.register(_beat_grid_redraw, persistent=True)
 
+    # [FIX v2] Sincroniza com play/stop da timeline do Blender
+    if _beat_grid_playback_pre not in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.append(_beat_grid_playback_pre)
+
 
 def unregister():
+    # [FIX v2] Remove handler de sincronização
+    if _beat_grid_playback_pre in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.remove(_beat_grid_playback_pre)
+
     stop_sequencer()
     if bpy.app.timers.is_registered(_beat_grid_redraw):
         bpy.app.timers.unregister(_beat_grid_redraw)
