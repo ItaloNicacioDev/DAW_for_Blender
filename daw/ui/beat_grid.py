@@ -904,4 +904,4 @@ def unregister():
     except Exception:
         pass
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls) 
+        bpy.utils.unregister_class(cls)
