@@ -4,6 +4,10 @@ Preferências do addon DAW (AddonPreferences do Blender).
 
 Centraliza configurações globais como tema, atalhos padrão, dispositivo de áudio,
 e presets de workspace.
+
+[FIX v2] output_device agora é EnumProperty com callback que lê os dispositivos
+reais do sistema via aud (e sounddevice se instalado), em vez de StringProperty
+de texto livre que nunca mostrava nada.
 """
 from __future__ import annotations
 
@@ -20,6 +24,38 @@ from bpy.props import (
 from bpy.types import AddonPreferences, PropertyGroup
 
 
+# ═══════════════════════════════════════════════════════════════
+#  CALLBACK DE DISPOSITIVOS  [FIX v2]
+#
+#  EnumProperty com items=callback é a única forma de ter um
+#  dropdown que lista dispositivos reais em tempo real no Blender.
+#  O callback é chamado toda vez que a UI renderiza o campo.
+# ═══════════════════════════════════════════════════════════════
+
+def _output_device_items(self, context):
+    """Callback de items para output_device EnumProperty."""
+    try:
+        from ..recorder.input import get_output_devices
+        items = get_output_devices()
+        if items:
+            return items
+    except Exception as e:
+        print(f"[DAW Prefs] Erro ao listar saídas: {e}")
+    return [('Default', 'Default (Sistema)', 'Dispositivo de saída padrão do sistema')]
+
+
+def _input_device_items(self, context):
+    """Callback de items para input_device EnumProperty."""
+    try:
+        from ..recorder.input import get_input_devices
+        items = get_input_devices()
+        if items:
+            return items
+    except Exception as e:
+        print(f"[DAW Prefs] Erro ao listar entradas: {e}")
+    return [('Default', 'Default (Sistema)', 'Dispositivo de entrada padrão do sistema')]
+
+
 class DAW_PresetKeymap(PropertyGroup):
     """Define um preset de keymap para quick-load."""
     name: StringProperty(name="Nome", default="Preset 1")
@@ -28,11 +64,23 @@ class DAW_PresetKeymap(PropertyGroup):
 
 class DAW_PreferencesAudio(PropertyGroup):
     """Preferências de áudio."""
-    output_device: StringProperty(
+
+    # [FIX v2] Era StringProperty(default="Default") — campo de texto livre
+    # que nunca listava dispositivos reais. Agora é EnumProperty com callback
+    # que consulta aud/sounddevice a cada renderização da UI.
+    output_device: EnumProperty(
         name="Dispositivo de Saída",
-        description="Nome do dispositivo de áudio de saída (Default se vazio)",
-        default="Default"
+        description="Dispositivo de áudio de saída do sistema",
+        items=_output_device_items,
     )
+
+    # [FIX v2] Mesmo problema: input como StringProperty livre → EnumProperty
+    input_device: EnumProperty(
+        name="Dispositivo de Entrada",
+        description="Dispositivo de captura de áudio do sistema",
+        items=_input_device_items,
+    )
+
     samplerate: IntProperty(
         name="Sample Rate",
         description="Taxa de amostragem em Hz",
@@ -62,25 +110,25 @@ class DAW_PreferencesUI(PropertyGroup):
         ],
         default='DARK',
     )
-    
+
     font_scale: FloatProperty(
         name="Escala de Fonte",
         description="Escala relativa da fonte na UI",
         default=1.0, min=0.8, max=1.5, step=0.05,
     )
-    
+
     panel_width: IntProperty(
         name="Largura Padrão (px)",
         description="Largura sugerida dos painéis",
         default=300, min=200, max=600,
     )
-    
+
     show_tooltips: BoolProperty(
         name="Mostrar Tooltips",
         description="Exibe tooltips flutuantes",
         default=True
     )
-    
+
     show_playhead_indicator: BoolProperty(
         name="Indicador de Playhead",
         description="Mostra posição atual de reprodução",
@@ -95,13 +143,13 @@ class DAW_PreferencesWorkspace(PropertyGroup):
         description="Reorganiza painéis automaticamente",
         default=True
     )
-    
+
     remember_last_project: BoolProperty(
         name="Lembrar Último Projeto",
         description="Reabre o último projeto ao iniciar",
         default=True
     )
-    
+
     autosave_interval: IntProperty(
         name="Auto-Save (minutos)",
         description="Intervalo de auto-save (0 = desativado)",
@@ -113,8 +161,7 @@ class DAW_PreferencesKeymaps(PropertyGroup):
     """Gerenciador de presets de keymaps."""
     presets: CollectionProperty(type=DAW_PresetKeymap)
     active_preset_index: IntProperty(default=0)
-    
-    # Atalhos padrão
+
     play_pause: StringProperty(
         name="Play/Pause",
         description="Atalho para play/pause (ex: 'SPACE')",
@@ -167,6 +214,38 @@ class DAW_Preferences(AddonPreferences):
         default=False
     )
 
+    def draw(self, context):
+        layout = self.layout
+
+        # Áudio
+        box = layout.box()
+        box.label(text="Áudio", icon='SPEAKER')
+        box.prop(self.audio, "output_device", text="Saída")
+        box.prop(self.audio, "input_device",  text="Entrada")
+        row = box.row(align=True)
+        row.prop(self.audio, "samplerate",  text="Sample Rate")
+        row.prop(self.audio, "buffer_size", text="Buffer")
+        box.prop(self.audio, "enable_dither")
+
+        # UI
+        box2 = layout.box()
+        box2.label(text="Interface", icon='PREFERENCES')
+        box2.prop(self.ui, "theme")
+        box2.prop(self.ui, "font_scale")
+        box2.prop(self.ui, "show_tooltips")
+        box2.prop(self.ui, "show_playhead_indicator")
+
+        # Workspace
+        box3 = layout.box()
+        box3.label(text="Workspace", icon='WORKSPACE')
+        box3.prop(self.workspace, "auto_layout")
+        box3.prop(self.workspace, "remember_last_project")
+        box3.prop(self.workspace, "autosave_interval")
+
+        # Geral
+        layout.prop(self, "debug_mode")
+        layout.prop(self, "check_for_updates")
+
 
 classes = [
     DAW_PresetKeymap,
@@ -180,7 +259,9 @@ classes = [
 
 def get_preferences() -> DAW_Preferences:
     """Função helper para acessar preferências do addon."""
-    return bpy.context.preferences.addons[__package__.split('.')[0] if '.' in __package__ else 'daw'].preferences
+    return bpy.context.preferences.addons[
+        __package__.split('.')[0] if '.' in __package__ else 'daw'
+    ].preferences
 
 
 def register():
