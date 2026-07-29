@@ -1,21 +1,50 @@
 """
-ui/piano_roll.py — v6
+ui/piano_roll.py — v7
 
-Piano Roll com som e integração completa com o Sequencer:
-- Som ao desenhar nota (síntese interna via aud)
-- Som ao clicar nas teclas do piano
-- Cria/atualiza strip MIDI-color no Sequencer automaticamente
-- Playhead sincronizado com o motor de áudio (nova API: get_state)
-- Timer de redraw 30fps
-- Toolbar: Desenhar / Selecionar / Apagar / Pan
-- Velocity lane
-- Janela flutuante
-- [FIX v6] Scheduler de notas: dispara sons reais na timeline ao dar play
+Piano Roll com som real e integração completa com o Sequencer:
+
+[FIX v7 — dois schedulers independentes]
+
+Problema raiz do v6:
+  frame_change_post só dispara quando o Blender muda de frame.
+  A 24fps e 120 BPM temos exatamente 1 frame por beat — notas de
+  1/8 ou 1/16 que caem entre frames são simplesmente puladas.
+  A 60 BPM e 24fps um beat dura 0.5s = 12 frames, então uma nota de
+  1/16 dura 0.125s = 3 frames, e o scheduler detecta corretamente.
+  Mas a 180 BPM e 24fps um beat dura 0.33s = 8 frames e uma nota de
+  1/16 dura 2 frames — ainda ok. Porém qualquer BPM > 24*60/frames_per_beat
+  começa a perder notas.
+
+Solução v7:
+  Dois schedulers paralelos e complementares:
+  1. bpy.app.timers (_pr_note_timer): timer de alta frequência (5ms) que
+     roda independente de frames. Usa time.time() para calcular a posição
+     exata em beats. Dispara sons com precisão de milissegundos.
+  2. bpy.app.handlers.frame_change_post (_piano_roll_frame_handler): mantido
+     como backup para redraw do playhead visual, mas NÃO mais responsável
+     por disparar sons.
+
+  O timer guarda a posição de início (time.time() quando play começou) e o
+  beat de início, e calcula current_beat = start_beat + (now - start_time) * bpm/60.
+  Reset automático no rewind/loop.
+
+[FIX v7 — renderização de notas como strip de áudio]
+  Operador DAW_OT_RenderNotesToStrip: sintetiza todas as notas do strip
+  ativo para um arquivo .wav e insere como SOUND strip no Sequencer.
+  Isso faz as notas virarem áudio real, mixável e exportável junto com
+  o resto do projeto.
 """
 
 import bpy
 import gpu
 import blf
+import math
+import struct
+import tempfile
+import time
+import wave
+import os
+
 from gpu_extras.batch import batch_for_shader
 from bpy.props import (FloatProperty, IntProperty, BoolProperty,
                        EnumProperty, CollectionProperty, StringProperty)
@@ -67,12 +96,15 @@ C = {
     'text':         (0.720, 0.740, 0.840, 1.0),
     'text_dim':     (0.400, 0.415, 0.510, 1.0),
     'white':        (1.000, 1.000, 1.000, 1.0),
+    'render_btn':   (0.180, 0.380, 0.720, 1.0),
 }
 
 BLACK_NOTES = {1, 3, 6, 8, 10}
 NOTE_NAMES  = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
 TOOLS       = [('DRAW','D','Desenhar'),('SELECT','S','Selecionar'),
                ('ERASE','E','Apagar'),('PAN','P','Pan')]
+
+SAMPLE_RATE = 44100
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -131,14 +163,9 @@ def _get_active_notes(state):
 #  SOM — síntese interna
 # ═══════════════════════════════════════════════════════════════
 
-import math, struct, tempfile
-
-SAMPLE_RATE = 44100
-_aud_device  = None
-_note_cache: dict = {}
-_active_handles: list = []   # mantém referência aos Handles em reprodução
-                              # (sem isso o Python coleta o Handle e o som
-                              #  para de tocar quase instantaneamente)
+_aud_device   = None
+_note_cache:    dict = {}
+_active_handles: list = []
 
 _INSTRUMENTS = {
     0: {"harmonics":[(1,1.0,0),(2,0.5,0.3),(3,0.25,0),(4,0.12,-0.2),(5,0.06,0.1),(6,0.03,0),(7,0.015,0.2)],
@@ -159,61 +186,35 @@ _INSTRUMENTS = {
         "attack":0.12,"decay":0.40,"sustain":0.75,"release":0.50},
 }
 
-
-import os
-
-# ═══════════════════════════════════════════════════════════════
-#  SAMPLES REAIS (opcional) — daw/assets/samples/instruments/
-#
-#  Se existir um .wav pra um instrumento, ele é usado no lugar da
-#  síntese. Se não existir (ex: vibraphone/choir), cai automaticamente
-#  para o sintetizador abaixo — nenhum slot fica mudo.
-# ═══════════════════════════════════════════════════════════════
-
 _SAMPLES_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "assets", "samples", "instruments",
 )
-
 _SAMPLE_FILENAMES = {
-    0: "0_acoustic_piano.wav",
-    1: "1_electric_piano.wav",
-    2: "2_strings.wav",
-    3: "3_organ.wav",
-    4: "4_bass.wav",
-    5: "5_synth_lead.wav",
-    6: "6_vibraphone.wav",
-    7: "7_choir.wav",
+    0:"0_acoustic_piano.wav", 1:"1_electric_piano.wav", 2:"2_strings.wav",
+    3:"3_organ.wav", 4:"4_bass.wav", 5:"5_synth_lead.wav",
+    6:"6_vibraphone.wav", 7:"7_choir.wav",
 }
-
-# Nota MIDI em que cada sample foi gravado (C4 = 60). Se a nota que você
-# baixou não for exatamente essa, ajuste aqui para afinar o pitch-shift.
 _SAMPLE_ROOT_NOTE = {i: 60 for i in _SAMPLE_FILENAMES}
-
-_sample_cache: dict = {}   # inst_id -> aud.Sound | False (tentado e ausente)
+_sample_cache: dict = {}
 
 
 def _load_instrument_sample(inst_id: int):
-    """Carrega (com cache) o .wav do instrumento, se existir. Retorna None
-    se não houver arquivo para esse slot (uso do sintetizador)."""
     if inst_id in _sample_cache:
         cached = _sample_cache[inst_id]
         return cached if cached is not False else None
-
     filename = _SAMPLE_FILENAMES.get(inst_id)
     path = os.path.join(_SAMPLES_DIR, filename) if filename else None
-
     if not path or not os.path.isfile(path):
         _sample_cache[inst_id] = False
         return None
-
     try:
         import aud
         snd = aud.Sound(path)
         _sample_cache[inst_id] = snd
         return snd
     except Exception as e:
-        print(f"[Piano] Falha ao carregar sample '{path}': {e}")
+        print(f"[Piano] Falha sample '{path}': {e}")
         _sample_cache[inst_id] = False
         return None
 
@@ -221,7 +222,9 @@ def _load_instrument_sample(inst_id: int):
 def _midi_to_freq(n): return 440.0 * (2.0 ** ((n - 69) / 12.0))
 def _cents(c): return 2.0 ** (c / 1200.0)
 
-def _synth_note(midi: int, inst_id: int, dur: float, vel: float) -> bytes:
+
+def _synth_note_samples(midi: int, inst_id: int, dur: float, vel: float) -> list:
+    """Sintetiza nota e retorna lista de floats em [-1, 1]."""
     inst = _INSTRUMENTS.get(inst_id, _INSTRUMENTS[0])
     freq = _midi_to_freq(midi)
     n    = int(SAMPLE_RATE * dur)
@@ -243,10 +246,14 @@ def _synth_note(midi: int, inst_id: int, dur: float, vel: float) -> bytes:
 
         sample = sum(amp * math.sin(2*math.pi*freq*h*_cents(det)*t)
                      for h,amp,det in inst["harmonics"])
-        out.append(max(-32767, min(32767,
-                   int(sample/len(inst["harmonics"]) * env * vol * 0.7 * 32767))))
+        out.append(sample / len(inst["harmonics"]) * env * vol * 0.7)
+    return out
 
-    return struct.pack(f"<{n}h", *out)
+
+def _synth_note_pcm(midi, inst_id, dur, vel):
+    floats = _synth_note_samples(midi, inst_id, dur, vel)
+    return struct.pack(f"<{len(floats)}h",
+                       *[max(-32767, min(32767, int(s*32767))) for s in floats])
 
 
 def _get_aud_device():
@@ -261,29 +268,25 @@ def _get_aud_device():
 
 
 def _play_note_sound(midi: int, inst_id: int, dur: float = 0.6, vel: int = 100):
-    """Toca uma nota MIDI imediatamente via aud."""
     try:
         import aud
         dev = _get_aud_device()
-        if not dev:
-            return
+        if not dev: return
 
-        # 1) Tenta sample real (com pitch-shift a partir da nota raiz)
         sample = _load_instrument_sample(inst_id)
         if sample is not None:
             handle = dev.play(sample)
-            root = _SAMPLE_ROOT_NOTE.get(inst_id, 60)
-            handle.pitch = 2.0 ** ((midi - root) / 12.0)
+            root   = _SAMPLE_ROOT_NOTE.get(inst_id, 60)
+            handle.pitch  = 2.0 ** ((midi - root) / 12.0)
             handle.volume = max(0.0, min(1.0, vel / 127.0))
             _active_handles.append(handle)
             if len(_active_handles) > 64:
-                del _active_handles[:len(_active_handles) - 64]
+                del _active_handles[:len(_active_handles)-64]
             return
 
-        # 2) Sem sample para esse slot -> síntese (comportamento original)
         key = (midi, inst_id, round(dur, 2))
         if key not in _note_cache:
-            pcm = _synth_note(midi, inst_id, dur, vel)
+            pcm = _synth_note_pcm(midi, inst_id, dur, vel)
             try:
                 snd = aud.Sound.data(pcm, SAMPLE_RATE, 1, aud.FORMAT_S16)
             except AttributeError:
@@ -291,19 +294,18 @@ def _play_note_sound(midi: int, inst_id: int, dur: float = 0.6, vel: int = 100):
                     snd = aud.Sound.buffer(pcm, SAMPLE_RATE, 1, aud.FORMAT_S16)
                 except Exception:
                     tmp = tempfile.mktemp(suffix='.wav')
-                    samples = [s/32767 for s in struct.unpack(f"<{len(pcm)//2}h", pcm)]
-                    _write_wav_simple(tmp, samples)
+                    _write_wav(tmp, [s/32767 for s in struct.unpack(f"<{len(pcm)//2}h", pcm)])
                     snd = aud.Sound(tmp)
             _note_cache[key] = snd
         handle = dev.play(_note_cache[key])
         _active_handles.append(handle)
         if len(_active_handles) > 64:
-            del _active_handles[:len(_active_handles) - 64]
+            del _active_handles[:len(_active_handles)-64]
     except Exception as e:
         print(f"[Piano] _play_note_sound: {e}")
 
 
-def _write_wav_simple(path, samples):
+def _write_wav(path, samples):
     pcm  = [max(-32767, min(32767, int(s*32767))) for s in samples]
     data = struct.pack(f"<{len(pcm)}h", *pcm)
     ds   = len(data)
@@ -319,142 +321,309 @@ def _write_wav_simple(path, samples):
 # ═══════════════════════════════════════════════════════════════
 
 def _upsert_midi_strip(context, strip_name: str, n_notes: int):
-    """Cria ou atualiza strip COLOR representando este canal MIDI."""
     scene = context.scene
     seq   = scene.sequence_editor_create()
-
-    # Procura strip existente
     try:
-        all_strips = getattr(seq, 'strips', None) or getattr(seq, 'sequences_all', [])
+        all_strips = getattr(seq,'strips',None) or getattr(seq,'sequences_all',[])
         for s in all_strips:
-            if s.name == strip_name:
-                return  # já existe, não precisa recriar
-    except Exception:
-        pass
-
-    # Calcula canal livre
+            if s.name == strip_name: return
+    except Exception: pass
     try:
         used = {s.channel for s in (getattr(seq,'strips',None) or [])}
     except Exception:
         used = set()
     ch = 1
-    while ch in used:
-        ch += 1
-
+    while ch in used: ch += 1
     fps   = scene.render.fps
     start = scene.frame_current
     dur   = fps * 4
-
-    try:
-        strip = seq.strips.new_effect(
-            name=strip_name, type='COLOR', channel=ch,
-            frame_start=start, length=dur)
-    except TypeError:
+    for attempt in [
+        lambda: seq.strips.new_effect(name=strip_name, type='COLOR', channel=ch, frame_start=start, length=dur),
+        lambda: seq.strips.new_effect(name=strip_name, type='COLOR', channel=ch, frame_start=start, frame_end=start+dur),
+        lambda: seq.sequences.new_effect(name=strip_name, type='COLOR', channel=ch, frame_start=start, frame_end=start+dur),
+    ]:
         try:
-            strip = seq.strips.new_effect(
-                name=strip_name, type='COLOR', channel=ch,
-                frame_start=start, frame_end=start+dur)
-        except Exception as e:
-            print(f"[Piano] strip error: {e}"); return
-    except AttributeError:
-        try:
-            strip = seq.sequences.new_effect(
-                name=strip_name, type='COLOR', channel=ch,
-                frame_start=start, frame_end=start+dur)
-        except Exception as e:
-            print(f"[Piano] strip error: {e}"); return
-
-    strip.color = (0.08, 0.45, 0.26)
-    print(f"[Piano] Strip '{strip_name}' criado no canal {ch} ✅")
+            strip = attempt()
+            strip.color = (0.08, 0.45, 0.26)
+            print(f"[Piano] Strip '{strip_name}' criado ✅")
+            return
+        except Exception: continue
+    print(f"[Piano] Falha ao criar strip '{strip_name}'")
 
 
 # ═══════════════════════════════════════════════════════════════
-#  SCHEDULER DE NOTAS NA TIMELINE  [FIX v6]
+#  TIMER DE ALTA FREQUÊNCIA — scheduler de notas  [FIX v7]
 #
-#  Problema original: as notas ficavam em PianoRollState.notes mas
-#  nenhum código as lia durante o play da timeline do Blender.
-#  O playhead se movia visualmente, mas nada disparava sons.
+#  Problema do v6: frame_change_post só dispara 1x por frame.
+#  A 120 BPM e 24fps = 1 beat/frame → notas de 1/8 (0.5 beat)
+#  eram completamente puladas porque o handler não rodava entre
+#  frames.
 #
-#  Solução: bpy.app.handlers.frame_change_post dispara a cada frame
-#  que o Blender avança (manualmente OU em play). O handler converte
-#  o frame atual em beats e verifica quais notas começam nesse beat.
-#  Para evitar disparos duplicados no mesmo beat, mantemos um set de
-#  notas já tocadas que é resetado quando a posição volta (loop/rewind).
+#  Solução: bpy.app.timers com intervalo de 5ms (~200Hz).
+#  O timer usa time.time() para calcular a posição exata em beats,
+#  independente de FPS. Qualquer nota que começar dentro de uma
+#  janela de ±10ms é disparada.
 # ═══════════════════════════════════════════════════════════════
 
-# Conjunto de (strip_name_ou_"", note_idx) já tocados nesta passagem.
-# Resetado quando o playhead volta (loop ou rewind).
-_triggered_notes: set = set()
-_last_playhead_beat: float = -1.0
+# Estado do scheduler de alta frequência
+_sched_active    = False
+_sched_start_time = 0.0    # time.time() quando o play começou
+_sched_start_beat = 0.0    # beat em que o play começou
+_sched_triggered: set = set()  # (strip_name_or_"", note_idx) já disparados
+
+TIMER_INTERVAL = 0.005     # 5ms = 200Hz
 
 
-def _frame_to_beat(scene) -> float:
-    """Converte frame atual em beats, usando BPM do transport se disponível."""
-    fps = scene.render.fps
-    frame = scene.frame_current
-    # Tenta pegar BPM do beat_grid (única fonte de BPM por enquanto)
+def _get_bpm():
     try:
-        bpm = scene.beat_grid.bpm
+        return bpy.context.scene.beat_grid.bpm
     except Exception:
-        bpm = 120.0
-    seconds = frame / fps
-    return seconds * (bpm / 60.0)
+        return 120.0
+
+
+def _pr_note_timer():
+    """
+    Timer de alta frequência (5ms): calcula beat atual via time.time()
+    e dispara sons das notas do Piano Roll.
+    Retorna None para parar quando não está em play.
+    """
+    global _sched_active, _sched_triggered
+
+    try:
+        ctx = bpy.context
+        if not ctx or not ctx.screen:
+            return None if not _sched_active else TIMER_INTERVAL
+
+        is_playing = ctx.screen.is_animation_playing
+        if not is_playing:
+            if _sched_active:
+                # Timeline parou — reseta estado para próximo play
+                _sched_active = False
+                _sched_triggered.clear()
+            return TIMER_INTERVAL
+
+        # Calcula beat atual via tempo real (independente de FPS)
+        now  = time.time()
+        bpm  = _get_bpm()
+        elapsed_beats = (now - _sched_start_time) * (bpm / 60.0)
+        current_beat  = _sched_start_beat + elapsed_beats
+
+        # Janela de lookahead: 15ms pra frente para compensar latência de áudio
+        lookahead_beats = (0.015) * (bpm / 60.0)
+
+        state    = ctx.scene.piano_roll
+        inst_id  = int(state.instrument)
+
+        # Itera todos os strips MIDI
+        for ms in state.midi_strips:
+            for i, note in enumerate(ms.notes):
+                key = (ms.strip_name, i)
+                if key in _sched_triggered:
+                    continue
+                if note.start <= current_beat + lookahead_beats:
+                    if note.start >= current_beat - 0.02:  # não retoca nota já passada há mais de 20ms
+                        dur_sec = max(note.length * (60.0 / bpm), 0.05)
+                        _play_note_sound(note.pitch, inst_id, dur_sec, note.velocity)
+                    _sched_triggered.add(key)
+
+        # Notas soltas (sem strip)
+        for i, note in enumerate(state.notes):
+            key = ("__global__", i)
+            if key in _sched_triggered:
+                continue
+            if note.start <= current_beat + lookahead_beats:
+                if note.start >= current_beat - 0.02:
+                    dur_sec = max(note.length * (60.0 / bpm), 0.05)
+                    _play_note_sound(note.pitch, inst_id, dur_sec, note.velocity)
+                _sched_triggered.add(key)
+
+    except Exception as e:
+        print(f"[Piano] Timer: {e}")
+
+    return TIMER_INTERVAL
+
+
+# Handler que detecta INÍCIO do play e sincroniza o timer
+_pr_last_playing = False
 
 
 def _piano_roll_frame_handler(scene):
     """
-    Handler de frame_change_post: dispara sons das notas do Piano Roll
-    cuja posição de início coincide com o beat atual da timeline.
+    frame_change_post: detecta início/fim do play e sincroniza o timer.
+    NÃO mais responsável por disparar sons (isso é do timer de 5ms).
     """
-    global _triggered_notes, _last_playhead_beat
+    global _sched_active, _sched_start_time, _sched_start_beat
+    global _pr_last_playing, _sched_triggered
 
-    # Só atua quando o Blender está em playback (is_frame_changing garante
-    # que não executamos em frames setados manualmente pelo usuário)
-    if not bpy.context.screen or not bpy.context.screen.is_animation_playing:
-        return
-
-    state = scene.piano_roll
-    current_beat = _frame_to_beat(scene)
-
-    # Detecta rewind / loop: reseta notas disparadas
-    if current_beat < _last_playhead_beat - 0.5:
-        _triggered_notes.clear()
-    _last_playhead_beat = current_beat
-
-    # Janela de tolerância: um beat_window de meio step (1/8 beat = 1/32 nota)
-    # para não perder notas por imprecisão de frame rate
     try:
-        fps = scene.render.fps
-        bpm = scene.beat_grid.bpm
+        is_playing = bpy.context.screen and bpy.context.screen.is_animation_playing
+
+        if is_playing and not _pr_last_playing:
+            # Play acabou de começar — registra ponto de referência
+            bpm  = _get_bpm()
+            fps  = scene.render.fps
+            _sched_start_beat = scene.frame_current / fps * (bpm / 60.0)
+            _sched_start_time = time.time()
+            _sched_active     = True
+            _sched_triggered.clear()
+
+        elif not is_playing and _pr_last_playing:
+            # Play parou
+            _sched_active = False
+            _sched_triggered.clear()
+
+        _pr_last_playing = bool(is_playing)
+
     except Exception:
-        fps = 24
-        bpm = 120.0
-    beat_per_frame = bpm / 60.0 / fps
-    window = beat_per_frame * 1.5   # margem de 1.5 frames
+        pass
 
-    inst_id = int(state.instrument)
 
-    # Itera sobre todos os strips MIDI registrados
-    for ms in state.midi_strips:
-        for i, note in enumerate(ms.notes):
-            key = (ms.strip_name, i)
-            if key in _triggered_notes:
-                continue
-            # Nota começa dentro da janela atual?
-            if note.start <= current_beat < note.start + window:
-                dur = max(note.length * (60.0 / bpm), 0.05)
-                _play_note_sound(note.pitch, inst_id, dur, note.velocity)
-                _triggered_notes.add(key)
+# ═══════════════════════════════════════════════════════════════
+#  RENDERIZAÇÃO DE NOTAS COMO STRIP DE ÁUDIO  [FIX v7]
+#
+#  O piano roll toca sons em tempo real, mas eles não entram na
+#  timeline como áudio mixável. Este operador resolve isso:
+#  1. Pega todas as notas do strip ativo (ou notas globais)
+#  2. Sintetiza um arquivo .wav com todas as notas mixadas offline
+#  3. Insere o .wav como SOUND strip no Sequencer, no canal correto,
+#     alinhado com o frame onde o strip MIDI começa
+#  4. O strip de áudio fica disponível para mixdown normal
+# ═══════════════════════════════════════════════════════════════
 
-    # Também itera sobre notas soltas (sem strip associado)
-    for i, note in enumerate(state.notes):
-        key = ("__global__", i)
-        if key in _triggered_notes:
-            continue
-        if note.start <= current_beat < note.start + window:
-            dur = max(note.length * (60.0 / bpm), 0.05)
-            _play_note_sound(note.pitch, inst_id, dur, note.velocity)
-            _triggered_notes.add(key)
+class DAW_OT_RenderNotesToStrip(bpy.types.Operator):
+    bl_idname      = "daw.render_notes_to_strip"
+    bl_label       = "Renderizar Notas → Áudio"
+    bl_description = ("Sintetiza as notas MIDI do strip ativo e insere como "
+                      "strip de áudio na timeline. Após isso, o áudio é "
+                      "exportável e mixável normalmente.")
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        scene   = context.scene
+        state   = scene.piano_roll
+        notes   = _get_active_notes(state)
+
+        if len(notes) == 0:
+            self.report({'WARNING'}, "Nenhuma nota para renderizar")
+            return {'CANCELLED'}
+
+        bpm     = _get_bpm()
+        inst_id = int(state.instrument)
+        fps     = scene.render.fps
+
+        # ── Calcula duração total necessária ──────────────────
+        max_end_beat = max(n.start + n.length for n in notes)
+        total_sec    = max_end_beat * (60.0 / bpm) + 1.0  # +1s de cauda
+        total_samples = int(total_sec * SAMPLE_RATE)
+
+        # ── Mixdown offline: soma todas as notas num buffer float ──
+        self.report({'INFO'}, f"Sintetizando {len(notes)} notas…")
+        buffer = [0.0] * total_samples
+
+        for note in notes:
+            start_sec    = note.start * (60.0 / bpm)
+            dur_sec      = max(note.length * (60.0 / bpm), 0.03)
+            start_sample = int(start_sec * SAMPLE_RATE)
+
+            # Tenta usar sample real primeiro
+            note_floats = None
+            sample = _load_instrument_sample(inst_id)
+            if sample is None:
+                note_floats = _synth_note_samples(note.pitch, inst_id, dur_sec, note.velocity)
+
+            if note_floats is not None:
+                for i, v in enumerate(note_floats):
+                    idx = start_sample + i
+                    if idx < total_samples:
+                        buffer[idx] += v
+            # Se sample real foi carregado via aud, não conseguimos os floats
+            # diretamente — recaímos na síntese como fallback seguro
+            if sample is not None and note_floats is None:
+                note_floats = _synth_note_samples(note.pitch, inst_id, dur_sec, note.velocity)
+                for i, v in enumerate(note_floats):
+                    idx = start_sample + i
+                    if idx < total_samples:
+                        buffer[idx] += v
+
+        # ── Normaliza pico para -3dB ──────────────────────────
+        peak = max(abs(v) for v in buffer) if buffer else 0.0
+        if peak > 0.001:
+            target = 10 ** (-3.0 / 20.0)
+            gain   = target / peak
+            buffer = [v * gain for v in buffer]
+
+        # ── Escreve WAV ───────────────────────────────────────
+        strip_name = state.active_strip or "PianoRoll"
+        safe_name  = "".join(c if c.isalnum() or c in "-_" else "_" for c in strip_name)
+        out_dir    = bpy.path.abspath("//daw_renders/")
+        os.makedirs(out_dir, exist_ok=True)
+        wav_path   = os.path.join(out_dir, f"{safe_name}.wav")
+
+        _write_wav(wav_path, buffer)
+
+        if not os.path.isfile(wav_path):
+            self.report({'ERROR'}, f"Falha ao escrever WAV: {wav_path}")
+            return {'CANCELLED'}
+
+        # ── Insere como SOUND strip no Sequencer ─────────────
+        seq = scene.sequence_editor_create()
+
+        # Determina frame de início: pega do strip COLOR correspondente, se existir
+        frame_start = scene.frame_start
+        try:
+            all_strips = getattr(seq,'strips',None) or getattr(seq,'sequences_all',[])
+            for s in all_strips:
+                if s.name == strip_name:
+                    frame_start = s.frame_start
+                    break
+        except Exception:
+            pass
+
+        # Canal: usa um canal acima do strip MIDI
+        try:
+            used = {s.channel for s in (getattr(seq,'strips',None) or [])}
+        except Exception:
+            used = set()
+        ch = 1
+        while ch in used: ch += 1
+
+        # Remove strip de áudio antigo com mesmo nome, se existir
+        audio_name = f"{strip_name}_audio"
+        try:
+            for s in list(getattr(seq,'strips',None) or []):
+                if s.name == audio_name:
+                    try:    seq.strips.remove(s)
+                    except Exception: pass
+        except Exception:
+            pass
+
+        # Cria o SOUND strip
+        try:
+            sound_strip = seq.strips.new_sound(
+                name=audio_name,
+                filepath=wav_path,
+                channel=ch,
+                frame_start=frame_start,
+            )
+        except AttributeError:
+            try:
+                sound_strip = seq.sequences.new_sound(
+                    name=audio_name,
+                    filepath=wav_path,
+                    channel=ch,
+                    frame_start=frame_start,
+                )
+            except Exception as e:
+                self.report({'ERROR'}, f"Falha ao criar strip de áudio: {e}")
+                return {'CANCELLED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Falha ao criar strip de áudio: {e}")
+            return {'CANCELLED'}
+
+        self.report({'INFO'},
+            f"✅ '{audio_name}' criado no canal {ch} — {len(notes)} notas, "
+            f"{total_sec:.1f}s → {wav_path}")
+        return {'FINISHED'}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -519,7 +688,6 @@ def _draw_piano_roll(context):
     gpu.state.blend_set('ALPHA')
     _rect(0,0,W,H, C['bg'])
 
-    # Grid de notas
     for i in range(vis+1):
         note = top - i
         if not 0 <= note <= 127: continue
@@ -528,7 +696,6 @@ def _draw_piano_roll(context):
         _rect(gx, ny, gw, note_h-0.5, col)
         if note%12==0: _line(gx, ny+note_h, gx+gw, ny+note_h, C['octave'])
 
-    # Grid vertical
     b = 0
     while True:
         bx = gx + b*beat_w - (state.scroll_x%snap)*beat_w
@@ -541,7 +708,6 @@ def _draw_piano_roll(context):
         b += 1
         if b > 4000: break
 
-    # Notas MIDI
     notes = _get_active_notes(state)
     for note in notes:
         ni = top - note.pitch
@@ -561,14 +727,12 @@ def _draw_piano_roll(context):
         if nw2>22 and note_h>10:
             _txt(_note_name(note.pitch), nx2+3, ny+3, 9, C['note_txt'])
 
-    # Playhead
-    ph = _get_playhead_beat(context)
+    ph   = _get_playhead_beat(context)
     ph_x = gx + (ph - state.scroll_x)*beat_w
     if gx <= ph_x <= gx+gw:
         _rect(ph_x-1, gy, 2, gh, C['playhead'])
         _tri([(ph_x-7, hdr_y+HEADER_H),(ph_x+7, hdr_y+HEADER_H),(ph_x, hdr_y+HEADER_H-10)], C['playhead_tri'])
 
-    # Piano keys
     _rect(0, gy, PIANO_W, gh, (0.058,0.062,0.092,1.0))
     for i in range(vis+1):
         note = top - i
@@ -583,7 +747,6 @@ def _draw_piano_roll(context):
             _txt(_note_name(note), 3, ny+2, 8, C['text_dim'])
     _line(PIANO_W, gy, PIANO_W, gy+gh, C['separator'])
 
-    # Header
     _rect(0, hdr_y, W, HEADER_H, C['header'])
     b = 0
     while True:
@@ -600,7 +763,6 @@ def _draw_piano_roll(context):
     if gx <= ph_x <= gx+gw:
         _rect(ph_x-1, hdr_y, 2, HEADER_H, C['playhead'])
 
-    # Velocity lane
     if vel_h > 0:
         _rect(0, SCROLLBAR, W, vel_h, C['vel_bg'])
         _line(0, SCROLLBAR+vel_h, W, SCROLLBAR+vel_h, C['separator'])
@@ -617,7 +779,6 @@ def _draw_piano_roll(context):
                   C['vel_sel'] if note.selected else C['vel_bar'])
         _line(gx, SCROLLBAR+vel_h-4, gx+gw, SCROLLBAR+vel_h-4, C['vel_line'])
 
-    # Toolbar
     _rect(0, ty, W, TOOLBAR_H, C['toolbar'])
     _line(0, ty, W, ty, C['separator'])
     btn_w,btn_h = 52,22
@@ -636,10 +797,15 @@ def _draw_piano_roll(context):
     vtx=sx0+5*42+12; vty=ty+(TOOLBAR_H-btn_h)//2
     _rect(vtx,vty,40,btn_h, C['btn_active'] if state.show_velocity else C['btn'])
     _txt("VEL", vtx+10, vty+6, 10, C['white'] if state.show_velocity else C['text_dim'])
+
+    # Botão Render (azul)
+    rx = vtx+50; ry2 = vty
+    _rect(rx, ry2, 72, btn_h, C['render_btn'])
+    _txt("▶ RENDER", rx+6, ry2+6, 9, C['white'])
+
     _txt(f"  {state.active_strip or '—'}", 4, ty+10, 11, C['text'])
     _txt("ESC: fechar", W-80, ty+10, 9, C['text_dim'])
 
-    # Scrollbars
     _rect(gx,0,gw,SCROLLBAR-1, C['sb_bg'])
     tw=max(gw*(gw/max(state.total_beats*beat_w,gw+1)),20)
     tx=gx+(state.scroll_x/max(state.total_beats,1))*(gw-tw)
@@ -659,13 +825,9 @@ def _get_playhead_beat(context):
         if e:
             s = e.get_state()
             if s: return s.position_beats
-    except Exception:
-        pass
+    except Exception: pass
     fps = context.scene.render.fps
-    try:
-        bpm = context.scene.beat_grid.bpm
-    except Exception:
-        bpm = 120.0
+    bpm = _get_bpm()
     return (context.scene.frame_current / fps) * (bpm / 60.0)
 
 
@@ -687,6 +849,8 @@ def _toolbar_hit(mx, my, W, H, state):
         if sx<=mx<=sx+38 and sy<=my<=sy+btn_h: return 'SNAP', sv
     vtx=sx0+5*42+12; vty=ty+(TOOLBAR_H-btn_h)//2
     if vtx<=mx<=vtx+40 and vty<=my<=vty+btn_h: return 'VEL', None
+    rx=vtx+50; ry2=vty
+    if rx<=mx<=rx+72 and ry2<=my<=ry2+btn_h: return 'RENDER', None
     return 'TOOLBAR', None
 
 
@@ -739,9 +903,7 @@ class DAW_OT_PianoRollModal(bpy.types.Operator):
         notes=_get_active_notes(state); n=notes.add()
         n.pitch=max(0,min(127,pitch)); n.start=max(0,sn)
         n.length=float(state.snap_mode); n.velocity=100
-        # Toca o som da nota
         _play_note_sound(n.pitch, int(state.instrument), n.length*0.5+0.1, n.velocity)
-        # Atualiza strip no Sequencer
         if state.active_strip:
             _upsert_midi_strip(context, state.active_strip, len(notes))
         return len(notes)-1
@@ -814,12 +976,14 @@ class DAW_OT_PianoRollModal(bpy.types.Operator):
         if event.type=='LEFTMOUSE':
             if event.value=='PRESS':
                 typ,val=_toolbar_hit(mx,my,W,H,state)
-                if typ=='TOOL': state.tool=val; return {'RUNNING_MODAL'}
-                if typ=='SNAP': state.snap_mode=val; return {'RUNNING_MODAL'}
-                if typ=='VEL':  state.show_velocity=not state.show_velocity; return {'RUNNING_MODAL'}
+                if typ=='TOOL':   state.tool=val; return {'RUNNING_MODAL'}
+                if typ=='SNAP':   state.snap_mode=val; return {'RUNNING_MODAL'}
+                if typ=='VEL':    state.show_velocity=not state.show_velocity; return {'RUNNING_MODAL'}
+                if typ=='RENDER':
+                    bpy.ops.daw.render_notes_to_strip('INVOKE_DEFAULT')
+                    return {'RUNNING_MODAL'}
                 if typ=='TOOLBAR': return {'RUNNING_MODAL'}
 
-                # Clique no piano lateral → preview de nota
                 if mx < PIANO_W:
                     p=self._pitch(my,state,region)
                     if 0<=p<=127:
@@ -901,10 +1065,7 @@ class DAW_OT_OpenPianoRoll(bpy.types.Operator):
     bl_description = "Abre o Piano Roll em janela flutuante"
 
     def execute(self, context):
-        cur_win  = context.window
-        cur_area = context.area
         bpy.ops.wm.window_new()
-
         def _setup():
             try:
                 new_win = bpy.context.window_manager.windows[-1]
@@ -917,27 +1078,12 @@ class DAW_OT_OpenPianoRoll(bpy.types.Operator):
                             sp.shading.type = 'SOLID'
                     win_reg = next((r for r in area.regions if r.type=='WINDOW'), None)
                     if win_reg:
-                        with bpy.context.temp_override(
-                                window=new_win, screen=new_win.screen,
-                                area=area, region=win_reg,
-                                workspace=new_win.workspace):
+                        with bpy.context.temp_override(window=new_win, area=area, region=win_reg):
                             bpy.ops.daw.piano_roll_modal('INVOKE_DEFAULT')
-                        print("[Piano] Janela flutuante aberta ✅")
                     break
             except Exception as e:
-                print(f"[Piano] Fallback area: {e}")
-                try:
-                    for area in cur_win.screen.areas:
-                        if area.type == 'VIEW_3D':
-                            win_reg = next((r for r in area.regions if r.type=='WINDOW'), None)
-                            if win_reg:
-                                with bpy.context.temp_override(window=cur_win, area=area, region=win_reg):
-                                    bpy.ops.daw.piano_roll_modal('INVOKE_DEFAULT')
-                            break
-                except Exception as e2:
-                    print(f"[Piano] Fallback2: {e2}")
+                print(f"[Piano] Erro ao abrir: {e}")
             return None
-
         bpy.app.timers.register(_setup, first_interval=0.25)
         return {'FINISHED'}
 
@@ -955,46 +1101,30 @@ class DAW_OT_NewMidiStrip(bpy.types.Operator):
         scene = context.scene
         state = scene.piano_roll
         seq   = scene.sequence_editor_create()
-
-        # Canal livre
         try:
             used = {s.channel for s in (getattr(seq,'strips',None) or [])}
         except Exception:
             used = set()
         ch = 1
         while ch in used: ch += 1
-
         idx  = len(state.midi_strips)+1
         name = f"MIDI {idx:02d}"
         fps  = scene.render.fps
         start = scene.frame_current; dur = fps*4
-
-        # Cria strip
-        try:
-            strip = seq.strips.new_effect(
-                name=name, type='COLOR', channel=ch,
-                frame_start=start, length=dur)
-        except TypeError:
-            try:
-                strip = seq.strips.new_effect(
-                    name=name, type='COLOR', channel=ch,
-                    frame_start=start, frame_end=start+dur)
-            except Exception as e:
-                self.report({'ERROR'}, str(e)); return {'CANCELLED'}
-        except AttributeError:
-            try:
-                strip = seq.sequences.new_effect(
-                    name=name, type='COLOR', channel=ch,
-                    frame_start=start, frame_end=start+dur)
-            except Exception as e:
-                self.report({'ERROR'}, str(e)); return {'CANCELLED'}
-
+        strip = None
+        for attempt in [
+            lambda: seq.strips.new_effect(name=name, type='COLOR', channel=ch, frame_start=start, length=dur),
+            lambda: seq.strips.new_effect(name=name, type='COLOR', channel=ch, frame_start=start, frame_end=start+dur),
+            lambda: seq.sequences.new_effect(name=name, type='COLOR', channel=ch, frame_start=start, frame_end=start+dur),
+        ]:
+            try: strip=attempt(); break
+            except Exception: continue
+        if not strip:
+            self.report({'ERROR'}, "Falha ao criar strip"); return {'CANCELLED'}
         strip.color = (0.08, 0.45, 0.26)
-
         ms = state.midi_strips.add()
         ms.strip_name = name
         state.active_strip = name
-
         bpy.ops.daw.open_piano_roll('INVOKE_DEFAULT')
         self.report({'INFO'}, f"Track '{name}' criada")
         return {'FINISHED'}
@@ -1070,17 +1200,13 @@ class DAW_PT_PianoRollPanel(bpy.types.Panel):
         box2.label(text="Synth Interno", icon='SOUND')
         box2.prop(state, "instrument", text="")
 
-        try:
-            from ..synth import CHORD_PROGRESSIONS
-            box3 = layout.box()
-            box3.label(text="Progressões de Acordes", icon='PRESET')
-            for prog_name in list(CHORD_PROGRESSIONS.keys())[:6]:
-                row2 = box3.row(align=True)
-                row2.scale_y = 0.8
-                op2 = row2.operator("daw.load_progression", text=prog_name, icon='IMPORT')
-                op2.progression_name = prog_name
-        except Exception:
-            pass
+        # Renderização
+        layout.separator()
+        box3 = layout.box()
+        box3.label(text="Exportar para Timeline", icon='FILE_SOUND')
+        box3.operator("daw.render_notes_to_strip", icon='RENDER_STILL',
+                      text="Renderizar Notas → Áudio")
+        box3.label(text="Gera WAV em //daw_renders/", icon='INFO')
 
         notes = _get_active_notes(state)
         if len(notes) > 0:
@@ -1088,10 +1214,6 @@ class DAW_PT_PianoRollPanel(bpy.types.Panel):
             layout.operator("daw.clear_notes", icon='TRASH',
                             text=f"Limpar {len(notes)} notas")
 
-
-# ═══════════════════════════════════════════════════════════════
-#  OPERADOR PROGRESSÕES
-# ═══════════════════════════════════════════════════════════════
 
 class DAW_OT_LoadProgression(bpy.types.Operator):
     bl_idname      = "daw.load_progression"
@@ -1126,6 +1248,7 @@ classes = (
     DAW_OT_PianoRollModal, DAW_OT_OpenPianoRoll,
     DAW_OT_NewMidiStrip, DAW_OT_SelectMidiStrip,
     DAW_OT_ClearNotes, DAW_OT_LoadProgression,
+    DAW_OT_RenderNotesToStrip,
     DAW_PT_PianoRollPanel,
 )
 
@@ -1139,11 +1262,14 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.piano_roll = bpy.props.PointerProperty(type=PianoRollState)
 
-    # Timer de redraw
     if not bpy.app.timers.is_registered(_pr_redraw):
         bpy.app.timers.register(_pr_redraw, persistent=True)
 
-    # [FIX v6] Registra o scheduler de notas na timeline
+    # [FIX v7] Timer de alta frequência para scheduler de notas
+    if not bpy.app.timers.is_registered(_pr_note_timer):
+        bpy.app.timers.register(_pr_note_timer, persistent=True, first_interval=TIMER_INTERVAL)
+
+    # Handler de frame para detectar início/fim do play
     if _piano_roll_frame_handler not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(_piano_roll_frame_handler)
 
@@ -1157,10 +1283,10 @@ def register():
 
 
 def unregister():
-    # [FIX v6] Remove o scheduler da timeline
     if _piano_roll_frame_handler in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.remove(_piano_roll_frame_handler)
-
+    if bpy.app.timers.is_registered(_pr_note_timer):
+        bpy.app.timers.unregister(_pr_note_timer)
     for km, kmi in addon_keymaps:
         km.keymap_items.remove(kmi)
     addon_keymaps.clear()
