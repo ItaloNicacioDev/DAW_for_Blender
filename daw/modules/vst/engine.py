@@ -23,12 +23,60 @@ em tese, por um motor de áudio isolado (offline).
 from __future__ import annotations
 
 import sys
+import platform
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .vst import VSTProgramParameter, VSTProgramType
+
+
+# ═══════════════════════════════════════════════════════════════
+#  DEPENDÊNCIA EMBUTIDA (vendor) — sem pip, sem venv
+# ═══════════════════════════════════════════════════════════════
+#
+# O addon carrega um `dawdreamer` já compilado, embutido em
+# `daw/vendor/<plataforma>_cp<versão>/dawdreamer/`, adicionando essa
+# pasta ao sys.path automaticamente. Assim, instalar o addon (o .zip)
+# já é suficiente — não depende de rodar pip nem de nenhuma venv no
+# Python do usuário/Blender.
+#
+# Se a plataforma do usuário não tiver uma pasta vendorizada (ver
+# `daw/vendor/README.md`), cai para o import normal do site-packages
+# (caso já esteja instalado) e, por fim, oferece o botão de instalar
+# via pip como último recurso.
+
+def _vendor_dir_candidates() -> List[Path]:
+    """Nomes de pasta vendor compatíveis com a plataforma/Python atuais,
+    do mais específico para o mais genérico."""
+    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    machine = platform.machine().lower()
+
+    if sys.platform.startswith("win"):
+        arch = "amd64" if machine in ("amd64", "x86_64") else machine
+        names = [f"win_{arch}_{py_tag}"]
+    elif sys.platform == "darwin":
+        arch = "arm64" if machine in ("arm64", "aarch64") else "x86_64"
+        names = [f"macos_{arch}_{py_tag}"]
+    else:
+        arch = "x86_64" if machine in ("x86_64", "amd64") else machine
+        names = [f"linux_{arch}_{py_tag}"]
+
+    root = Path(__file__).resolve().parent.parent.parent / "vendor"
+    return [root / name for name in names]
+
+
+def _add_vendor_to_syspath() -> Optional[Path]:
+    """Insere a pasta vendor compatível no sys.path, se existir. Retorna
+    o caminho usado, ou None se nenhuma pasta compatível foi encontrada."""
+    for candidate in _vendor_dir_candidates():
+        if candidate.is_dir() and (candidate / "dawdreamer").is_dir():
+            path_str = str(candidate)
+            if path_str not in sys.path:
+                sys.path.insert(0, path_str)
+            return candidate
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -80,21 +128,32 @@ def detect_plugin_format(path: str | Path) -> str:
 _dawdreamer_module = None       # cache do módulo importado
 _availability_checked = False   # evita reimportar a cada chamada
 _import_error: Optional[str] = None
+_vendor_path_used: Optional[Path] = None  # None = não veio do vendor (site-packages/pip)
 
 
 def _try_import_dawdreamer():
-    """Importa `dawdreamer` uma única vez e guarda o resultado em cache."""
-    global _dawdreamer_module, _availability_checked, _import_error
+    """
+    Importa `dawdreamer` uma única vez e guarda o resultado em cache.
+
+    Ordem de busca:
+        1. Pasta embutida no addon (`daw/vendor/...`) — sem pip, sem venv.
+        2. site-packages normal do Python em uso (caso já esteja
+           instalado por fora, ou tenha sido instalado via o botão
+           "Instalar dawdreamer" numa sessão anterior).
+    """
+    global _dawdreamer_module, _availability_checked, _import_error, _vendor_path_used
 
     if _availability_checked:
         return _dawdreamer_module
 
     _availability_checked = True
+    _vendor_path_used = _add_vendor_to_syspath()
+
     try:
         import dawdreamer as dd  # type: ignore
         _dawdreamer_module = dd
         _import_error = None
-    except Exception as e:  # ImportError ou erro de carregamento de DLL nativa
+    except Exception as e:  # ImportError ou erro de carregamento do binário nativo
         _dawdreamer_module = None
         _import_error = str(e)
 
@@ -102,8 +161,15 @@ def _try_import_dawdreamer():
 
 
 def is_available() -> bool:
-    """True se `dawdreamer` está instalado e importável no Python do Blender."""
+    """True se `dawdreamer` está disponível (embutido no addon ou instalado)."""
     return _try_import_dawdreamer() is not None
+
+
+def is_bundled() -> bool:
+    """True se o dawdreamer em uso veio da pasta vendor embutida no addon
+    (ou seja, não depende de pip/venv nenhum)."""
+    _try_import_dawdreamer()
+    return _vendor_path_used is not None
 
 
 def get_import_error() -> Optional[str]:
@@ -114,19 +180,28 @@ def get_import_error() -> Optional[str]:
 
 def install_instructions() -> str:
     """
-    Mensagem amigável explicando como instalar `dawdreamer` no Python
-    embutido do Blender (é um Python separado do sistema).
+    Mensagem amigável explicando a situação atual do dawdreamer: se há
+    (ou não) uma pasta embutida (vendor) compatível com esta
+    plataforma/versão de Python, e como instalar manualmente como
+    último recurso.
     """
     py = sys.executable
+    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    candidates = ", ".join(str(c.name) for c in _vendor_dir_candidates())
     reason = f" (detalhe: {_import_error})" if _import_error else ""
+
     return (
-        "dawdreamer não está instalado no Python do Blender.\n"
-        f"Python em uso: {py}\n\n"
-        "Para instalar, feche o Blender e rode no terminal:\n"
+        "dawdreamer não está disponível.\n\n"
+        f"Pasta(s) embutida(s) esperada(s) para esta plataforma: {candidates}\n"
+        "Se o addon foi instalado com a pasta 'vendor/' completa, isso não\n"
+        "deveria acontecer — confira se essa pasta não foi removida na hora\n"
+        "de zipar/instalar o addon.\n\n"
+        f"Python em uso: {py} ({py_tag})\n\n"
+        "Alternativa manual (fora do addon, sem venv — direto no Python do\n"
+        "Blender):\n"
         f'    "{py}" -m pip install dawdreamer\n\n'
-        "Ou use o botão \"Instalar dawdreamer\" no painel VST > "
-        "Configurações, que executa o mesmo comando automaticamente.\n"
-        "Após instalar, reinicie o Blender." + reason
+        "Ou use o botão \"Instalar dawdreamer\" no painel VST > Configurações."
+        + reason
     )
 
 
