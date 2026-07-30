@@ -86,6 +86,13 @@ def _draw_vst_item(layout, item, is_instrument: bool, channel_index: int, index:
     op.vst_id = item.vst_id
     op.preset_name = "default"
 
+    if is_instrument:
+        op = box.operator(
+            "daw.render_vst_instrument_to_timeline",
+            text="Renderizar na Timeline", icon='RENDER_ANIMATION',
+        )
+        op.vst_id = item.vst_id
+
 
 # ---------------------------------------------------------------------- #
 # Browser de VSTs
@@ -181,6 +188,13 @@ class DAW_PT_VstEffects(Panel):
             op = layout.operator("daw.remove_vst_effect", text="Remover", icon='TRASH')
             op.channel_index = channel_index
             op.vst_index = index
+
+        layout.separator()
+        op = layout.operator(
+            "daw.apply_vst_effect_to_strip",
+            text="Aplicar Cadeia a uma Strip...", icon='RENDER_ANIMATION',
+        )
+        op.channel_index = channel_index
 
 
 # ---------------------------------------------------------------------- #

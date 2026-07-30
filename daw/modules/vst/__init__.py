@@ -45,6 +45,7 @@ from __future__ import annotations
 
 from .vst import VST, VSTProgramType, VSTProgramParameter, VSTProgramState
 from . import engine
+from . import timeline_bridge
 from .pressets import get_preset_manager, VSTProgramPresetManager
 from .utils import (
     get_live_vst,
@@ -67,6 +68,8 @@ __all__ = [
     "VST", "VSTProgramType", "VSTProgramParameter", "VSTProgramState",
     # Motor (dawdreamer)
     "engine",
+    # Ponte com a timeline nativa do Blender (bounce -> sound strips)
+    "timeline_bridge",
     # Presets
     "get_preset_manager", "VSTProgramPresetManager",
     # Ponte RNA <-> puro
