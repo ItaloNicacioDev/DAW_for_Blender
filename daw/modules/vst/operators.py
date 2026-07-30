@@ -12,11 +12,13 @@ Responsabilidade:
 """
 from __future__ import annotations
 
+import os
 import bpy
 from bpy.props import StringProperty, IntProperty, BoolProperty
 from bpy.types import Operator
 
 from . import engine
+from . import timeline_bridge as tlb
 from .vst import VSTProgramType
 from .pressets import get_preset_manager
 from .utils import (
@@ -372,6 +374,150 @@ class DAW_OT_LoadVstPreset(Operator):
 
 
 # ---------------------------------------------------------------------- #
+# Bounce na Timeline (motor de áudio nativo do Blender / VSE)
+# ---------------------------------------------------------------------- #
+class DAW_OT_RenderVstInstrumentToTimeline(Operator):
+    bl_idname = "daw.render_vst_instrument_to_timeline"
+    bl_label = "Renderizar Instrumento na Timeline"
+    bl_description = (
+        "Sintetiza as notas do Piano Roll através deste VST instrumento e "
+        "insere o resultado como uma SOUND strip na timeline (motor de "
+        "áudio nativo do Blender). Precisa ser refeito ao mudar notas ou "
+        "parâmetros do VST."
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    vst_id: StringProperty(default="")
+    strip_name: StringProperty(name="Nome da Strip", default="")
+    start_beat: bpy.props.FloatProperty(name="Início (beats)", default=0.0, min=0.0)
+    channel: IntProperty(name="Canal do Sequencer", default=0, min=0)  # 0 = auto
+
+    def invoke(self, context, event):
+        if not self.strip_name:
+            live = get_live_vst(self.vst_id)
+            self.strip_name = f"{live.name if live else self.vst_id}_vst"
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        col = self.layout.column()
+        col.prop(self, "strip_name")
+        col.prop(self, "start_beat")
+        col.prop(self, "channel")
+
+    def execute(self, context):
+        live = get_live_vst(self.vst_id)
+        if live is None or not live.loaded:
+            self.report({'ERROR'}, "VST instrumento não está carregado")
+            return {'CANCELLED'}
+        if not live.is_instrument():
+            self.report({'ERROR'}, "Este VST não é um instrumento")
+            return {'CANCELLED'}
+
+        scene = context.scene
+        sample_rate = _sample_rate(context)
+
+        notes, duration = tlb.notes_from_piano_roll(scene, sample_rate)
+        if not notes:
+            self.report({'WARNING'}, "Nenhuma nota no Piano Roll para renderizar")
+            return {'CANCELLED'}
+
+        try:
+            audio = tlb.render_instrument_notes(live, notes, duration, sample_rate)
+        except Exception as e:
+            self.report({'ERROR'}, f"Falha ao renderizar: {e}")
+            return {'CANCELLED'}
+
+        out_dir = bpy.path.abspath("//daw_renders/vst/")
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in self.strip_name)
+        wav_path = os.path.join(out_dir, f"{safe_name}.wav")
+        tlb.write_wav_stereo(wav_path, audio, sample_rate)
+
+        seq = scene.sequence_editor_create()
+        channel = self.channel if self.channel > 0 else tlb.find_free_channel(seq)
+        frame_start = tlb.beat_to_frame(scene, self.start_beat)
+
+        try:
+            tlb.upsert_sound_strip(scene, safe_name, wav_path, channel, frame_start)
+        except Exception as e:
+            self.report({'ERROR'}, f"Falha ao criar strip: {e}")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"'{safe_name}' renderizado no canal {channel} (frame {frame_start})")
+        return {'FINISHED'}
+
+
+class DAW_OT_ApplyVstEffectToStrip(Operator):
+    bl_idname = "daw.apply_vst_effect_to_strip"
+    bl_label = "Aplicar Cadeia de VST a uma Strip"
+    bl_description = (
+        "Processa o áudio de uma SOUND strip existente através da cadeia "
+        "de efeitos VST do canal e insere o resultado como uma nova strip "
+        "(o motor nativo do Blender toca o áudio já processado)."
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    channel_index: IntProperty(default=-1)
+    strip_name: StringProperty(name="Strip de Origem", default="")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        scene = context.scene
+        seq = scene.sequence_editor
+        col = self.layout.column()
+        if seq is not None and hasattr(seq, "strips"):
+            col.prop_search(self, "strip_name", seq, "strips", text="Strip")
+        elif seq is not None and hasattr(seq, "sequences"):
+            col.prop_search(self, "strip_name", seq, "sequences", text="Strip")
+        else:
+            col.prop(self, "strip_name")
+
+    def execute(self, context):
+        scene = context.scene
+        strip = tlb.find_strip_by_name(scene, self.strip_name)
+        if strip is None:
+            self.report({'ERROR'}, f"Strip '{self.strip_name}' não encontrada")
+            return {'CANCELLED'}
+        if getattr(strip, "sound", None) is None:
+            self.report({'ERROR'}, "A strip selecionada não é uma SOUND strip")
+            return {'CANCELLED'}
+
+        channel_index = self.channel_index if self.channel_index >= 0 else _active_channel_index(context)
+        chain = get_or_create_chain(scene, channel_index)
+        if not len(chain.vsts):
+            self.report({'WARNING'}, "Este canal não tem VSTs de efeito na cadeia")
+            return {'CANCELLED'}
+
+        sample_rate = _sample_rate(context)
+        source_path = bpy.path.abspath(strip.sound.filepath)
+
+        try:
+            audio = tlb.read_audio_stereo(source_path, sample_rate)
+            processed = tlb.apply_effect_chain_to_audio(chain.vsts, get_live_vst, audio, sample_rate)
+        except Exception as e:
+            self.report({'ERROR'}, f"Falha ao processar áudio: {e}")
+            return {'CANCELLED'}
+
+        out_dir = bpy.path.abspath("//daw_renders/vst/")
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in self.strip_name)
+        out_name = f"{safe_name}_vst"
+        wav_path = os.path.join(out_dir, f"{out_name}.wav")
+        tlb.write_wav_stereo(wav_path, processed, sample_rate)
+
+        new_channel = tlb.find_free_channel(scene.sequence_editor_create(), min_channel=strip.channel + 1)
+        try:
+            tlb.upsert_sound_strip(scene, out_name, wav_path, new_channel, strip.frame_start)
+        except Exception as e:
+            self.report({'ERROR'}, f"Falha ao criar strip processada: {e}")
+            return {'CANCELLED'}
+
+        strip.mute = True  # a strip seca fica presente, mas silenciada
+        self.report({'INFO'}, f"'{out_name}' criado no canal {new_channel} — strip original mutada")
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------- #
 # Instalação do dawdreamer
 # ---------------------------------------------------------------------- #
 class DAW_OT_InstallDawdreamer(Operator):
@@ -412,5 +558,7 @@ classes = [
     DAW_OT_SetVstParameter,
     DAW_OT_SaveVstPreset,
     DAW_OT_LoadVstPreset,
+    DAW_OT_RenderVstInstrumentToTimeline,
+    DAW_OT_ApplyVstEffectToStrip,
     DAW_OT_InstallDawdreamer,
 ]
