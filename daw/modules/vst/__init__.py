@@ -1,83 +1,171 @@
-# modules/effects/__init__.py
-"""
-Módulo de Efeitos da DAW.
+bl_info = {
+    "name": "Blender DAW",
+    "author": "Italo Nicacio Dev ",
+    "version": (0, 17, 0, 'beta'),
+    "blender": (4, 5, 0),
+    "location": "DAW Workspace",
+    "description": "DAW completa integrada ao Blender",
+    "category": "Audio",
+}
 
-Responsabilidade:
-    Gerenciar, por canal, uma cadeia ordenada de efeitos de inserção
-    (chorus, compressor, delay, distortion, EQ, flanger, limiter, phaser,
-    reverb), com bypass, presets embutidos e presets salvos pelo usuário.
+import bpy
+import importlib
+import traceback
 
-Arquitetura:
-    chorus.py, compressor.py, delay.py, distortion.py, eq.py,
-    flanger.py, limiter.py, phaser.py, reverb.py
-                      — modelo puro de parâmetros de cada efeito (sem bpy),
-                        cada um com sua dataclass de parâmetros + PRESETS
-    rack.py           — EffectSlot / EffectsChain / EffectsRack (sem bpy)
-    presets.py        — combina presets embutidos com presets do usuário (JSON em disco)
-    utils.py          — ponte entre o modelo puro e o RNA do Blender
-    properties.py     — PropertyGroups do Blender (estado real da UI)
-    operators.py      — Operators do Blender (ações de edição)
-    ui.py             — Painéis do Blender
-    register.py       — register() / unregister()
+# ─────────────────────────────────────────────────────────────────
+#  UI "legada" (workspace, painéis simples, editores modais)
+# ─────────────────────────────────────────────────────────────────
+from .ui import panels, workspace, beat_grid
+from .ui import piano_roll as legacy_piano_roll
 
-Uso no motor de áudio (fora do Blender), a partir do modelo puro:
-    from daw.modules.effects import EffectsRack
+# ─────────────────────────────────────────────────────────────────
+#  Motor de áudio / propriedades centrais da cena (scene.daw)
+# ─────────────────────────────────────────────────────────────────
+from .core import register as core_register
 
-    rack = EffectsRack()
-    chain = rack.get_chain(channel_index=0)
-    chain.add_effect("COMPRESSOR")
-    chain.add_effect("REVERB")
-
-    for slot in chain.active_slots():
-        apply_effect(slot.effect_type, slot.params_dict)  # no motor C++
-
-Uso a partir da cena do Blender (RNA), dentro de um Operator/Panel:
-    rack_props = context.scene.daw_effects
-    chain = get_or_create_chain(rack_props, channel_index=0)
-    for slot in chain.slots:
-        ...
-"""
-from __future__ import annotations
-
-from . import chorus, compressor, delay, distortion, eq, flanger, limiter, phaser, reverb
-from .rack import (
-    EFFECT_TYPES,
-    EffectSlot,
-    EffectsChain,
-    EffectsRack,
-    default_params_for,
-    presets_for,
-)
-from .presets import (
-    list_all_preset_names,
-    get_preset_params,
-    resolve_params,
-    save_user_preset,
-    delete_user_preset,
-)
-from .utils import (
-    clamp_index,
-    get_chain,
-    get_or_create_chain,
-    params_attr_name,
-    apply_params_dict_to_slot,
-    slot_params_to_dict,
-)
-from .register import register, unregister
-
-__all__ = [
-    # Módulos de efeito individuais
-    "chorus", "compressor", "delay", "distortion", "eq",
-    "flanger", "limiter", "phaser", "reverb",
-    # Modelo puro (rack)
-    "EFFECT_TYPES", "EffectSlot", "EffectsChain", "EffectsRack",
-    "default_params_for", "presets_for",
-    # Presets
-    "list_all_preset_names", "get_preset_params", "resolve_params",
-    "save_user_preset", "delete_user_preset",
-    # Utils / ponte RNA
-    "clamp_index", "get_chain", "get_or_create_chain",
-    "params_attr_name", "apply_params_dict_to_slot", "slot_params_to_dict",
-    # Blender
-    "register", "unregister",
+# ─────────────────────────────────────────────────────────────────
+#  Módulos funcionais da DAW (daw/modules/*)
+#
+#  Cada módulo expõe register()/unregister() no seu __init__.py.
+#  A importação é feita de forma defensiva (importlib + try/except):
+#  se um módulo tiver um bug de import (ex.: um arquivo referenciando
+#  um nome que não existe), o restante da DAW continua funcionando
+#  em vez do addon inteiro falhar ao carregar no Blender.
+# ─────────────────────────────────────────────────────────────────
+_MODULE_NAMES = [
+    "settings",
+    "project",
+    "transport",
+    "timeline",
+    "mixer",
+    "channel_rack",
+    "patterns",
+    "piano_roll",
+    "instruments",
+    "sampler",
+    "effects",
+    "automation",
+    "metronome",
+    "recorder",
+    "render",
+    "export",
+    "playlist",
+    "browser",
 ]
+
+_SUBMODULES = []  # preenchido em _import_submodules(): lista de (name, module | None)
+
+
+def _import_submodules():
+    _SUBMODULES.clear()
+    for name in _MODULE_NAMES:
+        try:
+            module = importlib.import_module(f".modules.{name}", package=__name__)
+        except Exception:
+            print(f"[DAW] ⚠ Falha ao importar o módulo '{name}' — ele ficará indisponível:")
+            traceback.print_exc()
+            module = None
+        _SUBMODULES.append((name, module))
+
+
+def _register_submodules():
+    for name, module in _SUBMODULES:
+        if module is None:
+            continue
+        func = getattr(module, "register", None)
+        if not callable(func):
+            print(f"[DAW] Módulo '{name}' ainda não implementa register() — pulando.")
+            continue
+        try:
+            func()
+        except Exception:
+            print(f"[DAW] ⚠ Falha ao registrar o módulo '{name}':")
+            traceback.print_exc()
+
+
+def _unregister_submodules():
+    for name, module in reversed(_SUBMODULES):
+        if module is None:
+            continue
+        func = getattr(module, "unregister", None)
+        if not callable(func):
+            continue
+        try:
+            func()
+        except Exception:
+            print(f"[DAW] ⚠ Falha ao desregistrar o módulo '{name}':")
+            traceback.print_exc()
+
+
+@bpy.app.handlers.persistent
+def on_load_post(scene, depsgraph=None):
+    try:
+        workspace.ensure_daw_workspace()
+    except Exception:
+        pass
+
+
+def _install_template():
+    try:
+        from .template_installer import install_template
+        install_template()
+    except Exception as e:
+        print(f"[DAW] Template: {e}")
+    return None
+
+
+def register():
+    # 1. UI legada (janela/workspace + editores modais próprios)
+    panels.register()
+    workspace.register()
+    legacy_piano_roll.register()
+    beat_grid.register()
+
+    # 2. Motor de áudio + propriedades centrais (scene.daw)
+    core_register.register()
+
+    # 3. Módulos funcionais (transport, mixer, patterns, piano_roll, etc.)
+    _import_submodules()
+    _register_submodules()
+
+    if on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(on_load_post)
+
+    bpy.app.timers.register(_install_template, first_interval=1.0)
+
+    try:
+        workspace.ensure_daw_workspace()
+    except Exception:
+        pass
+
+    version_str = ".".join(str(v) for v in bl_info["version"])
+    print(f"[DAW] Addon v{version_str} registrado")
+
+
+def unregister():
+    if on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(on_load_post)
+
+    def _cleanup():
+        try:
+            from .template_installer import uninstall_template
+            uninstall_template()
+        except Exception:
+            pass
+        try:
+            workspace.remove_daw_workspace()
+        except Exception:
+            pass
+        return None
+
+    bpy.app.timers.register(_cleanup, first_interval=0.1)
+
+    # Ordem inversa do register()
+    _unregister_submodules()
+
+    core_register.unregister()
+
+    beat_grid.unregister()
+    legacy_piano_roll.unregister()
+    workspace.unregister()
+    panels.unregister()

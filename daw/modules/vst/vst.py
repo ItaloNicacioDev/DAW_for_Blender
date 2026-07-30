@@ -93,6 +93,104 @@ class VST:
         self.vendor = ""
         self.loaded = False
         self.error: Optional[str] = None
+        self.plugin_format: str = "UNKNOWN"  # "VST2" | "VST3" | "UNKNOWN"
+
+        # Ponte para o motor real de processamento (dawdreamer).
+        # None enquanto não carregado. Ver modules/vst/engine.py.
+        self.bridge = None
+
+    # ------------------------------------------------------------------
+    # Ciclo de vida (carregamento real via dawdreamer)
+    # ------------------------------------------------------------------
+    def load(self, sample_rate: int = 44100, block_size: int = 512) -> bool:
+        """
+        Carrega o plugin de verdade através do DawdreamerBridge.
+
+        Detecta automaticamente VST2 x VST3 pela extensão do arquivo e
+        escolhe o modo de processamento certo (efeito ou instrumento MIDI)
+        de acordo com `self.vst_type` — o usuário não precisa informar,
+        cada VST é tratado conforme seu próprio tipo.
+
+        Retorna True em caso de sucesso. Em caso de erro, `self.error` é
+        preenchido e `self.loaded` permanece False.
+        """
+        from .engine import DawdreamerBridge, detect_plugin_format, is_available, install_instructions
+
+        self.error = None
+        self.plugin_format = detect_plugin_format(self.path)
+
+        if not is_available():
+            self.error = install_instructions()
+            self.loaded = False
+            return False
+
+        try:
+            bridge = DawdreamerBridge(sample_rate=sample_rate, block_size=block_size)
+            bridge.load(self.path, self.vst_type)
+            self.bridge = bridge
+            self._refresh_parameters_from_bridge()
+            self.loaded = True
+            return True
+        except Exception as e:
+            self.error = str(e)
+            self.loaded = False
+            self.bridge = None
+            return False
+
+    def unload(self) -> None:
+        """Libera o plugin e o motor associado."""
+        if self.bridge is not None:
+            try:
+                self.bridge.unload()
+            except Exception:
+                pass
+        self.bridge = None
+        self.loaded = False
+
+    def _refresh_parameters_from_bridge(self) -> None:
+        """Preenche parameter_info/parameters a partir do plugin real carregado."""
+        if self.bridge is None:
+            return
+        self.parameter_info.clear()
+        self.parameters.clear()
+        for param in self.bridge.list_parameters():
+            self.parameter_info[param.id] = param
+            self.parameters[param.id] = param.value
+
+    # ------------------------------------------------------------------
+    # Processamento real (delegado ao bridge)
+    # ------------------------------------------------------------------
+    def process_effect(self, audio):
+        """
+        Processa um buffer de áudio (numpy array estéreo) através deste VST,
+        desde que seja um efeito e esteja carregado. Aplica bypass e os
+        valores atuais de `self.parameters` antes de processar.
+        """
+        if self.bridge is None or not self.loaded:
+            raise RuntimeError(f"VST '{self.name}' não está carregado")
+        if self.bypass:
+            return audio
+        self._push_parameters_to_bridge()
+        return self.bridge.process_effect(audio)
+
+    def render_instrument(self, midi_notes, duration: float):
+        """
+        Renderiza este VST instrumento a partir de uma lista de notas MIDI:
+        [(pitch, start_seconds, duration_seconds, velocity), ...]
+        """
+        if self.bridge is None or not self.loaded:
+            raise RuntimeError(f"VST '{self.name}' não está carregado")
+        self._push_parameters_to_bridge()
+        return self.bridge.render_instrument(midi_notes, duration)
+
+    def _push_parameters_to_bridge(self) -> None:
+        if self.bridge is None:
+            return
+        for param_id, value in self.parameters.items():
+            try:
+                self.bridge.set_parameter(param_id, value)
+            except Exception:
+                pass
 
     def is_instrument(self) -> bool:
         """Retorna True se é um instrumento, False se é efeito"""
