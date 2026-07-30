@@ -270,6 +270,18 @@ class DawVstSettings(bpy.types.PropertyGroup):
         max=64,
     )
 
+    is_installing_dawdreamer: BoolProperty(
+        name="Instalando dawdreamer",
+        description="Instalação do dawdreamer em andamento (via pip, em background)",
+        default=False,
+    )
+
+    dawdreamer_install_log: StringProperty(
+        name="Log da Instalação",
+        description="Últimas linhas de saída da instalação do dawdreamer",
+        default="",
+    )
+
 
 # ═══════════════════════════════════════════════════════════════
 #  REGISTRO NO BLENDER

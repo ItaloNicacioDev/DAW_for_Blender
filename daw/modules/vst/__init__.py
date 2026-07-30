@@ -1,171 +1,79 @@
-bl_info = {
-    "name": "Blender DAW",
-    "author": "Italo Nicacio Dev ",
-    "version": (0, 17, 0, 'beta'),
-    "blender": (4, 5, 0),
-    "location": "DAW Workspace",
-    "description": "DAW completa integrada ao Blender",
-    "category": "Audio",
-}
+# modules/vst/__init__.py
+"""
+Módulo VST da DAW.
 
-import bpy
-import importlib
-import traceback
+Responsabilidade:
+    Suporte a plugins VST2 e VST3 — tanto efeitos (inseridos na cadeia de
+    um canal) quanto instrumentos (síntese via MIDI), processados de
+    verdade através de `dawdreamer`.
 
-# ─────────────────────────────────────────────────────────────────
-#  UI "legada" (workspace, painéis simples, editores modais)
-# ─────────────────────────────────────────────────────────────────
-from .ui import panels, workspace, beat_grid
-from .ui import piano_roll as legacy_piano_roll
+Arquitetura:
+    vst.py         — modelo puro de um plugin VST (sem bpy): parâmetros,
+                      programas/presets em memória, delega processamento
+                      real ao bridge.
+    engine.py      — ponte real de processamento (DawdreamerBridge):
+                      detecção de formato VST2/VST3, checagem de
+                      disponibilidade da lib, processamento de efeito
+                      (bloco a bloco) e render de instrumento (MIDI -> áudio).
+    pressets.py    — presets embutidos + presets do usuário (JSON em disco).
+    utils.py       — registro global vst_id -> VST puro, ponte RNA <-> puro,
+                      varredura de diretórios por plugins.
+    properties.py  — PropertyGroups do Blender (estado real da UI).
+    operators.py   — Operators do Blender (escanear, adicionar/remover,
+                      bypass, reload, parâmetros, presets, instalar dawdreamer).
+    ui.py          — Painéis do Blender (Browser, Efeitos, Instrumentos).
+    register.py    — register() / unregister().
 
-# ─────────────────────────────────────────────────────────────────
-#  Motor de áudio / propriedades centrais da cena (scene.daw)
-# ─────────────────────────────────────────────────────────────────
-from .core import register as core_register
+Uso fora do Blender, a partir do modelo puro:
+    from daw.modules.vst import VST, VSTProgramType
 
-# ─────────────────────────────────────────────────────────────────
-#  Módulos funcionais da DAW (daw/modules/*)
-#
-#  Cada módulo expõe register()/unregister() no seu __init__.py.
-#  A importação é feita de forma defensiva (importlib + try/except):
-#  se um módulo tiver um bug de import (ex.: um arquivo referenciando
-#  um nome que não existe), o restante da DAW continua funcionando
-#  em vez do addon inteiro falhar ao carregar no Blender.
-# ─────────────────────────────────────────────────────────────────
-_MODULE_NAMES = [
-    "settings",
-    "project",
-    "transport",
-    "timeline",
-    "mixer",
-    "channel_rack",
-    "patterns",
-    "piano_roll",
-    "instruments",
-    "sampler",
-    "effects",
-    "automation",
-    "metronome",
-    "recorder",
-    "render",
-    "export",
-    "playlist",
-    "browser",
+    fx = VST(path="/plugins/MyComp.vst3", name="MyComp", vst_type=VSTProgramType.EFFECT)
+    if fx.load():
+        processed = fx.process_effect(audio_buffer)
+
+    synth = VST(path="/plugins/MySynth.vst3", name="MySynth", vst_type=VSTProgramType.INSTRUMENT)
+    if synth.load():
+        audio = synth.render_instrument(midi_notes, duration=4.0)
+
+Uso a partir da cena do Blender (RNA), dentro de um Operator/Panel:
+    chain = get_or_create_chain(context.scene, channel_index=0)
+    for item in chain.vsts:
+        live = get_live_vst(item.vst_id)
+        ...
+"""
+from __future__ import annotations
+
+from .vst import VST, VSTProgramType, VSTProgramParameter, VSTProgramState
+from . import engine
+from .pressets import get_preset_manager, VSTProgramPresetManager
+from .utils import (
+    get_live_vst,
+    register_live_vst,
+    unregister_live_vst,
+    get_or_create_live_vst,
+    sync_rna_from_pure,
+    sync_pure_bypass,
+    clamp_index,
+    get_chain,
+    get_or_create_chain,
+    make_unique_vst_id,
+    scan_directory_for_vsts,
+    scan_multiple_directories,
+)
+from .register import register, unregister
+
+__all__ = [
+    # Modelo puro
+    "VST", "VSTProgramType", "VSTProgramParameter", "VSTProgramState",
+    # Motor (dawdreamer)
+    "engine",
+    # Presets
+    "get_preset_manager", "VSTProgramPresetManager",
+    # Ponte RNA <-> puro
+    "get_live_vst", "register_live_vst", "unregister_live_vst", "get_or_create_live_vst",
+    "sync_rna_from_pure", "sync_pure_bypass", "clamp_index",
+    "get_chain", "get_or_create_chain", "make_unique_vst_id",
+    "scan_directory_for_vsts", "scan_multiple_directories",
+    # Blender
+    "register", "unregister",
 ]
-
-_SUBMODULES = []  # preenchido em _import_submodules(): lista de (name, module | None)
-
-
-def _import_submodules():
-    _SUBMODULES.clear()
-    for name in _MODULE_NAMES:
-        try:
-            module = importlib.import_module(f".modules.{name}", package=__name__)
-        except Exception:
-            print(f"[DAW] ⚠ Falha ao importar o módulo '{name}' — ele ficará indisponível:")
-            traceback.print_exc()
-            module = None
-        _SUBMODULES.append((name, module))
-
-
-def _register_submodules():
-    for name, module in _SUBMODULES:
-        if module is None:
-            continue
-        func = getattr(module, "register", None)
-        if not callable(func):
-            print(f"[DAW] Módulo '{name}' ainda não implementa register() — pulando.")
-            continue
-        try:
-            func()
-        except Exception:
-            print(f"[DAW] ⚠ Falha ao registrar o módulo '{name}':")
-            traceback.print_exc()
-
-
-def _unregister_submodules():
-    for name, module in reversed(_SUBMODULES):
-        if module is None:
-            continue
-        func = getattr(module, "unregister", None)
-        if not callable(func):
-            continue
-        try:
-            func()
-        except Exception:
-            print(f"[DAW] ⚠ Falha ao desregistrar o módulo '{name}':")
-            traceback.print_exc()
-
-
-@bpy.app.handlers.persistent
-def on_load_post(scene, depsgraph=None):
-    try:
-        workspace.ensure_daw_workspace()
-    except Exception:
-        pass
-
-
-def _install_template():
-    try:
-        from .template_installer import install_template
-        install_template()
-    except Exception as e:
-        print(f"[DAW] Template: {e}")
-    return None
-
-
-def register():
-    # 1. UI legada (janela/workspace + editores modais próprios)
-    panels.register()
-    workspace.register()
-    legacy_piano_roll.register()
-    beat_grid.register()
-
-    # 2. Motor de áudio + propriedades centrais (scene.daw)
-    core_register.register()
-
-    # 3. Módulos funcionais (transport, mixer, patterns, piano_roll, etc.)
-    _import_submodules()
-    _register_submodules()
-
-    if on_load_post not in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.append(on_load_post)
-
-    bpy.app.timers.register(_install_template, first_interval=1.0)
-
-    try:
-        workspace.ensure_daw_workspace()
-    except Exception:
-        pass
-
-    version_str = ".".join(str(v) for v in bl_info["version"])
-    print(f"[DAW] Addon v{version_str} registrado")
-
-
-def unregister():
-    if on_load_post in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.remove(on_load_post)
-
-    def _cleanup():
-        try:
-            from .template_installer import uninstall_template
-            uninstall_template()
-        except Exception:
-            pass
-        try:
-            workspace.remove_daw_workspace()
-        except Exception:
-            pass
-        return None
-
-    bpy.app.timers.register(_cleanup, first_interval=0.1)
-
-    # Ordem inversa do register()
-    _unregister_submodules()
-
-    core_register.unregister()
-
-    beat_grid.unregister()
-    legacy_piano_roll.unregister()
-    workspace.unregister()
-    panels.unregister()
