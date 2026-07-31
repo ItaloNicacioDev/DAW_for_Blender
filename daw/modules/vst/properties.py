@@ -2,13 +2,16 @@
 """
 PropertyGroups do Blender para VST.
 
-Define estrutura de propriedades Blender (RNA) que espelham
-o estado do modelo puro VST.
-
-Armazenado em:
-    scene.daw_vst.effect_chains[channel]
-    scene.daw_vst.instruments[channel]
-    scene.daw_vst.vst_browser (para UI de seleção)
+Melhorias em relação à versão anterior:
+    - DawVstSettings: novos campos
+        · auto_bounce_on_change  — bounce automático ao mudar parâmetro
+        · param_display_limit    — quantos parâmetros mostrar por vez (scroll)
+        · is_live_monitoring     — estado do monitor ao vivo
+        · is_installing_sounddevice / sounddevice_install_log
+    - DawVstProperty: novo campo
+        · param_scroll_offset    — para scroll de parâmetros na UI
+        · param_search           — busca por nome de parâmetro
+    - DawVstChainProperty: sem alteração estrutural, mas mantido limpo
 """
 from __future__ import annotations
 
@@ -73,7 +76,7 @@ class DawVstProperty(bpy.types.PropertyGroup):
 
     vst_name: StringProperty(
         name="VST Name",
-        description="Nome exibição do VST",
+        description="Nome de exibição do VST",
         default="",
     )
 
@@ -134,6 +137,27 @@ class DawVstProperty(bpy.types.PropertyGroup):
         default="default",
     )
 
+    # ── Scroll e busca de parâmetros ──────────────────────────────────
+    param_scroll_offset: IntProperty(
+        name="Scroll de Parâmetros",
+        description="Índice do primeiro parâmetro visível (para scroll quando há muitos)",
+        default=0,
+        min=0,
+    )
+
+    param_search: StringProperty(
+        name="Buscar Parâmetro",
+        description="Filtra parâmetros por nome",
+        default="",
+    )
+
+    # Expandido ou recolhido na UI
+    is_expanded: BoolProperty(
+        name="Expandido",
+        description="Mostra detalhes (parâmetros, presets) deste VST",
+        default=True,
+    )
+
 
 class DawVstChainProperty(bpy.types.PropertyGroup):
     """Representa uma cadeia de VST effects"""
@@ -150,7 +174,6 @@ class DawVstChainProperty(bpy.types.PropertyGroup):
         description="VSTs na cadeia",
     )
 
-    # Índice do VST selecionado para edição
     active_vst_index: IntProperty(
         name="Active VST Index",
         description="Índice do VST ativo",
@@ -158,7 +181,6 @@ class DawVstChainProperty(bpy.types.PropertyGroup):
         min=0,
     )
 
-    # Max de VSTs na cadeia
     max_slots: IntProperty(
         name="Max Slots",
         description="Número máximo de slots",
@@ -196,7 +218,6 @@ class DawVstBrowserProperty(bpy.types.PropertyGroup):
         subtype="DIR_PATH",
     )
 
-    # Filtro de tipo
     filter_type: EnumProperty(
         name="Filter Type",
         items=[
@@ -207,14 +228,12 @@ class DawVstBrowserProperty(bpy.types.PropertyGroup):
         default="ALL",
     )
 
-    # Termo de busca
     search_term: StringProperty(
         name="Search",
         description="Buscar VST por nome",
         default="",
     )
 
-    # VSTs descobertos (cache)
     discovered_vsts: CollectionProperty(
         type=DawVstProperty,
         name="Discovered VSTs",
@@ -270,9 +289,28 @@ class DawVstSettings(bpy.types.PropertyGroup):
         max=64,
     )
 
+    # ── Auto-bounce ───────────────────────────────────────────────────
+    auto_bounce_on_change: BoolProperty(
+        name="Auto-Bounce ao Mudar Parâmetro",
+        description=(
+            "Re-renderiza automaticamente o instrumento VST na timeline "
+            "após mudar um parâmetro (debounce de 0.8s). "
+            "Desative se a re-renderização estiver lenta."
+        ),
+        default=False,
+    )
+
+    # ── Monitor ao vivo ──────────────────────────────────────────────
+    is_live_monitoring: BoolProperty(
+        name="Monitor Ao Vivo Ativo",
+        description="Efeitos VST estão processando o microfone em tempo real",
+        default=False,
+    )
+
+    # ── Instalação do dawdreamer ──────────────────────────────────────
     is_installing_dawdreamer: BoolProperty(
         name="Instalando dawdreamer",
-        description="Instalação do dawdreamer em andamento (via pip, em background)",
+        description="Instalação do dawdreamer em andamento",
         default=False,
     )
 
@@ -280,6 +318,28 @@ class DawVstSettings(bpy.types.PropertyGroup):
         name="Log da Instalação",
         description="Últimas linhas de saída da instalação do dawdreamer",
         default="",
+    )
+
+    # ── Instalação do sounddevice ─────────────────────────────────────
+    is_installing_sounddevice: BoolProperty(
+        name="Instalando sounddevice",
+        description="Instalação do sounddevice em andamento",
+        default=False,
+    )
+
+    sounddevice_install_log: StringProperty(
+        name="Log sounddevice",
+        description="Últimas linhas de saída da instalação do sounddevice",
+        default="",
+    )
+
+    # ── UI de parâmetros ─────────────────────────────────────────────
+    param_display_limit: IntProperty(
+        name="Parâmetros por Página",
+        description="Quantos parâmetros mostrar por vez (use scroll para ver mais)",
+        default=12,
+        min=4,
+        max=64,
     )
 
 
@@ -298,11 +358,9 @@ _PROP_CLASSES = [
 
 
 def register():
-    """Registra property groups"""
     for cls in _PROP_CLASSES:
         bpy.utils.register_class(cls)
 
-    # Adicionar ao Scene
     bpy.types.Scene.daw_vst = PointerProperty(
         type=DawVstSettings,
         name="DAW VST Settings",
@@ -329,8 +387,6 @@ def register():
 
 
 def unregister():
-    """Desregistra property groups"""
-    # Remover do Scene
     if hasattr(bpy.types.Scene, "daw_vst"):
         del bpy.types.Scene.daw_vst
     if hasattr(bpy.types.Scene, "daw_vst_chains"):
