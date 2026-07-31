@@ -38,6 +38,10 @@ def _draw_engine_status(layout):
     """Aviso + botão de instalação quando dawdreamer não está disponível."""
     settings = bpy.context.scene.daw_vst
     if engine.is_available():
+        if not engine.is_bundled():
+            # Funciona, mas veio de pip/site-packages, não do addon embutido.
+            box = layout.box()
+            box.label(text="Motor VST: dawdreamer via pip (não embutido)", icon='INFO')
         return
 
     box = layout.box()
