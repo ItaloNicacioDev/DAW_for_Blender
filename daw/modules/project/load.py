@@ -212,15 +212,51 @@ def deserialize_project(scene, data: Dict[str, Any]) -> bool:
     return True
 
 
-def load_project(filepath: str, scene) -> bool:
-    """Carrega um projeto de um arquivo JSON."""
+def load_project(filepath: str, context: bpy.context) -> bool:
+    """Carrega um projeto da DAW."""
+    scene = context.scene
+    
     if not is_valid_project_file(filepath):
         return False
-
+    
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
         return False
-
-    return deserialize_project(scene, data)
+    
+    modules = data.get("modules", {})
+    
+    # Restaurar cada módulo (código existente)
+    if "mixer" in modules:
+        mixer_props = getattr(scene, "daw_mixer", None)
+        if mixer_props is not None:
+            _deserialize_mixer(mixer_props, modules["mixer"])
+    
+    if "patterns" in modules:
+        patterns_props = getattr(scene, "daw_patterns", None)
+        if patterns_props is not None:
+            _deserialize_patterns(patterns_props, modules["patterns"])
+    
+    if "piano_roll" in modules:
+        pr_props = getattr(scene, "daw_piano_roll", None)
+        if pr_props is not None:
+            _deserialize_piano_roll(pr_props, modules["piano_roll"])
+    
+    if "playlist" in modules:
+        pl_props = getattr(scene, "daw_playlist", None)
+        if pl_props is not None:
+            _deserialize_playlist(pl_props, modules["playlist"])
+    
+    # ════════════════════════════════════════════════════════════════
+    # NOVO: Restaurar VST (adicionar estas linhas)
+    # ════════════════════════════════════════════════════════════════
+    if "vst" in modules:
+        try:
+            from ..vst import persistence as vst_persistence
+            vst_persistence.restore_vst_state(scene, modules["vst"], context)
+        except Exception as e:
+            print(f"[DAW] Aviso ao restaurar VST: {e}")
+    # ════════════════════════════════════════════════════════════════
+    
+    return True
