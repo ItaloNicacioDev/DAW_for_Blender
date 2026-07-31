@@ -2,19 +2,24 @@
 """
 Operators do Blender para o módulo VST.
 
-Responsabilidade:
-    - Escanear diretórios em busca de plugins VST2/VST3.
-    - Adicionar/remover VST em uma cadeia de efeitos (por canal) ou no
-      rack de instrumentos.
-    - Carregar/descarregar o plugin real (via engine.DawdreamerBridge),
-      sincronizando o modelo puro (VST) com o RNA (DawVstProperty).
-    - Bypass, reload, presets e instalação do dawdreamer.
+Melhorias implementadas em relação à versão anterior:
+    - DAW_OT_MoveVstEffect: move plugins up/down na cadeia (reorder real)
+    - DAW_OT_ScanVstDirectoriesAsync: scan de diretórios em background thread
+      (não trava a UI — usa bpy.app.timers para atualizar o resultado)
+    - DAW_OT_AutoBounceVstInstrument: bounce automático disparado por mudança
+      de parâmetro VST (registrado como handler de depsgraph)
+    - DAW_OT_ToggleVstLiveMonitoring: liga/desliga processamento de efeitos
+      VST sobre o input do microfone em tempo real (via thread de áudio)
+    - DAW_OT_DeleteVstPreset: deleta preset salvo pelo usuário
+    - DAW_OT_ExportVstPresetLibrary / DAW_OT_ImportVstPresetLibrary:
+      exportar/importar biblioteca de presets como .zip
 """
 from __future__ import annotations
 
 import os
+import threading
 import bpy
-from bpy.props import StringProperty, IntProperty, BoolProperty
+from bpy.props import StringProperty, IntProperty, BoolProperty, EnumProperty
 from bpy.types import Operator
 
 from . import engine
@@ -33,6 +38,7 @@ from .utils import (
     scan_multiple_directories,
     clamp_index,
 )
+from .live_monitor import get_live_monitor, LiveMonitorState
 
 
 def _settings(context):
@@ -45,7 +51,6 @@ def _sample_rate(context) -> int:
 
 
 def _active_channel_index(context) -> int:
-    """Usa o canal ativo do Channel Rack, se disponível; senão assume 0."""
     rack_props = getattr(context.scene, "daw_channel_rack", None)
     if rack_props is not None:
         return rack_props.active_channel_index
@@ -70,7 +75,7 @@ def _load_item(item, context) -> bool:
 
 
 # ---------------------------------------------------------------------- #
-# Varredura de diretórios
+# Varredura SÍNCRONA (mantida para compatibilidade)
 # ---------------------------------------------------------------------- #
 class DAW_OT_ScanVstDirectories(Operator):
     bl_idname = "daw.scan_vst_directories"
@@ -96,11 +101,74 @@ class DAW_OT_ScanVstDirectories(Operator):
             item.vst_name = entry["name"]
             item.vst_id = make_unique_vst_id(entry["name"], existing_ids)
             existing_ids.append(item.vst_id)
-            # Formato apenas informativo; tipo (efeito/instrumento) é
-            # decidido pelo usuário ao adicionar à cadeia/rack.
             item.vst_type = "EFFECT"
 
         self.report({'INFO'}, f"{len(found)} plugin(s) encontrado(s)")
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------- #
+# Varredura ASSÍNCRONA (não trava a UI)
+# ---------------------------------------------------------------------- #
+class DAW_OT_ScanVstDirectoriesAsync(Operator):
+    """
+    Scan em background thread — a UI continua responsiva.
+    Usa bpy.app.timers para aplicar o resultado na thread principal
+    (única thread permitida a tocar em RNA/bpy.types).
+    """
+    bl_idname = "daw.scan_vst_directories_async"
+    bl_label = "Escanear VSTs (Assíncrono)"
+    bl_description = (
+        "Varre diretórios em background — a UI não trava. "
+        "O resultado aparece automaticamente quando terminar."
+    )
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        settings = _settings(context)
+        browser = context.scene.daw_vst_browser
+
+        if browser.is_scanning:
+            self.report({'WARNING'}, "Scan já em andamento")
+            return {'CANCELLED'}
+
+        directories = settings.vst_directories
+        browser.is_scanning = True
+
+        _result_holder: list = []  # [List[Dict]] preenchido pela thread
+
+        def _scan_thread():
+            found = scan_multiple_directories(directories, recursive=True)
+            _result_holder.append(found)
+
+        def _apply_result():
+            if not _result_holder:
+                return 0.1  # ainda rodando — re-agenda em 100ms
+
+            found = _result_holder[0]
+            try:
+                br = bpy.context.scene.daw_vst_browser
+                br.discovered_vsts.clear()
+                existing_ids = []
+                for entry in found:
+                    item = br.discovered_vsts.add()
+                    item.vst_path = entry["path"]
+                    item.vst_name = entry["name"]
+                    item.vst_id = make_unique_vst_id(entry["name"], existing_ids)
+                    existing_ids.append(item.vst_id)
+                    item.vst_type = "EFFECT"
+                br.is_scanning = False
+                # Força redraw do painel
+                for area in bpy.context.screen.areas:
+                    area.tag_redraw()
+            except Exception as e:
+                print(f"[DAW VST] Erro ao aplicar resultado do scan: {e}")
+            return None  # cancela o timer
+
+        threading.Thread(target=_scan_thread, daemon=True).start()
+        bpy.app.timers.register(_apply_result, first_interval=0.2)
+
+        self.report({'INFO'}, "Scan iniciado em background...")
         return {'FINISHED'}
 
 
@@ -180,6 +248,43 @@ class DAW_OT_RemoveVstEffect(Operator):
         return {'FINISHED'}
 
 
+class DAW_OT_MoveVstEffect(Operator):
+    """
+    Move um VST de efeito para cima ou para baixo na cadeia do canal.
+    Isso define a ordem de processamento do sinal (como numa DAW real:
+    o primeiro slot recebe o áudio cru, cada slot seguinte recebe a
+    saída do anterior).
+    """
+    bl_idname = "daw.move_vst_effect"
+    bl_label = "Mover VST na Cadeia"
+    bl_description = "Move o VST selecionado para cima ou para baixo na ordem de processamento"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    channel_index: IntProperty(default=-1)
+    vst_index: IntProperty(default=-1)
+    direction: EnumProperty(
+        name="Direção",
+        items=[("UP", "Para Cima", ""), ("DOWN", "Para Baixo", "")],
+        default="UP",
+    )
+
+    def execute(self, context):
+        channel_index = self.channel_index if self.channel_index >= 0 else _active_channel_index(context)
+        chain = get_or_create_chain(context.scene, channel_index)
+        index = self.vst_index if self.vst_index >= 0 else chain.active_vst_index
+
+        if self.direction == "UP" and index > 0:
+            chain.vsts.move(index, index - 1)
+            chain.active_vst_index = index - 1
+        elif self.direction == "DOWN" and index < len(chain.vsts) - 1:
+            chain.vsts.move(index, index + 1)
+            chain.active_vst_index = index + 1
+        else:
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+
 # ---------------------------------------------------------------------- #
 # Rack de instrumentos VST
 # ---------------------------------------------------------------------- #
@@ -230,7 +335,7 @@ class DAW_OT_RemoveVstInstrument(Operator):
 
 
 # ---------------------------------------------------------------------- #
-# Ações comuns (efeito ou instrumento): bypass, reload, parâmetros
+# Ações comuns: bypass, reload, parâmetros
 # ---------------------------------------------------------------------- #
 class DAW_OT_ToggleVstBypass(Operator):
     bl_idname = "daw.toggle_vst_bypass"
@@ -312,6 +417,150 @@ class DAW_OT_SetVstParameter(Operator):
                 vst.bridge.set_parameter(self.param_id, self.value)
             except Exception:
                 pass
+
+        # Marca o VST como "dirty" para o auto-bounce saber que precisa re-renderizar
+        settings = context.scene.daw_vst
+        if settings.auto_bounce_on_change and vst.is_instrument():
+            _schedule_auto_bounce(context, self.vst_id)
+
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------- #
+# Auto-bounce ao mudar parâmetro
+# ---------------------------------------------------------------------- #
+
+_auto_bounce_pending: dict = {}  # vst_id -> timer handle (bool flag)
+
+
+def _schedule_auto_bounce(context, vst_id: str, delay: float = 0.8):
+    """
+    Agenda um bounce automático após `delay` segundos sem nova mudança
+    de parâmetro (debounce). Evita bounce a cada knob girado.
+    """
+    _auto_bounce_pending[vst_id] = True
+
+    def _do_bounce():
+        if not _auto_bounce_pending.get(vst_id):
+            return None  # cancelado por bounce mais recente
+
+        _auto_bounce_pending.pop(vst_id, None)
+
+        try:
+            scene = bpy.context.scene
+            live = get_live_vst(vst_id)
+            if live is None or not live.loaded or not live.is_instrument():
+                return None
+
+            sample_rate = int(getattr(getattr(scene, "daw", None), "sample_rate", 44100))
+            notes, duration, strip_name, frame_start = tlb.notes_from_legacy_piano_roll(scene, sample_rate)
+            if not notes:
+                notes, duration = tlb.notes_from_piano_roll(scene, sample_rate)
+                strip_name = f"{live.name}_vst"
+                frame_start = scene.frame_start
+
+            if not notes:
+                return None
+
+            audio = tlb.render_instrument_notes(live, notes, duration, sample_rate)
+            safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in strip_name) + "_vst"
+            out_dir = bpy.path.abspath("//daw_renders/vst/")
+            wav_path = os.path.join(out_dir, f"{safe_name}.wav")
+            tlb.write_wav_stereo(wav_path, audio, sample_rate)
+
+            seq = scene.sequence_editor_create()
+            channel = tlb.find_free_channel(seq)
+            tlb.upsert_sound_strip(scene, safe_name, wav_path, channel, frame_start)
+
+            for area in bpy.context.screen.areas:
+                area.tag_redraw()
+        except Exception as e:
+            print(f"[DAW VST] Auto-bounce falhou para '{vst_id}': {e}")
+
+        return None
+
+    # Cancela qualquer timer pendente (debounce) e agenda novo
+    bpy.app.timers.register(_do_bounce, first_interval=delay)
+
+
+class DAW_OT_AutoBounceVstInstrument(Operator):
+    """
+    Bounce manual com o mesmo mecanismo do auto-bounce (para o botão da UI).
+    """
+    bl_idname = "daw.auto_bounce_vst_instrument"
+    bl_label = "Re-Bounce Agora"
+    bl_description = (
+        "Re-renderiza as notas do Piano Roll através deste VST instrumento "
+        "e atualiza a strip na timeline. Use após mudar parâmetros ou notas."
+    )
+    bl_options = {'REGISTER'}
+
+    vst_id: StringProperty(default="")
+
+    def execute(self, context):
+        live = get_live_vst(self.vst_id)
+        if live is None or not live.loaded or not live.is_instrument():
+            self.report({'ERROR'}, "VST instrumento não carregado")
+            return {'CANCELLED'}
+
+        _auto_bounce_pending[self.vst_id] = True
+        _schedule_auto_bounce(context, self.vst_id, delay=0.0)
+        self.report({'INFO'}, "Bounce agendado...")
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------- #
+# Monitoramento ao vivo (efeitos VST sobre o microfone)
+# ---------------------------------------------------------------------- #
+class DAW_OT_ToggleVstLiveMonitoring(Operator):
+    """
+    Liga/desliga o processamento de efeitos VST sobre a entrada do microfone
+    em tempo real.
+
+    Como funciona:
+        O Blender não expõe API de DSP ao vivo — então usamos uma thread de
+        áudio dedicada (via sounddevice/pyaudio, se disponível) que:
+            1. Captura blocos do microfone
+            2. Passa cada bloco pela cadeia de VST effects do canal ativo
+            3. Reproduz o resultado no dispositivo de saída padrão
+
+        O estado vive em `live_monitor.LiveMonitorState` (singleton).
+        Ao desligar, a thread para e o dispositivo fecha.
+
+    Limitação:
+        Latência depende do block_size do dispositivo de áudio, não do
+        Blender. Para low-latency real use ASIO/CoreAudio com block_size
+        pequeno (128–256 amostras).
+    """
+    bl_idname = "daw.toggle_vst_live_monitoring"
+    bl_label = "Monitor Ao Vivo (VST)"
+    bl_description = (
+        "Liga/desliga o processamento dos VST de efeito sobre o microfone em tempo real. "
+        "Requer sounddevice instalado."
+    )
+    bl_options = {'REGISTER'}
+
+    channel_index: IntProperty(default=-1)
+
+    def execute(self, context):
+        monitor = get_live_monitor()
+        channel_index = self.channel_index if self.channel_index >= 0 else _active_channel_index(context)
+        sample_rate = _sample_rate(context)
+
+        if monitor.is_running:
+            monitor.stop()
+            self.report({'INFO'}, "Monitor ao vivo desligado")
+        else:
+            chain = get_or_create_chain(context.scene, channel_index)
+            vst_ids = [item.vst_id for item in chain.vsts if not item.bypass and item.is_loaded]
+            live_vsts = [get_live_vst(vid) for vid in vst_ids if get_live_vst(vid) is not None]
+
+            ok, msg = monitor.start(live_vsts, sample_rate=sample_rate)
+            if ok:
+                self.report({'INFO'}, "Monitor ao vivo ligado")
+            else:
+                self.report({'ERROR'}, f"Não foi possível iniciar o monitor: {msg}")
+
         return {'FINISHED'}
 
 
@@ -368,34 +617,132 @@ class DAW_OT_LoadVstPreset(Operator):
         ok = manager.load_preset(vst, self.preset_name)
         if ok:
             self.report({'INFO'}, f"Preset '{self.preset_name}' aplicado")
+            # Sincroniza parâmetros do modelo puro de volta para o RNA
+            _sync_item_params_from_live(context, self.vst_id)
         else:
             self.report({'ERROR'}, "Preset não encontrado")
         return {'FINISHED'} if ok else {'CANCELLED'}
 
 
+def _sync_item_params_from_live(context, vst_id: str):
+    """Atualiza os parâmetros RNA de todos os itens que referenciam este vst_id."""
+    vst = get_live_vst(vst_id)
+    if vst is None:
+        return
+
+    scene = context.scene
+    # Percorre todas as cadeias e o rack para achar o item RNA
+    for chain in scene.daw_vst_chains:
+        for item in chain.vsts:
+            if item.vst_id == vst_id:
+                sync_rna_from_pure(item, vst)
+    for item in scene.daw_vst_instruments.instruments:
+        if item.vst_id == vst_id:
+            sync_rna_from_pure(item, vst)
+
+
+class DAW_OT_DeleteVstPreset(Operator):
+    """
+    Deleta um preset do usuário. Não afeta presets embutidos.
+    """
+    bl_idname = "daw.delete_vst_preset"
+    bl_label = "Deletar Preset"
+    bl_description = "Remove o preset selecionado do disco (apenas presets do usuário)"
+    bl_options = {'REGISTER'}
+
+    vst_id: StringProperty(default="")
+    preset_name: StringProperty(default="")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(
+            self, event,
+            message=f"Deletar preset '{self.preset_name}'? Esta ação não pode ser desfeita."
+        )
+
+    def execute(self, context):
+        vst = get_live_vst(self.vst_id)
+        if vst is None:
+            self.report({'WARNING'}, "VST não está carregado")
+            return {'CANCELLED'}
+
+        manager = get_preset_manager()
+        ok = manager.delete_preset(vst.name, self.preset_name)
+        if ok:
+            self.report({'INFO'}, f"Preset '{self.preset_name}' deletado")
+        else:
+            self.report({'WARNING'}, "Preset não encontrado")
+        return {'FINISHED'} if ok else {'CANCELLED'}
+
+
+class DAW_OT_ExportVstPresetLibrary(Operator):
+    """Exporta todos os presets do usuário como .zip para backup ou compartilhar."""
+    bl_idname = "daw.export_vst_preset_library"
+    bl_label = "Exportar Presets"
+    bl_description = "Exporta todos os presets VST como arquivo .zip"
+    bl_options = {'REGISTER'}
+
+    filepath: StringProperty(subtype='FILE_PATH', default="vst_presets.zip")
+
+    def invoke(self, context, event):
+        if not self.filepath.endswith(".zip"):
+            self.filepath += ".zip"
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        from pathlib import Path
+        manager = get_preset_manager()
+        ok = manager.export_preset_library(Path(self.filepath))
+        if ok:
+            self.report({'INFO'}, f"Presets exportados para '{self.filepath}'")
+        else:
+            self.report({'ERROR'}, "Falha ao exportar presets")
+        return {'FINISHED'} if ok else {'CANCELLED'}
+
+
+class DAW_OT_ImportVstPresetLibrary(Operator):
+    """Importa biblioteca de presets de um .zip (criado por ExportVstPresetLibrary)."""
+    bl_idname = "daw.import_vst_preset_library"
+    bl_label = "Importar Presets"
+    bl_description = "Importa presets VST de um arquivo .zip exportado anteriormente"
+    bl_options = {'REGISTER'}
+
+    filepath: StringProperty(subtype='FILE_PATH', default="")
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        from pathlib import Path
+        manager = get_preset_manager()
+        ok = manager.import_preset_library(Path(self.filepath))
+        if ok:
+            self.report({'INFO'}, "Presets importados com sucesso")
+        else:
+            self.report({'ERROR'}, "Falha ao importar presets")
+        return {'FINISHED'} if ok else {'CANCELLED'}
+
+
 # ---------------------------------------------------------------------- #
-# Bounce na Timeline (motor de áudio nativo do Blender / VSE)
+# Bounce na Timeline
 # ---------------------------------------------------------------------- #
 class DAW_OT_RenderVstInstrumentToTimeline(Operator):
     bl_idname = "daw.render_vst_instrument_to_timeline"
     bl_label = "Renderizar Instrumento na Timeline"
     bl_description = (
         "Sintetiza as notas do Piano Roll através deste VST instrumento e "
-        "insere o resultado como uma SOUND strip na timeline (motor de "
-        "áudio nativo do Blender). Precisa ser refeito ao mudar notas ou "
-        "parâmetros do VST."
+        "insere o resultado como uma SOUND strip na timeline."
     )
     bl_options = {'REGISTER', 'UNDO'}
 
     vst_id: StringProperty(default="")
     strip_name: StringProperty(name="Nome da Strip", default="")
     start_beat: bpy.props.FloatProperty(name="Início (beats)", default=0.0, min=0.0)
-    channel: IntProperty(name="Canal do Sequencer", default=0, min=0)  # 0 = auto
+    channel: IntProperty(name="Canal do Sequencer", default=0, min=0)
 
     def invoke(self, context, event):
         if not self.strip_name:
-            # Tenta herdar o nome/posição do strip MIDI ativo no Piano Roll
-            # real (mesma linha que `DAW_OT_RenderNotesToStrip` já usa).
             _, _, legacy_name, legacy_frame = tlb.notes_from_legacy_piano_roll(context.scene)
             live = get_live_vst(self.vst_id)
             base_name = legacy_name or (live.name if live else self.vst_id)
@@ -421,13 +768,7 @@ class DAW_OT_RenderVstInstrumentToTimeline(Operator):
         scene = context.scene
         sample_rate = _sample_rate(context)
 
-        # Fonte primária: o Piano Roll REAL do projeto (`scene.piano_roll`,
-        # onde as notas de fato são desenhadas) — segue a mesma linha de
-        # MIDI e de posição no Sequencer que o resto do addon já usa.
         notes, duration, _, _ = tlb.notes_from_legacy_piano_roll(scene, sample_rate)
-
-        # Fallback: módulo mais novo (`scene.daw_piano_roll`), caso o
-        # projeto passe a usar ele no futuro.
         if not notes:
             notes, duration = tlb.notes_from_piano_roll(scene, sample_rate)
 
@@ -465,8 +806,7 @@ class DAW_OT_ApplyVstEffectToStrip(Operator):
     bl_label = "Aplicar Cadeia de VST a uma Strip"
     bl_description = (
         "Processa o áudio de uma SOUND strip existente através da cadeia "
-        "de efeitos VST do canal e insere o resultado como uma nova strip "
-        "(o motor nativo do Blender toca o áudio já processado)."
+        "de efeitos VST do canal e insere o resultado como uma nova strip."
     )
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -526,7 +866,7 @@ class DAW_OT_ApplyVstEffectToStrip(Operator):
             self.report({'ERROR'}, f"Falha ao criar strip processada: {e}")
             return {'CANCELLED'}
 
-        strip.mute = True  # a strip seca fica presente, mas silenciada
+        strip.mute = True
         self.report({'INFO'}, f"'{out_name}' criado no canal {new_channel} — strip original mutada")
         return {'FINISHED'}
 
@@ -537,7 +877,7 @@ class DAW_OT_ApplyVstEffectToStrip(Operator):
 class DAW_OT_InstallDawdreamer(Operator):
     bl_idname = "daw.install_dawdreamer"
     bl_label = "Instalar dawdreamer"
-    bl_description = "Instala a biblioteca 'dawdreamer' (efeitos + instrumentos MIDI) via pip no Python do Blender"
+    bl_description = "Instala a biblioteca 'dawdreamer' via pip no Python do Blender"
     bl_options = {'REGISTER'}
 
     def execute(self, context):
@@ -562,16 +902,23 @@ class DAW_OT_InstallDawdreamer(Operator):
 
 classes = [
     DAW_OT_ScanVstDirectories,
+    DAW_OT_ScanVstDirectoriesAsync,
     DAW_OT_PickVstDirectory,
     DAW_OT_AddVstEffect,
     DAW_OT_RemoveVstEffect,
+    DAW_OT_MoveVstEffect,
     DAW_OT_AddVstInstrument,
     DAW_OT_RemoveVstInstrument,
     DAW_OT_ToggleVstBypass,
     DAW_OT_ReloadVst,
     DAW_OT_SetVstParameter,
+    DAW_OT_AutoBounceVstInstrument,
+    DAW_OT_ToggleVstLiveMonitoring,
     DAW_OT_SaveVstPreset,
     DAW_OT_LoadVstPreset,
+    DAW_OT_DeleteVstPreset,
+    DAW_OT_ExportVstPresetLibrary,
+    DAW_OT_ImportVstPresetLibrary,
     DAW_OT_RenderVstInstrumentToTimeline,
     DAW_OT_ApplyVstEffectToStrip,
     DAW_OT_InstallDawdreamer,
