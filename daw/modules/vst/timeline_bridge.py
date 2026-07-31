@@ -42,6 +42,21 @@ def get_bpm(scene) -> float:
     return float(daw_props.bpm) if daw_props else 120.0
 
 
+def get_bpm_legacy_piano_roll(scene) -> float:
+    """
+    BPM conforme o Piano Roll "de verdade" do projeto (`ui/piano_roll.py`)
+    o lê: `scene.beat_grid.bpm`. Essa propriedade NÃO é sincronizada com
+    `scene.daw.bpm` em lugar nenhum do addon original — são duas fontes de
+    BPM independentes. Para o bounce de instrumento VST bater com a
+    posição/tempo que o usuário vê desenhado no Piano Roll, é esta função
+    (e não `get_bpm`) que deve ser usada.
+    """
+    try:
+        return float(scene.beat_grid.bpm)
+    except Exception:
+        return 120.0
+
+
 def beat_to_frame(scene, beat: float) -> int:
     """Converte uma posição em beats para o frame correspondente do Blender."""
     bpm = get_bpm(scene)
@@ -227,6 +242,11 @@ def notes_from_piano_roll(scene, sample_rate: int = 44100):
     (pitch, start_seconds, duration_seconds, velocity_midi_0_127).
 
     Retorna (notes, duration_total_segundos).
+
+    ATENÇÃO: este NÃO é o editor onde as notas normalmente são desenhadas
+    neste addon — esse é `scene.piano_roll` (ver `notes_from_legacy_piano_roll`
+    abaixo). Esta função existe apenas caso o módulo `modules/piano_roll`
+    passe a ser o editor principal no futuro.
     """
     pr = getattr(scene, "daw_piano_roll", None)
     if pr is None or not len(pr.notes):
@@ -247,6 +267,62 @@ def notes_from_piano_roll(scene, sample_rate: int = 44100):
         max_end = max(max_end, start_sec + dur_sec)
 
     return notes, max_end + 1.0  # +1s de cauda
+
+
+def notes_from_legacy_piano_roll(scene, sample_rate: int = 44100):
+    """
+    Lê as notas do Piano Roll REAL do projeto (`ui/piano_roll.py`,
+    `scene.piano_roll`) — o editor onde as notas são de fato desenhadas,
+    tocadas e associadas a um strip do Sequencer via `state.active_strip`.
+
+    Segue exatamente a mesma convenção de `DAW_OT_RenderNotesToStrip`
+    (o bounce nativo já existente naquele arquivo): mesmas notas, mesmo
+    BPM (`scene.beat_grid.bpm`), mesmo nome de strip.
+
+    Retorna (notes, duration_total_segundos, strip_name, frame_start).
+    `frame_start` é herdado do strip existente com o mesmo nome no
+    Sequencer, se houver — senão cai em `scene.frame_start`, igual ao
+    comportamento original.
+    """
+    state = getattr(scene, "piano_roll", None)
+    if state is None:
+        return [], 0.0, "PianoRoll", scene.frame_start
+
+    # Mesma lógica de `_get_active_notes()` de ui/piano_roll.py.
+    raw_notes = state.notes
+    if state.active_strip:
+        for ms in state.midi_strips:
+            if ms.strip_name == state.active_strip:
+                raw_notes = ms.notes
+                break
+
+    if not len(raw_notes):
+        return [], 0.0, (state.active_strip or "PianoRoll"), scene.frame_start
+
+    bpm = get_bpm_legacy_piano_roll(scene)
+    sec_per_beat = 60.0 / bpm
+
+    notes: List[Tuple[int, float, float, int]] = []
+    max_end = 0.0
+    for n in raw_notes:
+        start_sec = n.start * sec_per_beat
+        dur_sec = max(n.length * sec_per_beat, 0.03)
+        velocity = max(1, min(127, int(n.velocity)))  # já é 1-127, sem reescalar
+        notes.append((n.pitch, start_sec, dur_sec, velocity))
+        max_end = max(max_end, start_sec + dur_sec)
+
+    strip_name = state.active_strip or "PianoRoll"
+
+    # Herda o frame_start do strip existente com esse nome, igual ao
+    # comportamento original de DAW_OT_RenderNotesToStrip.
+    seq = scene.sequence_editor
+    frame_start = scene.frame_start
+    for s in get_all_strips(seq):
+        if s.name == strip_name:
+            frame_start = s.frame_start
+            break
+
+    return notes, max_end + 1.0, strip_name, frame_start
 
 
 # ═══════════════════════════════════════════════════════════════

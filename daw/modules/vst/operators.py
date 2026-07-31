@@ -394,8 +394,13 @@ class DAW_OT_RenderVstInstrumentToTimeline(Operator):
 
     def invoke(self, context, event):
         if not self.strip_name:
+            # Tenta herdar o nome/posição do strip MIDI ativo no Piano Roll
+            # real (mesma linha que `DAW_OT_RenderNotesToStrip` já usa).
+            _, _, legacy_name, legacy_frame = tlb.notes_from_legacy_piano_roll(context.scene)
             live = get_live_vst(self.vst_id)
-            self.strip_name = f"{live.name if live else self.vst_id}_vst"
+            base_name = legacy_name or (live.name if live else self.vst_id)
+            self.strip_name = f"{base_name}_vst"
+            self.start_beat = tlb.frame_to_beat(context.scene, legacy_frame)
         return context.window_manager.invoke_props_dialog(self)
 
     def draw(self, context):
@@ -416,7 +421,16 @@ class DAW_OT_RenderVstInstrumentToTimeline(Operator):
         scene = context.scene
         sample_rate = _sample_rate(context)
 
-        notes, duration = tlb.notes_from_piano_roll(scene, sample_rate)
+        # Fonte primária: o Piano Roll REAL do projeto (`scene.piano_roll`,
+        # onde as notas de fato são desenhadas) — segue a mesma linha de
+        # MIDI e de posição no Sequencer que o resto do addon já usa.
+        notes, duration, _, _ = tlb.notes_from_legacy_piano_roll(scene, sample_rate)
+
+        # Fallback: módulo mais novo (`scene.daw_piano_roll`), caso o
+        # projeto passe a usar ele no futuro.
+        if not notes:
+            notes, duration = tlb.notes_from_piano_roll(scene, sample_rate)
+
         if not notes:
             self.report({'WARNING'}, "Nenhuma nota no Piano Roll para renderizar")
             return {'CANCELLED'}
