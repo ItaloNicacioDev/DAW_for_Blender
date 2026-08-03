@@ -26,7 +26,7 @@ import time
 import bpy
 
 from . import config, downloader, github_api, installer, version
-from .github_api import UpdaterError
+from .github_api import UpdateError
 
 _lock = threading.Lock()
 _state = {
@@ -106,7 +106,7 @@ def _sync_to_wm():
 
     try:
         wm = bpy.context.window_manager
-        st = wm.daw_updater
+        st = wm.daw_update
     except Exception:
         return _POLL_INTERVAL if data["active"] else None
 
@@ -182,7 +182,7 @@ def run_check_update(silent: bool = False):
                     download_url="",
                     error="",
                 )
-        except UpdaterError as e:
+        except UpdateError as e:
             _set(active=False, status="IDLE" if silent else "ERROR", error=str(e))
         except Exception as e:
             _set(active=False, status="IDLE" if silent else "ERROR", error=f"Erro inesperado: {e}")
@@ -218,7 +218,7 @@ def run_download_and_install(download_url: str):
                 needs_restart=True,
                 error="",
             )
-        except UpdaterError as e:
+        except UpdateError as e:
             _set(active=False, status="ERROR", error=str(e))
         except Exception as e:
             _set(active=False, status="ERROR", error=f"Erro inesperado: {e}")
