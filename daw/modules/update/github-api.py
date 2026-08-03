@@ -14,7 +14,7 @@ import urllib.request
 from . import config
 
 
-class UpdaterError(Exception):
+class UpdateError(Exception):
     """Erro genérico do sistema de atualização (rede, parsing, etc)."""
 
 
@@ -31,25 +31,25 @@ def _request_json(url: str) -> dict:
             raw = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            raise UpdaterError(
+            raise UpdateError(
                 "Repositório ou release não encontrado (verifique GITHUB_OWNER/"
-                "GITHUB_REPO em modules/updater/config.py)."
+                "GITHUB_REPO em modules/update/config.py)."
             ) from e
         if e.code == 403:
-            raise UpdaterError(
+            raise UpdateError(
                 "Limite de requisições da API do GitHub atingido. Tente novamente "
                 "mais tarde."
             ) from e
-        raise UpdaterError(f"Erro HTTP {e.code} ao consultar o GitHub.") from e
+        raise UpdateError(f"Erro HTTP {e.code} ao consultar o GitHub.") from e
     except urllib.error.URLError as e:
-        raise UpdaterError(f"Sem conexão com o GitHub: {e.reason}") from e
+        raise UpdateError(f"Sem conexão com o GitHub: {e.reason}") from e
     except Exception as e:
-        raise UpdaterError(f"Erro inesperado ao consultar o GitHub: {e}") from e
+        raise UpdateError(f"Erro inesperado ao consultar o GitHub: {e}") from e
 
     try:
         return json.loads(raw)
     except Exception as e:
-        raise UpdaterError(f"Resposta inválida da API do GitHub: {e}") from e
+        raise UpdateError(f"Resposta inválida da API do GitHub: {e}") from e
 
 
 def fetch_latest_release() -> dict:
@@ -88,7 +88,7 @@ def parse_release(data: dict) -> dict:
         is_source_zip = True
 
     if not download_url:
-        raise UpdaterError("O release mais recente não possui nenhum arquivo .zip.")
+        raise UpdateError("O release mais recente não possui nenhum arquivo .zip.")
 
     return {
         "tag": tag,
