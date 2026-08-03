@@ -21,7 +21,7 @@ def register():
     # inicial do addon.
     bpy.app.timers.register(_startup_check, first_interval=5.0)
 
-    print("[DAW] Módulo updater registrado")
+    print("[DAW] Módulo update registrado")
 
 
 def unregister():
@@ -31,12 +31,12 @@ def unregister():
     operators.unregister()
     properties.unregister()
 
-    print("[DAW] Módulo updater desregistrado")
+    print("[DAW] Módulo update desregistrado")
 
 
 def _startup_check():
     try:
         jobs.maybe_auto_check_on_startup()
     except Exception as e:
-        print(f"[DAW] Updater: falha na checagem automática: {e}")
+        print(f"[DAW] Update: falha na checagem automática: {e}")
     return None
