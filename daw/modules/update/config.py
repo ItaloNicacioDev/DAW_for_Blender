@@ -50,10 +50,10 @@ REQUEST_TIMEOUT = 10
 DOWNLOAD_TIMEOUT = 60
 
 # User-Agent enviado nas requisições (a API do GitHub exige um).
-USER_AGENT = "DAW-for-Blender-Updater"
+USER_AGENT = "DAW-for-Blender-Update"
 
 # Nome do arquivo de cache (fica em Blender > user config dir).
-CACHE_FILENAME = "daw_updater_cache.json"
+CACHE_FILENAME = "daw_update_cache.json"
 
 
 def api_latest_release_url() -> str:
