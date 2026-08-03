@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 
 from . import config
-from .github_api import UpdaterError
+from .github_api import UpdateError
 
 
 def download_file(url: str, progress_callback=None, chunk_size: int = 65536) -> str:
@@ -54,10 +54,10 @@ def download_file(url: str, progress_callback=None, chunk_size: int = 65536) -> 
                             pass
     except urllib.error.URLError as e:
         _safe_remove(tmp_path)
-        raise UpdaterError(f"Falha no download: {e.reason if hasattr(e, 'reason') else e}") from e
+        raise UpdateError(f"Falha no download: {e.reason if hasattr(e, 'reason') else e}") from e
     except Exception as e:
         _safe_remove(tmp_path)
-        raise UpdaterError(f"Falha no download: {e}") from e
+        raise UpdateError(f"Falha no download: {e}") from e
 
     return tmp_path
 
