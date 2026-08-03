@@ -1,13 +1,7 @@
 # modules/vst/register.py
 """
 Registro e desregistro do módulo VST no Blender.
-
-Mudanças em relação à versão anterior:
-    - Registra os novos operadores e classes de UI adicionados (scroll,
-      instalação do sounddevice, monitor ao vivo).
-    - Adiciona handler de depsgraph para desligar o monitor ao vivo
-      quando o Blender fecha (evita thread órfã).
-    - Auto-scan no startup (opcional, configurável em DawVstSettings).
+Chamado por daw/__init__.py no register()/unregister() geral do addon.
 """
 from __future__ import annotations
 
@@ -17,52 +11,50 @@ from bpy.app.handlers import persistent
 from .properties import register as _properties_register, unregister as _properties_unregister
 from .operators import classes as _operator_classes
 from .ui import classes as _ui_classes
+from .utils import get_or_create_live_vst, sync_rna_from_pure
 
 
-# ---------------------------------------------------------------------- #
-# Handler: desligar monitor ao vivo ao fechar o Blender
-# ---------------------------------------------------------------------- #
-@persistent
-def _on_load_pre(filepath):
-    """Para o monitor ao vivo antes de carregar um novo arquivo."""
-    try:
-        from .live_monitor import get_live_monitor
-        monitor = get_live_monitor()
-        if monitor.is_running:
-            monitor.stop()
-            # Atualizar o RNA se a cena ainda existir
-            scene = bpy.context.scene if bpy.context and bpy.context.scene else None
-            if scene and hasattr(scene, "daw_vst"):
-                scene.daw_vst.is_live_monitoring = False
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------------- #
-# Auto-scan no startup
-# ---------------------------------------------------------------------- #
-@persistent
-def _on_depsgraph_update_post(scene, depsgraph):
+def _reload_all_vsts_in_scene(scene) -> None:
     """
-    Dispara o auto-scan uma única vez no startup, se configurado.
-    Remove a si mesmo após o primeiro disparo (one-shot).
+    Recarrega de verdade (via dawdreamer) todo VST que a cena já tinha
+    configurado — RNA (`item.vst_path`, `item.is_loaded=True`) sobrevive
+    ao salvar/reabrir o .blend, mas o objeto Python/dawdreamer em si NÃO.
+    Sem isso, ao reabrir um projeto, os VSTs aparecem "carregados" na UI
+    porém não tocam nada até o usuário clicar em Recarregar manualmente
+    em cada um — bem longe do que se espera de uma DAW de verdade.
     """
-    try:
-        settings = scene.daw_vst
-        if settings.auto_scan_on_startup and settings.vst_directories.strip():
-            bpy.ops.daw.scan_vst_directories_async()
-    except Exception:
-        pass
-    finally:
-        # Remove este handler — só executa uma vez ao iniciar
-        if _on_depsgraph_update_post in bpy.app.handlers.depsgraph_update_post:
-            bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph_update_post)
+    chains = getattr(scene, "daw_vst_chains", None)
+    if chains is not None:
+        for chain in chains:
+            for item in chain.vsts:
+                if not item.vst_path:
+                    continue
+                vst = get_or_create_live_vst(item)
+                vst.load(sample_rate=getattr(getattr(scene, "daw", None), "sample_rate", 44100))
+                sync_rna_from_pure(item, vst)
+
+    rack = getattr(scene, "daw_vst_instruments", None)
+    if rack is not None:
+        for item in rack.instruments:
+            if not item.vst_path:
+                continue
+            vst = get_or_create_live_vst(item)
+            vst.load(sample_rate=getattr(getattr(scene, "daw", None), "sample_rate", 44100))
+            sync_rna_from_pure(item, vst)
 
 
-# ---------------------------------------------------------------------- #
-# register / unregister
-# ---------------------------------------------------------------------- #
+@persistent
+def _on_load_post(dummy):
+    for scene in bpy.data.scenes:
+        try:
+            _reload_all_vsts_in_scene(scene)
+        except Exception as e:
+            print(f"[DAW][vst] Falha ao recarregar VSTs da cena '{scene.name}': {e}")
+
+
 def register():
+    # properties.py já cuida do próprio register/unregister (classes +
+    # bpy.types.Scene.daw_vst*), então só registramos operators/ui aqui.
     _properties_register()
 
     for cls in _operator_classes:
@@ -79,31 +71,23 @@ def register():
             pass
         bpy.utils.register_class(cls)
 
-    # Handlers
-    if _on_load_pre not in bpy.app.handlers.load_pre:
-        bpy.app.handlers.load_pre.append(_on_load_pre)
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
 
-    # Auto-scan one-shot: registra só se houver diretórios configurados
-    # (evita disparo inútil em instalações limpas)
-    if _on_depsgraph_update_post not in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update_post)
+    # Recarrega os VSTs do arquivo que já está aberto agora (o load_post
+    # só dispara em aberturas futuras de arquivo, não no que já está na tela
+    # quando o addon é ativado/atualizado).
+    try:
+        _on_load_post(None)
+    except Exception as e:
+        print(f"[DAW][vst] Falha ao recarregar VSTs no registro do addon: {e}")
 
     print("[DAW] Módulo vst registrado")
 
 
 def unregister():
-    # Para o monitor ao vivo antes de desregistrar
-    try:
-        from .live_monitor import get_live_monitor
-        get_live_monitor().stop()
-    except Exception:
-        pass
-
-    # Remove handlers
-    if _on_load_pre in bpy.app.handlers.load_pre:
-        bpy.app.handlers.load_pre.remove(_on_load_pre)
-    if _on_depsgraph_update_post in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph_update_post)
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
 
     for cls in reversed(_ui_classes):
         try:
