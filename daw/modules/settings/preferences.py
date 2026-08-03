@@ -246,6 +246,14 @@ class DAW_Preferences(AddonPreferences):
         layout.prop(self, "debug_mode")
         layout.prop(self, "check_for_updates")
 
+        # Atualizações (verificação/instalação a partir do GitHub)
+        try:
+            from ..updater.ui import draw_updater_compact
+            box_upd = layout.box()
+            draw_updater_compact(box_upd, context)
+        except Exception as e:
+            layout.label(text=f"Updater indisponível: {e}", icon='ERROR')
+
 
 classes = [
     DAW_PresetKeymap,

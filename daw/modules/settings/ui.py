@@ -239,6 +239,27 @@ class SETTINGS_PT_Advanced(Panel):
         col.operator("settings.import_settings", text="Importar Configurações", icon='IMPORT')
 
 
+class SETTINGS_PT_Updates(Panel):
+    """Painel de verificação e instalação de atualizações via GitHub."""
+    bl_label = "Atualizações"
+    bl_idname = "SETTINGS_PT_updates"
+    bl_space_type = 'PREFERENCES'
+    bl_region_type = 'WINDOW'
+    bl_parent_id = "SETTINGS_PT_preferences_header"
+
+    @classmethod
+    def poll(cls, context):
+        addon_prefs = context.preferences.addons.get("daw")
+        return addon_prefs is not None
+
+    def draw(self, context):
+        try:
+            from ..updater.ui import draw_updater_full
+            draw_updater_full(self.layout, context)
+        except Exception as e:
+            self.layout.label(text=f"Updater indisponível: {e}", icon='ERROR')
+
+
 class SETTINGS_PT_About(Panel):
     """Painel com informações sobre o addon."""
     bl_label = "Sobre"
@@ -278,6 +299,7 @@ classes = [
     SETTINGS_PT_Workspace,
     SETTINGS_PT_Keymaps,
     SETTINGS_PT_Advanced,
+    SETTINGS_PT_Updates,
     SETTINGS_PT_About,
 ]
 
