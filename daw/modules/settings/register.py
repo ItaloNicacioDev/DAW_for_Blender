@@ -112,9 +112,16 @@ def on_addon_unloaded():
 
 
 def check_for_updates_async():
-    """Verifica atualizações de forma assíncrona (placeholder)."""
-    # TODO: Implementar verificação real de updates
-    pass
+    """Verifica atualizações de forma assíncrona.
+
+    Implementado em modules/update (checagem via GitHub Releases,
+    throttled e sem travar a UI). Ver modules/update/jobs.py.
+    """
+    try:
+        from ..update import jobs as update_jobs
+        update_jobs.maybe_auto_check_on_startup()
+    except Exception as e:
+        print(f"[DAW Settings] Update indisponível: {e}")
 
 
 # ============================================================================
