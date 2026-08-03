@@ -16,7 +16,7 @@ import tempfile
 import time
 import zipfile
 
-from .github_api import UpdaterError
+from .github_api import UpdateError
 
 
 def addon_root_from_this_file() -> str:
@@ -37,9 +37,9 @@ def extract_zip(zip_path: str) -> str:
             _validate_zip_members(zf, extract_dir)
             zf.extractall(extract_dir)
     except zipfile.BadZipFile as e:
-        raise UpdaterError("O arquivo baixado não é um .zip válido.") from e
+        raise UpdateError("O arquivo baixado não é um .zip válido.") from e
     except Exception as e:
-        raise UpdaterError(f"Falha ao extrair o pacote: {e}") from e
+        raise UpdateError(f"Falha ao extrair o pacote: {e}") from e
     return extract_dir
 
 
@@ -49,7 +49,7 @@ def _validate_zip_members(zf: zipfile.ZipFile, extract_dir: str):
     for member in zf.namelist():
         member_path = os.path.abspath(os.path.join(extract_dir, member))
         if not member_path.startswith(extract_dir_abs + os.sep) and member_path != extract_dir_abs:
-            raise UpdaterError(f"Entrada suspeita no .zip: {member}")
+            raise UpdateError(f"Entrada suspeita no .zip: {member}")
 
 
 def find_package_dir(extracted_root: str) -> str:
@@ -68,7 +68,7 @@ def find_package_dir(extracted_root: str) -> str:
         if "bl_info" in head:
             return current_dir
 
-    raise UpdaterError(
+    raise UpdateError(
         "Não foi possível encontrar a pasta do addon (com bl_info) dentro "
         "do pacote baixado."
     )
