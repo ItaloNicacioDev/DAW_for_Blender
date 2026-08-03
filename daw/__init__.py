@@ -34,7 +34,7 @@ from .core import register as core_register
 # ─────────────────────────────────────────────────────────────────
 _MODULE_NAMES = [
     "settings",
-    "updater",
+    "update",
     "project",
     "transport",
     "timeline",
