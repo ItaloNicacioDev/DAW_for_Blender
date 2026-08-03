@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender DAW",
     "author": "Italo Nicacio Dev ",
-    "version": (0, 18, 1, 'beta'),
+    "version": (0, 18, 2, 'beta'),
     "blender": (4, 5, 0),
     "location": "DAW Workspace",
     "description": "DAW completa integrada ao Blender",
@@ -34,6 +34,7 @@ from .core import register as core_register
 # ─────────────────────────────────────────────────────────────────
 _MODULE_NAMES = [
     "settings",
+    "updater",
     "project",
     "transport",
     "timeline",
