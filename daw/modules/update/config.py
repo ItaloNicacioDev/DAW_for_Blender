@@ -1,4 +1,4 @@
-# modules/updater/config.py
+# modules/update/config.py
 """
 Configuração do sistema de auto-atualização da DAW.
 

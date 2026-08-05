@@ -1,4 +1,4 @@
-# modules/updater/downloader.py
+# modules/update/downloader.py
 """
 Download do pacote .zip da atualização, com callback de progresso.
 
