@@ -383,7 +383,6 @@ class DAW_PT_Engine(bpy.types.Panel):
 classes = [
     DAWProperties,
     DAW_OT_Play, DAW_OT_Stop, DAW_OT_Record, DAW_OT_LoadAudio,
-    DAW_PT_Engine,
 ]
 
 
