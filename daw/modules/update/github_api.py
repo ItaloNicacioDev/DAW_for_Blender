@@ -18,7 +18,13 @@ class UpdateError(Exception):
     """Erro genérico do sistema de atualização (rede, parsing, etc)."""
 
 
-def _request_json(url: str) -> dict:
+def _request_json(url: str, allow_404: bool = False):
+    """Faz o request e retorna o JSON decodificado.
+
+    Se `allow_404=True` e o servidor responder 404, retorna `None` em vez
+    de lançar `UpdateError` — usado por `fetch_latest_release()` para
+    tentar o endpoint "/latest" antes de cair no fallback da listagem.
+    """
     req = urllib.request.Request(
         url,
         headers={
@@ -31,6 +37,8 @@ def _request_json(url: str) -> dict:
             raw = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         if e.code == 404:
+            if allow_404:
+                return None
             raise UpdateError(
                 "Repositório ou release não encontrado (verifique GITHUB_OWNER/"
                 "GITHUB_REPO em modules/update/config.py)."
@@ -53,8 +61,26 @@ def _request_json(url: str) -> dict:
 
 
 def fetch_latest_release() -> dict:
-    """Retorna o JSON bruto do endpoint /releases/latest."""
-    return _request_json(config.api_latest_release_url())
+    """Retorna o JSON do release mais recente.
+
+    Tenta primeiro o endpoint oficial "/releases/latest" (só retorna
+    release estável, não pre-release). Se não houver nenhuma release
+    estável publicada ainda (404 — comum durante a fase beta, onde tudo
+    é pre-release), cai para a listagem "/releases" — que inclui
+    pre-releases — e pega o primeiro item (mais recente).
+    """
+    data = _request_json(config.api_latest_release_url(), allow_404=True)
+    if data is not None:
+        return data
+
+    releases = _request_json(config.api_releases_list_url())
+    if not isinstance(releases, list) or not releases:
+        raise UpdateError(
+            "Nenhum release encontrado no repositório (verifique GITHUB_OWNER/"
+            "GITHUB_REPO em modules/update/config.py, e se há pelo menos um "
+            "release publicado, mesmo que pre-release)."
+        )
+    return releases[0]
 
 
 def parse_release(data: dict) -> dict:
