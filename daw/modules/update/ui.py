@@ -1,4 +1,4 @@
-# modules/updater/ui.py
+# modules/update/ui.py
 """
 Desenho da seção de atualizações — usado tanto no painel principal de
 Preferences (compacto) quanto no painel dedicado "Atualizações" dentro

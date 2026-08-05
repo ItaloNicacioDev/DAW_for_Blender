@@ -1,4 +1,4 @@
-# modules/updater/version.py
+# modules/update/version.py
 """
 Utilitários de parsing e comparação de versões.
 
