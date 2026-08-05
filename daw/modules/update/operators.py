@@ -1,4 +1,4 @@
-# modules/updater/operators.py
+# modules/update/operators.py
 """
 Operadores do sistema de auto-atualização.
 

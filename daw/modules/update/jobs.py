@@ -1,4 +1,4 @@
-# modules/updater/jobs.py
+# modules/update/jobs.py
 """
 Ponte thread-safe entre o trabalho de rede/disco (que roda em uma
 `threading.Thread` separada, para não travar a UI do Blender) e as
