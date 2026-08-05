@@ -1,4 +1,4 @@
-# modules/updater/github_api.py
+# modules/update/github_api.py
 """
 Cliente mínimo da API pública do GitHub, usando apenas a biblioteca
 padrão (urllib) — sem `requests` nem nenhuma dependência externa,

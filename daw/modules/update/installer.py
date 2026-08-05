@@ -1,4 +1,4 @@
-# modules/updater/installer.py
+# modules/update/installer.py
 """
 Instalação da atualização já baixada: extrai o .zip, localiza a pasta
 real do addon dentro dele (não importa como o .zip está organizado),
@@ -22,8 +22,8 @@ from .github_api import UpdateError
 def addon_root_from_this_file() -> str:
     """Retorna o caminho da pasta raiz do addon (a pasta "daw/", que
     contém o __init__.py com bl_info), a partir da localização deste
-    arquivo (daw/modules/updater/installer.py)."""
-    this_dir = os.path.dirname(os.path.abspath(__file__))   # .../daw/modules/updater
+    arquivo (daw/modules/update/installer.py)."""
+    this_dir = os.path.dirname(os.path.abspath(__file__))   # .../daw/modules/update
     modules_dir = os.path.dirname(this_dir)                  # .../daw/modules
     addon_root = os.path.dirname(modules_dir)                # .../daw
     return addon_root
