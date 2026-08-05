@@ -57,7 +57,18 @@ CACHE_FILENAME = "daw_update_cache.json"
 
 
 def api_latest_release_url() -> str:
+    """Endpoint oficial "latest" — só retorna release publicado que NÃO
+    seja draft nem pre-release. Enquanto o projeto estiver em beta (só
+    pre-releases publicados), este endpoint responde 404; ver
+    `api_releases_list_url()` como fallback."""
     return f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+
+
+def api_releases_list_url() -> str:
+    """Lista todos os releases (inclui pre-release), do mais recente para
+    o mais antigo. Usado como fallback quando `api_latest_release_url()`
+    retorna 404 (nenhuma release estável publicada ainda)."""
+    return f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases"
 
 
 def releases_page_url() -> str:
