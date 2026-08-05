@@ -1,4 +1,4 @@
-# modules/updater/properties.py
+# modules/update/properties.py
 """
 Estado (runtime, não salvo no .blend) do sistema de atualização.
 Vive em `bpy.types.WindowManager.daw_updater`.

@@ -1,4 +1,4 @@
-# modules/updater/register.py
+# modules/update/register.py
 """
 Registro e desregistro do módulo Updater no Blender.
 Chamado por daw/__init__.py no register()/unregister() geral.
