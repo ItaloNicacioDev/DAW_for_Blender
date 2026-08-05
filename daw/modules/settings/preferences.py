@@ -248,7 +248,7 @@ class DAW_Preferences(AddonPreferences):
 
         # Atualizações (verificação/instalação a partir do GitHub)
         try:
-            from ..updater.ui import draw_updater_compact
+            from ..update.ui import draw_updater_compact
             box_upd = layout.box()
             draw_updater_compact(box_upd, context)
         except Exception as e:

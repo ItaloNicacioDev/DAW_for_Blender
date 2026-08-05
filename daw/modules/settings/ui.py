@@ -254,7 +254,7 @@ class SETTINGS_PT_Updates(Panel):
 
     def draw(self, context):
         try:
-            from ..updater.ui import draw_updater_full
+            from ..update.ui import draw_updater_full
             draw_updater_full(self.layout, context)
         except Exception as e:
             self.layout.label(text=f"Updater indisponível: {e}", icon='ERROR')
