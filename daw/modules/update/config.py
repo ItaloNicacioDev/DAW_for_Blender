@@ -34,7 +34,7 @@ from __future__ import annotations
 #  EDITE AQUI
 # ─────────────────────────────────────────────────────────────────
 GITHUB_OWNER = "ItaloNicacioDev"     # usuário/organização do GitHub
-GITHUB_REPO = "daw-for-blender"      # nome do repositório
+GITHUB_REPO = "Daw_for_Blender"      # nome do repositório
 
 # ─────────────────────────────────────────────────────────────────
 #  Parâmetros gerais (normalmente não precisam mudar)
