@@ -82,11 +82,35 @@ class SAMPLER_OT_DeleteSample(Operator):
         return {'FINISHED'}
 
 
+_aud_device = None
+
+
+def _get_aud_device():
+    """Device de áudio nativo (bpy `aud`), compartilhado por todos os
+    previews do sampler. Mesmo padrão usado em ui/piano_roll.py."""
+    global _aud_device
+    if _aud_device is None:
+        try:
+            import aud
+            _aud_device = aud.Device()
+        except Exception as e:
+            print(f"[Sampler] aud.Device: {e}")
+    return _aud_device
+
+
 class SAMPLER_OT_PreviewNote(Operator):
-    """Reproduz uma nota de preview do sample."""
+    """Reproduz uma nota de preview do sample, via `aud` nativo do Blender
+    (sem depender de motor externo). Aplica pitch-shift a partir da
+    root_note, afinação fina, ganho e pan configurados no sample."""
     bl_idname = "sampler.preview_note"
     bl_label = "Preview Nota"
     bl_options = {'REGISTER'}
+
+    note: IntProperty(
+        name="Nota MIDI",
+        description="Nota a tocar (-1 = usa a root_note do sample)",
+        default=-1, min=-1, max=127,
+    )
 
     def execute(self, context):
         settings = context.scene.daw_sampler_settings
@@ -95,7 +119,38 @@ class SAMPLER_OT_PreviewNote(Operator):
             return {'CANCELLED'}
 
         sample = settings.samples[settings.active_sample_index]
-        self.report({'INFO'}, f"Reproduzindo nota {sample.root_note} (ainda não implementado)")
+        abspath = bpy.path.abspath(sample.filepath) if sample.filepath else ""
+        if not abspath or not os.path.exists(abspath):
+            self.report({'ERROR'}, "Arquivo do sample não encontrado")
+            return {'CANCELLED'}
+
+        dev = _get_aud_device()
+        if dev is None:
+            self.report({'ERROR'}, "Dispositivo de áudio (aud) indisponível")
+            return {'CANCELLED'}
+
+        note = self.note if self.note >= 0 else sample.root_note
+
+        try:
+            import aud
+            snd = aud.Sound(abspath)
+            handle = dev.play(snd)
+
+            semitone_shift = (note - sample.root_note) + sample.tune_semitones + (sample.tune_cents / 100.0)
+            handle.pitch = 2.0 ** (semitone_shift / 12.0)
+
+            gain = 10.0 ** (sample.gain_db / 20.0)
+            handle.volume = max(0.0, min(1.0, gain))
+
+            try:
+                handle.pan = max(-1.0, min(1.0, sample.pan))
+            except Exception:
+                pass  # nem toda versão do Blender expõe `pan` em Handle
+        except Exception as e:
+            self.report({'ERROR'}, f"Erro ao tocar preview: {e}")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"▶ {sample.name} — nota {note}")
         return {'FINISHED'}
 
 
