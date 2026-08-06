@@ -1,191 +1,152 @@
-# modules/settings/register.py
 """
-Registro centralizado de todas as classes e módulos do Settings.
+core/register.py
 
-Gerencia a ordem de registro/desregistro garantindo que
-dependências sejam resolvidas corretamente.
+Propriedades centrais de projeto (scene.daw) e o operador nativo de
+carregar áudio pra timeline via VSE (Video Sequence Editor).
+
+Não há mais motor de áudio externo (C++/DLL): a DAW usa o player e o
+mixdown nativos do Blender (bpy.ops.screen.animation_play, `aud`, e
+strips de som no Sequencer), que já respeitam Blender 4.x+.
+
+O estado de transporte (play/pause/record, bpm, loop) vive em
+`scene.daw_transport` (ver modules/transport/) — este arquivo só cuida
+de metadado de projeto (nome, sample rate, bit depth) e da ação de
+importar um arquivo de áudio pra timeline.
 """
-from __future__ import annotations
 
 import bpy
-from . import (
-    preferences,
-    themes,
-    shortcuts,
-    utils,
-    operators,
-    ui,
-)
+from pathlib import Path
+from bpy.props import IntProperty, StringProperty
+
+
+_engine_started = False
+
+
+def get_engine():
+    """Retorna o Mixer ativo do motor Python puro (daw_engine.ENGINE.mixer),
+    usado por modules/mixer/utils.py, ui/piano_roll.py etc. Retorna None
+    se o motor não estiver disponível/iniciado (aí quem chamou trata
+    como "modo local" e segue sem travar).
+
+    O Mixer já expõe set_volume/set_pan/set_mute/set_solo/
+    set_master_volume/get_state() — ver daw_engine/mixer/mixer.py.
+    """
+    if not _engine_started:
+        return None
+    try:
+        from ..daw_engine import ENGINE
+        return ENGINE.mixer
+    except Exception:
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PROPRIEDADES DE PROJETO (metadado — não tem estado de transporte,
+#  que vive em scene.daw_transport, ver modules/transport/properties.py)
+# ═══════════════════════════════════════════════════════════════
+
+class DAWProperties(bpy.types.PropertyGroup):
+    project_name: StringProperty(
+        name="Nome do Projeto",
+        default="Novo Projeto"
+    )
+
+    sample_rate: IntProperty(
+        name="Sample Rate",
+        default=44100
+    )
+
+    bit_depth: IntProperty(
+        name="Bit Depth",
+        default=24
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  CARREGAR ÁUDIO NA TIMELINE (nativo, via VSE)
+# ═══════════════════════════════════════════════════════════════
+
+class DAW_OT_LoadAudio(bpy.types.Operator):
+    bl_idname      = "daw.load_audio"
+    bl_label       = "Carregar Arquivo de Áudio"
+    bl_description = "Carrega arquivo WAV/FLAC/MP3 como strip de som na timeline"
+    filepath: StringProperty(subtype='FILE_PATH')
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        scene = context.scene
+        if scene.sequence_editor is None:
+            scene.sequence_editor_create()
+        seq = scene.sequence_editor
+
+        channel = 1
+        frame_start = scene.frame_current
+        audio_name = Path(self.filepath).stem
+
+        try:
+            # Blender 4.4+: `strips`. Versões anteriores: `sequences`.
+            strips = getattr(seq, "strips", None) or seq.sequences
+            strips.new_sound(
+                name=audio_name,
+                filepath=self.filepath,
+                channel=channel,
+                frame_start=frame_start,
+            )
+            self.report({'INFO'}, f"✅ Carregado: {Path(self.filepath).name}")
+        except Exception as ex:
+            self.report({'ERROR'}, str(ex))
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  REGISTRO
+# ═══════════════════════════════════════════════════════════════
+
+classes = [
+    DAWProperties,
+    DAW_OT_LoadAudio,
+]
 
 
 def register():
-    """Registra todos os módulos do Settings na ordem correta."""
-    
-    # 1. Preferências (PropertyGroups necessários antes de UI)
-    preferences.register()
-    
-    # 2. Utilitários (sem dependência em classes Blender)
-    themes.register()
-    utils.register()
-    
-    # 3. Operadores (depende de preferências)
-    operators.register()
-    
-    # 4. UI (depende de operadores e preferências)
-    ui.register()
-    
-    # 5. Atalhos (registra keymaps)
-    shortcuts.register()
+    for cls in classes:
+        try: bpy.utils.unregister_class(cls)
+        except Exception: pass
+        bpy.utils.register_class(cls)
+
+    bpy.types.Scene.daw = bpy.props.PointerProperty(type=DAWProperties)
+
+    # Inicia o motor de síntese em Python puro (clock/transport/mixer).
+    # Nunca lança exceção: se algo der errado (ex.: daw_engine ausente
+    # ou corrompido), a DAW continua funcionando em "modo local" — só
+    # sem os medidores/síntese do motor próprio.
+    global _engine_started
+    try:
+        from ..daw_engine import ENGINE
+        ENGINE.start()
+        _engine_started = True
+    except Exception as e:
+        print(f"[DAW] daw_engine indisponível, seguindo em modo local: {e}")
+        _engine_started = False
 
 
 def unregister():
-    """Desregistra todos os módulos do Settings em ordem reversa."""
-    
-    # Ordem reversa: atalhos primeiro
-    shortcuts.unregister()
-    
-    # UI e operadores
-    ui.unregister()
-    operators.unregister()
-    
-    # Utilitários
-    utils.unregister()
-    themes.unregister()
-    
-    # Preferências por último
-    preferences.unregister()
+    global _engine_started
+    if _engine_started:
+        try:
+            from ..daw_engine import ENGINE
+            ENGINE.shutdown()
+        except Exception as e:
+            print(f"[DAW] Erro ao encerrar daw_engine: {e}")
+        _engine_started = False
 
+    if hasattr(bpy.types.Scene, 'daw'):
+        del bpy.types.Scene.daw
 
-# ============================================================================
-# Hook de Inicialização (executado quando o addon é carregado)
-# ============================================================================
-
-def on_addon_loaded():
-    """Chamado quando o addon DAW é carregado.
-    
-    Realiza tarefas de inicialização como:
-    - Carregar último projeto (se configurado)
-    - Verificar atualizações
-    - Inicializar diretórios de config
-    """
-    try:
-        prefs = preferences.get_preferences()
-        
-        # Debug
-        if prefs.debug_mode:
-            print("[DAW Settings] Addon carregado com sucesso")
-            print(f"[DAW Settings] Tema: {prefs.ui.theme}")
-            print(f"[DAW Settings] Sample Rate: {prefs.audio.samplerate} Hz")
-        
-        # Criar diretórios se não existem
-        config_dir = utils.get_config_dir()
-        if not config_dir.exists():
-            config_dir.mkdir(parents=True, exist_ok=True)
-            if prefs.debug_mode:
-                print(f"[DAW Settings] Diretório de config criado: {config_dir}")
-        
-        # Verificar atualizações (se habilitado)
-        if prefs.check_for_updates:
-            check_for_updates_async()
-    
-    except Exception as e:
-        print(f"[DAW Settings] Erro na inicialização: {e}")
-
-
-def on_addon_unloaded():
-    """Chamado quando o addon DAW é descarregado.
-    
-    Realiza limpeza e salva estado.
-    """
-    try:
-        prefs = preferences.get_preferences()
-        
-        # Salvar layout atual (se configurado)
-        if prefs.workspace.remember_last_project:
-            utils.save_workspace_layout()
-        
-        if prefs.debug_mode:
-            print("[DAW Settings] Addon descarregado")
-    
-    except Exception as e:
-        print(f"[DAW Settings] Erro ao descarregar: {e}")
-
-
-def check_for_updates_async():
-    """Verifica atualizações de forma assíncrona.
-
-    Implementado em modules/update (checagem via GitHub Releases,
-    throttled e sem travar a UI). Ver modules/update/jobs.py.
-    """
-    try:
-        from ..update import jobs as updater_jobs
-        updater_jobs.maybe_auto_check_on_startup()
-    except Exception as e:
-        print(f"[DAW Settings] Updater indisponível: {e}")
-
-
-# ============================================================================
-# Registro de Handlers (app handlers do Blender)
-# ============================================================================
-
-_handlers_registered = False
-
-
-def register_handlers():
-    """Registra handlers do Blender (load_post, etc)."""
-    global _handlers_registered
-    
-    if _handlers_registered:
-        return
-    
-    try:
-        # Handler executado após carregar arquivo .blend
-        bpy.app.handlers.load_post.append(on_blend_file_loaded)
-        bpy.app.handlers.save_post.append(on_blend_file_saved)
-        
-        _handlers_registered = True
-    except Exception as e:
-        print(f"[DAW Settings] Erro ao registrar handlers: {e}")
-
-
-def unregister_handlers():
-    """Desregistra handlers do Blender."""
-    global _handlers_registered
-    
-    if not _handlers_registered:
-        return
-    
-    try:
-        bpy.app.handlers.load_post.remove(on_blend_file_loaded)
-        bpy.app.handlers.save_post.remove(on_blend_file_saved)
-        
-        _handlers_registered = False
-    except Exception as e:
-        print(f"[DAW Settings] Erro ao desregistrar handlers: {e}")
-
-
-def on_blend_file_loaded(dummy):
-    """Handler executado quando um arquivo .blend é carregado."""
-    try:
-        prefs = preferences.get_preferences()
-        
-        if prefs.debug_mode:
-            print("[DAW Settings] Arquivo .blend carregado")
-    except Exception:
-        pass
-
-
-def on_blend_file_saved(dummy):
-    """Handler executado quando um arquivo .blend é salvo."""
-    try:
-        prefs = preferences.get_preferences()
-        
-        if prefs.debug_mode:
-            print("[DAW Settings] Arquivo .blend salvo")
-        
-        # Auto-save (se habilitado)
-        if prefs.workspace.autosave_interval > 0:
-            # TODO: Implementar auto-save timer
-            pass
-    except Exception:
-        pass
+    for cls in reversed(classes):
+        try: bpy.utils.unregister_class(cls)
+        except Exception: pass
