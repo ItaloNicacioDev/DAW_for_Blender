@@ -1,4 +1,3 @@
-"""Stub for automation/interpolation.py"""
 # modules/automation/interpolation.py
 """
 Tipos e funções de interpolação para curvas de automação.
