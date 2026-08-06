@@ -39,6 +39,24 @@ from ..mixer.mixer import Mixer
 from ..audio.output import AudioOutput
 
 
+class _EngineFacadeState:
+    """Objeto simples de estado devolvido por Engine.get_state() — ver
+    ui/piano_roll.py (_get_playhead_beat) e modules/mixer/meters.py."""
+    __slots__ = (
+        "position_beats", "is_playing", "is_recording", "is_paused",
+        "peak_left", "peak_right",
+    )
+
+    def __init__(self, position_beats=0.0, is_playing=False, is_recording=False,
+                 is_paused=False, peak_left=0.0, peak_right=0.0):
+        self.position_beats = position_beats
+        self.is_playing = is_playing
+        self.is_recording = is_recording
+        self.is_paused = is_paused
+        self.peak_left = peak_left
+        self.peak_right = peak_right
+
+
 class Engine:
     """
     Singleton do motor DAW.
@@ -48,6 +66,17 @@ class Engine:
     - Registrar/remover o handler de frame do Blender
     - Expor API pública de transporte, projeto e estado
     - NÃO fazer processamento de áudio (isso fica no daw_engine/audio)
+
+    Fachada de compatibilidade (usada por modules/mixer/utils.py e
+    ui/piano_roll.py via core.register.get_engine()):
+        set_volume/set_pan/set_mute/set_solo/set_master_volume
+            → delegam para self.mixer
+        note_on/note_off
+            → delegam para self.mixer (síntese em Python puro)
+        get_state()
+            → devolve um objeto com position_beats (self.clock),
+              is_playing/is_recording/is_paused (self.transport) e
+              peak_left/peak_right (self.mixer)
     """
 
     _instance: Optional["Engine"] = None
@@ -189,6 +218,44 @@ class Engine:
             "time":   self.clock.get_current_time(),
             "delta":  delta,
         })
+
+    # ------------------------------------------------------------------
+    # Fachada de compatibilidade (mixer + estado combinado)
+    # ------------------------------------------------------------------
+
+    def set_volume(self, channel_idx: int, volume: float) -> None:
+        self.mixer.set_volume(channel_idx, volume)
+
+    def set_pan(self, channel_idx: int, pan: float) -> None:
+        self.mixer.set_pan(channel_idx, pan)
+
+    def set_mute(self, channel_idx: int, mute: bool) -> None:
+        self.mixer.set_mute(channel_idx, mute)
+
+    def set_solo(self, channel_idx: int, solo: bool) -> None:
+        self.mixer.set_solo(channel_idx, solo)
+
+    def set_master_volume(self, volume: float) -> None:
+        self.mixer.set_master_volume(volume)
+
+    def note_on(self, note: int, velocity: int = 100, channel_idx: int = 0) -> None:
+        self.mixer.note_on(note, velocity, channel_idx)
+
+    def note_off(self, note: int, channel_idx: int = 0) -> None:
+        self.mixer.note_off(note, channel_idx)
+
+    def get_state(self):
+        """Estado combinado usado pela UI (ver ui/piano_roll.py e
+        modules/mixer/meters.py): posição de playhead em beats, estado
+        de transporte, e picos L/R do mixer."""
+        return _EngineFacadeState(
+            position_beats=self.clock.get_current_beat(),
+            is_playing=self.transport.is_playing,
+            is_recording=self.transport.is_recording,
+            is_paused=self.transport.is_paused,
+            peak_left=self.mixer.peak_left,
+            peak_right=self.mixer.peak_right,
+        )
 
     # ------------------------------------------------------------------
     # API de transporte
