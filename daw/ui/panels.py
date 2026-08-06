@@ -3,9 +3,29 @@ ui/panels.py
 
 Interface visual da DAW — Painéis e Barras de Ferramentas.
 Apenas desenha os elementos na tela e chama os operadores centrais.
+
+Estado de transporte (play/pause/record, bpm, loop, metrônomo) vem de
+`scene.daw_transport` (ver modules/transport/), que já é acionado pelo
+player nativo do Blender (bpy.ops.screen.animation_play). Estado de
+projeto (nome, sample rate, bit depth) vem de `scene.daw` (ver
+core/register.py).
 """
 
 import bpy
+
+
+def _bar_beat_label(context):
+    """Retorna o label 'Compasso:Beat' da posição atual do cursor,
+    usando o módulo timeline se disponível. Cai para '1:1' se o módulo
+    timeline não estiver registrado (ex.: falhou ao carregar)."""
+    try:
+        from ..modules.timeline.cursor import get_cursor_beat
+        from ..modules.timeline.utils import format_beat_label
+        transport = context.scene.daw_transport
+        return format_beat_label(get_cursor_beat(context), transport.beats_per_bar)
+    except Exception:
+        return "1:1"
+
 
 # ──────────────────────────────────────────────
 #  Panel: Transport Bar (aparece no Header do Sequencer)
@@ -14,7 +34,7 @@ class DAW_PT_TransportBar(bpy.types.Panel):
     bl_label = "Transport"
     # NOTA: renomeado de "DAW_PT_transport" para evitar colisão de
     # bl_idname com o painel equivalente em modules/transport/ui.py
-    # (DAW_PT_transport), que agora é a implementação completa de
+    # (DAW_PT_transport), que é a implementação completa de
     # transporte usada na aba "DAW" da 3D Viewport.
     bl_idname = "DAW_PT_transport_header_bar"
     bl_space_type = 'SEQUENCE_EDITOR'
@@ -23,44 +43,40 @@ class DAW_PT_TransportBar(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        props = context.scene.daw
+        project = context.scene.daw
+        transport = context.scene.daw_transport
 
         row = layout.row(align=True)
 
         # Projeto
-        row.label(text=f"📁 {props.project_name}")
+        row.label(text=f"📁 {project.project_name}")
         row.separator()
 
         # BPM
         row.label(text="BPM:")
-        row.prop(props, "bpm", text="")
+        row.prop(transport, "bpm", text="")
         row.separator()
 
         # Posição
-        row.label(text=f"{props.current_bar:03d} | {props.current_beat}")
+        row.label(text=_bar_beat_label(context))
         row.separator()
 
-        # Botões de transporte (Chamam os operadores do Core)
+        # Botões de transporte (operadores nativos do módulo transport,
+        # que usam bpy.ops.screen.animation_play/cancel por baixo)
         sub = row.row(align=True)
-        sub.operator("daw.stop", text="", icon='REW')
+        sub.operator("daw.transport_stop", text="", icon='REW')
 
-        play_icon = 'PAUSE' if props.is_playing else 'PLAY'
-        sub.operator("daw.play", text="", icon=play_icon)
+        play_icon = 'PAUSE' if transport.is_playing else 'PLAY'
+        sub.operator("daw.transport_play", text="", icon=play_icon)
 
-        rec_icon = 'CANCEL' if props.is_recording else 'REC'
-        sub.operator("daw.record", text="", icon=rec_icon)
+        rec_icon = 'CANCEL' if transport.is_recording else 'REC'
+        sub.operator("daw.transport_record", text="", icon=rec_icon)
 
         row.separator()
 
         # Loop e Metrônomo
-        row.prop(props, "loop_enabled", text="", icon='FILE_REFRESH')
-        row.prop(props, "metronome", text="", icon='SPEAKER')
-
-        row.separator()
-
-        # Volume Master
-        row.label(text="Master:")
-        row.prop(props, "master_volume", text="", slider=True)
+        row.prop(transport, "loop_enabled", text="", icon='FILE_REFRESH')
+        row.prop(transport, "metronome_enabled", text="", icon='SPEAKER')
 
 
 # ──────────────────────────────────────────────
@@ -75,76 +91,49 @@ class DAW_PT_ProjectInfo(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        props = context.scene.daw
+        project = context.scene.daw
+        transport = context.scene.daw_transport
 
         # Info do projeto
         box = layout.box()
         box.label(text="📁 Projeto", icon='FILE_SOUND')
-        box.prop(props, "project_name", text="Nome")
+        box.prop(project, "project_name", text="Nome")
 
         # Configurações de áudio
         box2 = layout.box()
         box2.label(text="⚙ Configurações de Áudio", icon='SETTINGS')
-        box2.prop(props, "sample_rate", text="Sample Rate")
-        box2.prop(props, "bit_depth", text="Bit Depth")
+        box2.prop(project, "sample_rate", text="Sample Rate")
+        box2.prop(project, "bit_depth", text="Bit Depth")
 
         # Status
         box3 = layout.box()
         box3.label(text="Status", icon='INFO')
         col = box3.column(align=True)
 
-        status_play = "▶ Reproduzindo" if props.is_playing else "⏹ Parado"
+        status_play = "▶ Reproduzindo" if transport.is_playing else "⏹ Parado"
         col.label(text=status_play)
 
-        if props.is_recording:
+        if transport.is_recording:
             col.label(text="🔴 Gravando", icon='REC')
 
-        if props.loop_enabled:
+        if transport.loop_enabled:
             col.label(text="🔁 Loop ativado")
 
-        # Ações rápidas (Chamam os operadores do Core)
+        # Ações rápidas
         layout.separator()
         layout.label(text="Ações Rápidas:")
         col = layout.column(align=True)
-        col.operator("daw.play", icon='PLAY')
-        col.operator("daw.stop", icon='QUIT')  # Ícone quadrado padrão de Stop
-        col.operator("daw.record", icon='REC')
-
-
-# ──────────────────────────────────────────────
-#  Panel: Mixer strip no Node Editor
-# ──────────────────────────────────────────────
-class DAW_PT_MixerPanel(bpy.types.Panel):
-    bl_label = "DAW Mixer"
-    # NOTA: este painel era um placeholder ("Em desenvolvimento") e
-    # colidia com o bl_idname "DAW_PT_mixer" do painel completo em
-    # modules/mixer/ui.py. Renomeado e removido de `classes` abaixo —
-    # o módulo modules.mixer substitui esta funcionalidade.
-    bl_idname = "DAW_PT_mixer_legacy_placeholder"
-    bl_space_type = 'NODE_EDITOR'
-    bl_region_type = 'UI'
-    bl_category = "DAW"
-
-    def draw(self, context):
-        layout = self.layout
-        props = context.scene.daw
-
-        layout.label(text="🎚 Mixer", icon='NLA')
-        layout.label(text="(Em desenvolvimento)", icon='INFO')
-
-        box = layout.box()
-        box.label(text="Master Bus")
-        box.prop(props, "master_volume", text="Volume", slider=True)
+        col.operator("daw.transport_play", icon='PLAY')
+        col.operator("daw.transport_stop", icon='QUIT')  # Ícone quadrado padrão de Stop
+        col.operator("daw.transport_record", icon='REC')
 
         layout.separator()
-        layout.label(text="Tracks virão aqui...")
+        layout.operator("daw.load_audio", icon='IMPORT')
 
 
 # ──────────────────────────────────────────────
 #  Registro Isolado da UI
 # ──────────────────────────────────────────────
-# DAW_PT_MixerPanel não é registrado: era um placeholder substituído
-# pela implementação completa em modules/mixer.
 classes = [
     DAW_PT_TransportBar,
     DAW_PT_ProjectInfo,
