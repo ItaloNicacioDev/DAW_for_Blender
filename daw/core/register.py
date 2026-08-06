@@ -23,19 +23,20 @@ _engine_started = False
 
 
 def get_engine():
-    """Retorna o Mixer ativo do motor Python puro (daw_engine.ENGINE.mixer),
-    usado por modules/mixer/utils.py, ui/piano_roll.py etc. Retorna None
-    se o motor não estiver disponível/iniciado (aí quem chamou trata
-    como "modo local" e segue sem travar).
+    """Retorna o motor ativo (daw_engine.ENGINE), usado por
+    modules/mixer/utils.py, ui/piano_roll.py etc. Retorna None se o
+    motor não estiver disponível/iniciado (aí quem chamou trata como
+    "modo local" e segue sem travar).
 
-    O Mixer já expõe set_volume/set_pan/set_mute/set_solo/
-    set_master_volume/get_state() — ver daw_engine/mixer/mixer.py.
+    A Engine expõe set_volume/set_pan/set_mute/set_solo/
+    set_master_volume/note_on/note_off/get_state() — ver
+    daw_engine/core/engine.py (seção "Fachada de compatibilidade").
     """
     if not _engine_started:
         return None
     try:
         from ..daw_engine import ENGINE
-        return ENGINE.mixer
+        return ENGINE
     except Exception:
         return None
 
