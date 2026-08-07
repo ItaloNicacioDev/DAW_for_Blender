@@ -13,7 +13,7 @@ from bpy.types import Panel, UIList, Menu
 
 from .rack import EFFECT_TYPES
 from .presets import list_all_preset_names
-from .utils import get_or_create_chain
+from .utils import get_chain
 
 
 def _active_channel_index(context) -> int:
@@ -83,9 +83,9 @@ class DAW_MT_EffectPresets(Menu):
         layout = self.layout
         rack = context.scene.daw_effects
         channel_index = _active_channel_index(context)
-        chain = get_or_create_chain(rack, channel_index)
+        chain = get_chain(rack, channel_index)
 
-        if not (0 <= chain.active_slot_index < len(chain.slots)):
+        if chain is None or not (0 <= chain.active_slot_index < len(chain.slots)):
             layout.label(text="Nenhum efeito selecionado")
             return
 
@@ -209,9 +209,20 @@ class DAW_PT_Effects(Panel):
         layout = self.layout
         rack = context.scene.daw_effects
         channel_index = _active_channel_index(context)
-        chain = get_or_create_chain(rack, channel_index)
+        # NUNCA cria a cadeia aqui: draw() é chamado a cada redraw e o Blender
+        # não permite escrever/adicionar itens em coleções de ID durante o
+        # desenho da UI ("Writing to ID classes in this context is not
+        # allowed"). A cadeia só é criada de fato dentro de um operator
+        # (ver DAW_OT_AddEffect / get_or_create_chain em operators.py).
+        chain = get_chain(rack, channel_index)
 
         layout.label(text=f"Canal: {_active_channel_name(context)}", icon='SEQ_STRIP_DUPLICATE')
+
+        if chain is None:
+            box = layout.box()
+            box.label(text="Nenhum efeito neste canal ainda.", icon='INFO')
+            box.menu("DAW_MT_add_effect", text="Adicionar Efeito", icon='ADD')
+            return
 
         row = layout.row()
         row.template_list(
