@@ -198,45 +198,58 @@ def skip_backward(beats: float = 4.0, context=None):
 # ---------------------------------------------------------------------------
 # Integração com a engine de áudio
 # ---------------------------------------------------------------------------
+#
+# BUG CORRIGIDO: este módulo importava `daw.daw_engine.transport.Transport`
+# e chamava `Transport.instance()` / `.get_position_beats()` — nenhum dos
+# dois existe (o módulo certo é `daw.daw_engine.core.transport`, sem
+# `instance()` nem `get_position_beats()`). O singleton de verdade é
+# `daw.daw_engine.core.engine.Engine`, que guarda `self.transport` e
+# `self.clock`. Como as chamadas abaixo estavam em "except Exception: pass",
+# o erro nunca aparecia — play/pause/stop/record simplesmente não faziam
+# nada, silenciosamente. Esta é a causa mais provável de o piano roll (e a
+# reprodução em geral) não tocar/atualizar depois de editar notas: o play
+# nunca chegava a iniciar a engine de verdade.
+
+
+def _get_engine():
+    from daw.daw_engine.core.engine import Engine
+    return Engine()
+
 
 def _engine_play(context=None):
     try:
-        from daw.daw_engine.transport import Transport
-        Transport.instance().play()
-    except Exception:
-        pass
+        _get_engine().play()
+    except Exception as exc:
+        print(f"[DAW] Falha ao iniciar a engine de áudio: {exc}")
 
 
 def _engine_pause(context=None):
     try:
-        from daw.daw_engine.transport import Transport
-        Transport.instance().pause()
-    except Exception:
-        pass
+        _get_engine().pause()
+    except Exception as exc:
+        print(f"[DAW] Falha ao pausar a engine de áudio: {exc}")
 
 
 def _engine_stop(context=None):
     try:
-        from daw.daw_engine.transport import Transport
-        Transport.instance().stop()
-    except Exception:
-        pass
+        _get_engine().stop()
+    except Exception as exc:
+        print(f"[DAW] Falha ao parar a engine de áudio: {exc}")
 
 
 def _engine_record(context=None):
     try:
-        from daw.daw_engine.transport import Transport
-        Transport.instance().record()
-    except Exception:
-        pass
+        _get_engine().record()
+    except Exception as exc:
+        print(f"[DAW] Falha ao iniciar gravação na engine de áudio: {exc}")
 
 
 def _get_engine_beat(context=None) -> float | None:
     """Retorna o beat atual da engine de áudio, ou None se não disponível."""
     try:
-        from daw.daw_engine.transport import Transport
-        return Transport.instance().get_position_beats()
-    except Exception:
+        return _get_engine().clock.get_current_beat()
+    except Exception as exc:
+        print(f"[DAW] Falha ao ler posição da engine de áudio: {exc}")
         return None
 
 
