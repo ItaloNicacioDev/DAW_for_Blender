@@ -114,7 +114,8 @@ class VST:
         Retorna True em caso de sucesso. Em caso de erro, `self.error` é
         preenchido e `self.loaded` permanece False.
         """
-        from .engine import DawdreamerBridge, detect_plugin_format, is_available, install_instructions
+        from .engine import detect_plugin_format
+        from .ipc_engine import DawdreamerIPCBridge, is_available, install_instructions
 
         self.error = None
         self.plugin_format = detect_plugin_format(self.path)
@@ -125,7 +126,7 @@ class VST:
             return False
 
         try:
-            bridge = DawdreamerBridge(sample_rate=sample_rate, block_size=block_size)
+            bridge = DawdreamerIPCBridge(sample_rate=sample_rate, block_size=block_size)
             bridge.load(self.path, self.vst_type)
             self.bridge = bridge
             self._refresh_parameters_from_bridge()
