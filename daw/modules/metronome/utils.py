@@ -13,8 +13,13 @@ from typing import Tuple
 
 
 def get_daw_props(context):
-    """Retorna context.scene.daw (BPM, is_playing, current_bar/current_beat, metronome on/off)."""
-    return context.scene.daw
+    """Retorna context.scene.daw_transport (BPM, is_playing, current_bar/current_beat, metronome on/off).
+
+    Nota: o estado de transporte NÃO vive em `scene.daw` (que só guarda
+    metadado de projeto — nome, sample rate, bit depth). Ele vive em
+    `scene.daw_transport` (ver modules/transport/properties.py).
+    """
+    return context.scene.daw_transport
 
 
 def get_metronome_props(context):
@@ -54,7 +59,7 @@ def should_click_now(context) -> bool:
     daw = get_daw_props(context)
     metro = get_metronome_props(context)
 
-    if not daw.metronome:
+    if not daw.metronome_enabled:
         return False
     if metro.sync_with_playback and not daw.is_playing:
         return False
