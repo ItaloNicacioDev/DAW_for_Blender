@@ -18,7 +18,7 @@ from bpy.types import Panel, UIList
 
 from . import engine
 from .live_monitor import _try_import_sounddevice
-from .utils import get_or_create_chain
+from .utils import get_chain
 from .pressets import get_preset_manager
 
 
@@ -386,7 +386,12 @@ class DAW_PT_VstEffects(Panel):
 
         settings = context.scene.daw_vst
         channel_index = _active_channel_index(context)
-        chain = get_or_create_chain(context.scene, channel_index)
+        # NUNCA cria a cadeia aqui dentro do draw(): o Blender proíbe
+        # adicionar itens em coleções de ID durante o redraw da UI
+        # ("Writing to ID classes in this context is not allowed").
+        # A criação real acontece dentro de um operator (ver
+        # get_or_create_chain usado pelos operators.py de VST).
+        chain = get_chain(context.scene, channel_index)
 
         layout.label(text=f"Canal: {_active_channel_name(context)}", icon='SEQ_STRIP_DUPLICATE')
 
@@ -410,8 +415,9 @@ class DAW_PT_VstEffects(Panel):
         # ── Auto-bounce ───────────────────────────────────────────────
         layout.prop(settings, "auto_bounce_on_change", icon='FILE_REFRESH')
 
-        if not len(chain.vsts):
+        if chain is None or not len(chain.vsts):
             layout.label(text="Nenhum VST de efeito neste canal.", icon='INFO')
+            layout.label(text="Use o painel 'VST Browser' para adicionar um.", icon='PLUGIN')
             return
 
         chain_len = len(chain.vsts)
