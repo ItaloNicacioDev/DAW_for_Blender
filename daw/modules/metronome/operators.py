@@ -75,7 +75,7 @@ class DAW_OT_MetronomeRun(Operator):
         metro = get_metronome_props(context)
 
         # Se o usuário desligou o metrônomo, encerra o modal
-        if not daw.metronome:
+        if not daw.metronome_enabled:
             self._finish(context)
             return {'CANCELLED'}
 
@@ -119,9 +119,9 @@ class DAW_OT_MetronomeToggle(Operator):
 
     def execute(self, context):
         daw = get_daw_props(context)
-        daw.metronome = not daw.metronome
+        daw.metronome_enabled = not daw.metronome_enabled
 
-        if daw.metronome:
+        if daw.metronome_enabled:
             bpy.ops.daw.metronome_run('INVOKE_DEFAULT')
             self.report({'INFO'}, "Metrônomo ativado")
         else:
