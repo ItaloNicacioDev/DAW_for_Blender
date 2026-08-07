@@ -21,16 +21,16 @@ class DAW_PT_Metronome(Panel):
 
     def draw(self, context):
         layout = self.layout
-        daw = context.scene.daw
+        daw = context.scene.daw_transport
         metro = context.scene.daw_metronome
 
         row = layout.row(align=True)
         row.scale_y = 1.3
-        icon = 'SPEAKER' if daw.metronome else 'MUTE_IPO_ON'
+        icon = 'SPEAKER' if daw.metronome_enabled else 'MUTE_IPO_ON'
         row.operator(
             "daw.metronome_toggle",
-            text="Metrônomo Ativado" if daw.metronome else "Metrônomo Desativado",
-            icon=icon, depress=daw.metronome,
+            text="Metrônomo Ativado" if daw.metronome_enabled else "Metrônomo Desativado",
+            icon=icon, depress=daw.metronome_enabled,
         )
 
         box = layout.box()
