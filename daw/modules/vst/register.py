@@ -89,6 +89,14 @@ def unregister():
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
 
+    # Desliga o processo worker de VST (se estiver rodando) -- sem isso
+    # ele fica orfao, vivo, mesmo depois do addon ser desativado/recarregado.
+    try:
+        from .ipc_engine import shutdown_worker
+        shutdown_worker()
+    except Exception as e:
+        print(f"[DAW][vst] Falha ao desligar worker de VST: {e}")
+
     for cls in reversed(_ui_classes):
         try:
             bpy.utils.unregister_class(cls)
