@@ -1,0 +1,316 @@
+# modules/vst/ipc_engine.py
+"""
+Substituto do `DawdreamerBridge` (engine.py) que, em vez de importar o
+dawdreamer dentro do processo do Blender, fala com um processo worker
+separado (`daw/vst_worker/worker.py`), rodando num Python embutido a
+parte (ex.: 3.12) onde o dawdreamer de verdade esta instalado.
+
+Por que:
+    - Desacopla o addon da versao de Python do Blender: quando o
+      Blender mudar de versao de novo, so o Python embutido do worker
+      precisa acompanhar -- nao depende de o mantenedor do dawdreamer
+      publicar wheel pra cada versao nova.
+    - Isolamento de crash: se um VST travar o processo (comum com
+      plugins mal comportados), so o worker morre. O Blender continua
+      de pe, e este bridge detecta a queda e pode reiniciar o worker.
+
+Mesma interface publica de `DawdreamerBridge` (engine.py):
+    load(), unload(), list_parameters(), set_parameter(), get_parameter(),
+    process_effect(), render_instrument()
+-- portanto `vst.py` (VST.load/process_effect/render_instrument) nao
+precisa saber qual bridge esta por baixo.
+"""
+from __future__ import annotations
+
+import atexit
+import itertools
+import socket
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "vst_worker"))
+from protocol import (  # noqa: E402
+    ConnectionClosed,
+    parse_port_handshake,
+    recv_frame,
+    send_frame,
+)
+
+if TYPE_CHECKING:
+    from .vst import VSTProgramParameter, VSTProgramType
+
+
+# ═══════════════════════════════════════════════════════════════
+#  LOCALIZACAO DO PYTHON EMBUTIDO + WORKER
+# ═══════════════════════════════════════════════════════════════
+
+def _worker_python_candidates() -> List[Path]:
+    """Pastas de Python embutido compativeis, do mais especifico ao mais
+    generico. Cada uma deve conter um python.exe/python3 com dawdreamer
+    real instalado (via `pip install dawdreamer` dentro dela)."""
+    root = Path(__file__).resolve().parent.parent.parent / "vendor"
+
+    if sys.platform.startswith("win"):
+        names = ["py312_embed_win_amd64"]
+        exe = "python.exe"
+    elif sys.platform == "darwin":
+        machine_names = ["py312_embed_macos_arm64", "py312_embed_macos_x86_64"]
+        names = machine_names
+        exe = "bin/python3"
+    else:
+        names = ["py312_embed_linux_x86_64"]
+        exe = "bin/python3"
+
+    return [root / name / exe for name in names]
+
+
+def find_worker_python() -> Optional[Path]:
+    for candidate in _worker_python_candidates():
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _worker_script_path() -> Path:
+    return Path(__file__).resolve().parent.parent.parent / "vst_worker" / "worker.py"
+
+
+def install_instructions() -> str:
+    candidates = ", ".join(str(c.parent.name) for c in _worker_python_candidates())
+    return (
+        "Motor de VST (worker) indisponivel.\n\n"
+        f"Pasta(s) esperada(s) em daw/vendor/: {candidates}\n"
+        "Cada uma deve conter um Python embutido (3.12) com o dawdreamer\n"
+        "real instalado dentro dela (pip install dawdreamer), independente\n"
+        "da versao de Python do proprio Blender.\n\n"
+        "Ver daw/vst_worker/README.md para instrucoes de setup."
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  GERENCIADOR DE PROCESSO WORKER (singleton compartilhado)
+# ═══════════════════════════════════════════════════════════════
+
+class WorkerProcessError(RuntimeError):
+    pass
+
+
+class _WorkerManager:
+    """Gerencia um unico processo worker compartilhado por todos os VSTs
+    carregados nesta sessao do Blender. Thread-safe (lock por chamada)."""
+
+    _STARTUP_TIMEOUT = 15.0
+
+    def __init__(self) -> None:
+        self._proc: Optional[subprocess.Popen] = None
+        self._sock: Optional[socket.socket] = None
+        self._lock = threading.RLock()
+        self._id_counter = itertools.count(1)
+
+    def _spawn(self) -> None:
+        python_exe = find_worker_python()
+        if python_exe is None:
+            raise WorkerProcessError(install_instructions())
+
+        script = _worker_script_path()
+        self._proc = subprocess.Popen(
+            [str(python_exe), str(script), "--host", "127.0.0.1", "--port", "0"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+        deadline = time.time() + self._STARTUP_TIMEOUT
+        port: Optional[int] = None
+        while time.time() < deadline:
+            if self._proc.poll() is not None:
+                stderr = self._proc.stderr.read() if self._proc.stderr else ""
+                raise WorkerProcessError(f"Worker encerrou ao iniciar. stderr:\n{stderr}")
+            line = self._proc.stdout.readline() if self._proc.stdout else ""
+            if not line:
+                continue
+            port = parse_port_handshake(line)
+            if port is not None:
+                break
+
+        if port is None:
+            self._kill()
+            raise WorkerProcessError("Timeout esperando o worker abrir a porta de escuta.")
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect(("127.0.0.1", port))
+        self._sock = sock
+
+    def _ensure_alive(self) -> None:
+        if self._proc is not None and self._proc.poll() is None and self._sock is not None:
+            return
+        self._kill()
+        self._spawn()
+
+    def _kill(self) -> None:
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+        if self._proc is not None:
+            try:
+                self._proc.kill()
+            except OSError:
+                pass
+            self._proc = None
+
+    def call(self, cmd: str, payload: bytes = b"", **fields) -> Tuple[Dict[str, Any], bytes]:
+        """Envia um comando e espera a resposta. Reinicia o worker
+        automaticamente se ele tiver caido desde a ultima chamada."""
+        with self._lock:
+            self._ensure_alive()
+            req_id = next(self._id_counter)
+            header = {"cmd": cmd, "id": req_id, **fields}
+            try:
+                send_frame(self._sock, header, payload)
+                resp_header, resp_payload = recv_frame(self._sock)
+            except (ConnectionClosed, OSError) as e:
+                self._kill()
+                raise WorkerProcessError(f"Conexao com o worker perdida: {e}") from e
+
+            if not resp_header.get("ok", False):
+                raise WorkerProcessError(resp_header.get("error", "erro desconhecido no worker"))
+            return resp_header, resp_payload
+
+    def shutdown(self) -> None:
+        with self._lock:
+            if self._sock is not None:
+                try:
+                    self.call("shutdown")
+                except WorkerProcessError:
+                    pass
+            self._kill()
+
+
+_manager = _WorkerManager()
+
+
+def shutdown_worker() -> None:
+    """Chamar no unregister() do addon, pra nao deixar worker orfao."""
+    _manager.shutdown()
+
+
+# Rede de seguranca: se o Blender fechar sem passar pelo unregister() do
+# addon (crash, fechamento abrupto), garante que o processo worker nao
+# fique orfao rodando em segundo plano.
+atexit.register(_manager.shutdown)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BRIDGE (mesma interface publica do DawdreamerBridge)
+# ═══════════════════════════════════════════════════════════════
+
+class DawdreamerIPCBridge:
+    """Drop-in no lugar de `DawdreamerBridge` (engine.py). Cada instancia
+    representa um VST carregado, identificado por `vst_id` do lado do
+    worker -- mas o processo pesado (RenderEngine) fica todo do outro
+    lado do socket."""
+
+    def __init__(self, sample_rate: int = 44100, block_size: int = 512):
+        self.sample_rate = sample_rate
+        self.block_size = block_size
+        self.plugin_name: str = ""
+        self.vst_type: Optional["VSTProgramType"] = None
+        self._loaded = False
+
+    def load(self, path: str | Path, vst_type: "VSTProgramType") -> None:
+        self.plugin_name = Path(path).stem
+        self.vst_type = vst_type
+        _manager.call(
+            "load",
+            vst_id=self.plugin_name,
+            path=str(path),
+            vst_type=vst_type.value if hasattr(vst_type, "value") else str(vst_type),
+            sample_rate=self.sample_rate,
+            block_size=self.block_size,
+        )
+        self._loaded = True
+
+    def unload(self) -> None:
+        if self._loaded:
+            try:
+                _manager.call("unload", vst_id=self.plugin_name)
+            except WorkerProcessError:
+                pass
+        self._loaded = False
+
+    def list_parameters(self) -> List["VSTProgramParameter"]:
+        from .vst import VSTProgramParameter
+
+        if not self._loaded:
+            return []
+        header, _ = _manager.call("list_parameters", vst_id=self.plugin_name)
+        return [
+            VSTProgramParameter(id=p["id"], name=p["name"], value=p["value"], label=p.get("label", ""))
+            for p in header.get("parameters", [])
+        ]
+
+    def set_parameter(self, param_id: int, value: float) -> None:
+        if not self._loaded:
+            return
+        _manager.call("set_parameter", vst_id=self.plugin_name, param_id=int(param_id), value=float(value))
+
+    def get_parameter(self, param_id: int) -> float:
+        if not self._loaded:
+            return 0.0
+        header, _ = _manager.call("get_parameter", vst_id=self.plugin_name, param_id=int(param_id))
+        return float(header.get("value", 0.0))
+
+    def process_effect(self, audio):
+        import numpy as np
+
+        if not self._loaded:
+            raise RuntimeError("Nenhum plugin carregado")
+
+        arr = np.asarray(audio, dtype=np.float32)
+        if arr.ndim == 1:
+            arr = np.stack([arr, arr])
+        arr = np.ascontiguousarray(arr)
+        channels, n_samples = arr.shape
+
+        header, payload = _manager.call(
+            "process_effect",
+            payload=arr.tobytes(),
+            vst_id=self.plugin_name,
+            channels=channels,
+            n_samples=n_samples,
+        )
+        out_channels = header["channels"]
+        out_samples = header["n_samples"]
+        return np.frombuffer(payload, dtype=np.float32).reshape(out_channels, out_samples).copy()
+
+    def render_instrument(self, midi_notes: Sequence[Tuple[int, float, float, int]], duration: float):
+        import numpy as np
+
+        if not self._loaded:
+            raise RuntimeError("Nenhum plugin carregado")
+
+        header, payload = _manager.call(
+            "render_instrument",
+            vst_id=self.plugin_name,
+            midi_notes=[list(n) for n in midi_notes],
+            duration=float(duration),
+        )
+        out_channels = header["channels"]
+        out_samples = header["n_samples"]
+        return np.frombuffer(payload, dtype=np.float32).reshape(out_channels, out_samples).copy()
+
+    def __repr__(self) -> str:
+        status = "worker" if self._loaded else "nao carregado"
+        return f"<DawdreamerIPCBridge '{self.plugin_name}' [{status}] @ {self.sample_rate}Hz>"
+
+
+def is_available() -> bool:
+    return find_worker_python() is not None
