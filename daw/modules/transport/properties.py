@@ -87,6 +87,19 @@ class DAW_TransportProperties(PropertyGroup):
         default=False,
     )
 
+    current_bar: IntProperty(
+        name="Compasso Atual",
+        description="Compasso atual, atualizado pelo metrônomo/transporte durante a reprodução",
+        default=1,
+        min=1,
+    )
+    current_beat: IntProperty(
+        name="Beat Atual",
+        description="Beat atual dentro do compasso, atualizado pelo metrônomo/transporte durante a reprodução",
+        default=1,
+        min=1,
+    )
+
 
 classes = (DAW_TransportProperties,)
 
