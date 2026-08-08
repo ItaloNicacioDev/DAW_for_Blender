@@ -144,18 +144,52 @@ def scan_directory_for_vsts(directory: str, recursive: bool = True) -> List[Dict
 
     Retorna lista de dicts: {"path", "name", "format"}.
     Nunca levanta exceção — diretórios inválidos retornam lista vazia.
+
+    Resiliente a erros por entrada: usa os.walk com onerror silencioso,
+    então uma pasta sem permissão (comum em sync de nuvem, symlinks
+    quebrados etc.) no meio da árvore não aborta o resto da varredura
+    -- só pula aquele ponto e continua. Antes, um erro no meio de um
+    Path.rglob() interrompia o loop inteiro e descartava tudo que
+    viria depois dele silenciosamente.
     """
     results: List[Dict[str, str]] = []
     root = Path(directory).expanduser()
     if not root.exists() or not root.is_dir():
         return results
 
-    walker = root.rglob("*") if recursive else root.glob("*")
-    try:
-        for entry in walker:
+    def _on_walk_error(_err: OSError) -> None:
+        pass  # ignora e continua a varredura no resto da árvore
+
+    if recursive:
+        walk_iter = os.walk(root, onerror=_on_walk_error, followlinks=False)
+    else:
+        try:
+            entries = list(root.iterdir())
+        except (PermissionError, OSError):
+            entries = []
+        walk_iter = [(str(root), [], [e.name for e in entries if e.is_file()])]
+
+    for dirpath, dirnames, filenames in walk_iter:
+        # Bundles .vst3/.vst podem ser PASTAS (comum no Windows/macOS),
+        # não só arquivos únicos -- checa os dois.
+        for dirname in list(dirnames):
+            if Path(dirname).suffix.lower() in (".vst3", ".vst"):
+                entry = Path(dirpath) / dirname
+                fmt = "VST3" if entry.suffix.lower() == ".vst3" else "VST2"
+                results.append({
+                    "path": str(entry),
+                    "name": entry.stem,
+                    "format": fmt,
+                })
+
+        for filename in filenames:
+            entry = Path(dirpath) / filename
             if entry.suffix.lower() not in _VST_EXTENSIONS:
                 continue
-            fmt = detect_plugin_format(entry)
+            try:
+                fmt = detect_plugin_format(entry)
+            except OSError:
+                continue
             if fmt == "UNKNOWN":
                 continue
             results.append({
@@ -163,8 +197,16 @@ def scan_directory_for_vsts(directory: str, recursive: bool = True) -> List[Dict
                 "name": entry.stem,
                 "format": fmt,
             })
-    except (PermissionError, OSError):
-        pass
+
+        # Não desce dentro de bundles .vst3/.vst já identificados como
+        # plugin (evita listar o binário interno como um plugin
+        # separado -- era a causa das duplicatas tipo "BBC Symphony
+        # Orchestra" aparecendo duas vezes: uma como bundle, outra como
+        # o binário de dentro dele).
+        dirnames[:] = [
+            d for d in dirnames
+            if Path(d).suffix.lower() not in (".vst3", ".vst")
+        ]
 
     return results
 
