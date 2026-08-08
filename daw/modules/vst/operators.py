@@ -22,7 +22,6 @@ import bpy
 from bpy.props import StringProperty, IntProperty, BoolProperty, EnumProperty
 from bpy.types import Operator
 
-from . import engine
 from . import timeline_bridge as tlb
 from .vst import VSTProgramType
 from .pressets import get_preset_manager
@@ -872,33 +871,10 @@ class DAW_OT_ApplyVstEffectToStrip(Operator):
 
 
 # ---------------------------------------------------------------------- #
-# Instalação do dawdreamer
+# (removido) Instalação via pip do dawdreamer -- não se aplica mais.
+# O motor de VST agora roda via worker externo (ver modules/vst/ipc_engine.py),
+# vendorizado junto com o addon, sem exigir nenhuma instalação do usuário.
 # ---------------------------------------------------------------------- #
-class DAW_OT_InstallDawdreamer(Operator):
-    bl_idname = "daw.install_dawdreamer"
-    bl_label = "Instalar dawdreamer"
-    bl_description = "Instala a biblioteca 'dawdreamer' via pip no Python do Blender"
-    bl_options = {'REGISTER'}
-
-    def execute(self, context):
-        if engine.is_available():
-            self.report({'INFO'}, "dawdreamer já está instalado")
-            return {'FINISHED'}
-
-        settings = _settings(context)
-        settings.is_installing_dawdreamer = True
-
-        def _on_done(success: bool, message: str):
-            def _apply():
-                settings.is_installing_dawdreamer = False
-                settings.dawdreamer_install_log = message[-500:]
-                return None
-            bpy.app.timers.register(_apply, first_interval=0.0)
-
-        engine.install_dawdreamer(callback=_on_done)
-        self.report({'INFO'}, "Instalando dawdreamer em segundo plano... veja o Console do Sistema")
-        return {'FINISHED'}
-
 
 classes = [
     DAW_OT_ScanVstDirectories,
@@ -921,5 +897,4 @@ classes = [
     DAW_OT_ImportVstPresetLibrary,
     DAW_OT_RenderVstInstrumentToTimeline,
     DAW_OT_ApplyVstEffectToStrip,
-    DAW_OT_InstallDawdreamer,
 ]
