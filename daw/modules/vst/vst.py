@@ -8,7 +8,7 @@ Responsabilidades:
     - Expor interface de get/set de parâmetros por ID ou nome
     - SEM dependência de bpy (portável para motor C++/audio)
 
-Processamento real: delegado a DawdreamerBridge (vst_bridge.py)
+Processamento real: delegado a DawdreamerIPCBridge (ipc_engine.py)
 """
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ class VST:
     # ------------------------------------------------------------------
     def load(self, sample_rate: int = 44100, block_size: int = 512) -> bool:
         """
-        Carrega o plugin de verdade através do DawdreamerBridge.
+        Carrega o plugin de verdade através do worker IPC (ipc_engine.py).
 
         Detecta automaticamente VST2 x VST3 pela extensão do arquivo e
         escolhe o modo de processamento certo (efeito ou instrumento MIDI)
