@@ -307,18 +307,8 @@ class DawVstSettings(bpy.types.PropertyGroup):
         default=False,
     )
 
-    # ── Instalação do dawdreamer ──────────────────────────────────────
-    is_installing_dawdreamer: BoolProperty(
-        name="Instalando dawdreamer",
-        description="Instalação do dawdreamer em andamento",
-        default=False,
-    )
-
-    dawdreamer_install_log: StringProperty(
-        name="Log da Instalação",
-        description="Últimas linhas de saída da instalação do dawdreamer",
-        default="",
-    )
+    # (removido) Instalação via pip do dawdreamer não se aplica mais —
+    # o motor de VST vem vendorizado junto com o addon (ver ipc_engine.py).
 
     # ── Instalação do sounddevice ─────────────────────────────────────
     is_installing_sounddevice: BoolProperty(
