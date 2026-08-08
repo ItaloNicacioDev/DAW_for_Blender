@@ -4,7 +4,10 @@ Módulo VST da DAW.
 
 Arquitetura (arquivos novos/alterados marcados com *):
     vst.py            — modelo puro de um plugin VST (sem bpy)
-    engine.py         — ponte real de processamento (DawdreamerBridge)
+    engine.py         — utilitários de plugin (detecção de formato VST2/VST3)
+    ipc_engine.py   * — motor real de processamento: cliente IPC pro worker
+                        externo (vendorizado, ver vst_worker/), que hospeda
+                        o dawdreamer de verdade num Python separado
     pressets.py       — presets embutidos + presets do usuário (JSON)
     utils.py          — registro global vst_id -> VST puro, varredura
     properties.py   * — PropertyGroups (+ scroll, busca, auto-bounce, sounddevice)
@@ -14,7 +17,8 @@ Arquitetura (arquivos novos/alterados marcados com *):
                         monitor ao vivo, scan assíncrono)
     live_monitor.py * — NOVO: thread de áudio para monitor ao vivo via microfone
     persistence.py  * — NOVO: serialize/restore VST state no projeto (.json)
-    register.py     * — register/unregister (+ handlers de load_pre e auto-scan)
+    register.py     * — register/unregister (+ handlers de load_pre/auto-scan,
+                        desliga o worker de VST no unregister)
 
 Integração com project/save.py — adicione ao final de _serialize_scene():
     from ..vst import persistence as vst_persistence
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 from .vst import VST, VSTProgramType, VSTProgramParameter, VSTProgramState
 from . import engine
+from . import ipc_engine
 from . import timeline_bridge
 from . import persistence
 from . import live_monitor
@@ -51,8 +56,10 @@ from .register import register, unregister
 __all__ = [
     # Modelo puro
     "VST", "VSTProgramType", "VSTProgramParameter", "VSTProgramState",
-    # Motor (dawdreamer)
+    # Utilitários de plugin (detecção de formato)
     "engine",
+    # Motor real (worker IPC vendorizado)
+    "ipc_engine",
     # Ponte com a timeline nativa do Blender
     "timeline_bridge",
     # Persistência (save/load de projeto)
