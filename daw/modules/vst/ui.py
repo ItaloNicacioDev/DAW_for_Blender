@@ -16,7 +16,7 @@ from __future__ import annotations
 import bpy
 from bpy.types import Panel, UIList
 
-from . import engine
+from . import ipc_engine
 from .live_monitor import _try_import_sounddevice
 from .utils import get_chain
 from .pressets import get_preset_manager
@@ -37,24 +37,21 @@ def _active_channel_name(context) -> str:
 
 
 def _draw_engine_status(layout):
-    """Aviso + botão de instalação quando dawdreamer não está disponível."""
-    settings = bpy.context.scene.daw_vst
-    if engine.is_available():
-        if not engine.is_bundled():
-            box = layout.box()
-            box.label(text="Motor VST: dawdreamer via pip (não embutido)", icon='INFO')
-        return
+    """
+    Status do motor de VST (worker vendorizado, ver ipc_engine.py).
+
+    Não existe mais botão de instalação: o worker (Python embutido +
+    dawdreamer) já vem junto no addon. Se a pasta vendor esperada não
+    estiver presente, é um problema de build/empacotamento do addon,
+    não algo que o usuário final deveria resolver na hora — por isso
+    mostramos só um aviso discreto, sem oferecer instalação via pip.
+    """
+    if ipc_engine.is_available():
+        return  # tudo certo, não precisa mostrar nada
 
     box = layout.box()
-    box.label(text="Motor VST (dawdreamer) indisponível", icon='ERROR')
-    if settings.is_installing_dawdreamer:
-        box.label(text="Instalando... veja o Console do Sistema", icon='SORTTIME')
-    else:
-        box.operator("daw.install_dawdreamer", icon='IMPORT')
-    if settings.dawdreamer_install_log:
-        col = box.column(align=True)
-        for line in settings.dawdreamer_install_log.splitlines()[-4:]:
-            col.label(text=line)
+    box.label(text="Motor de VST não encontrado no addon", icon='ERROR')
+    box.label(text="Reinstale o addon com a pasta vendor/ completa.")
 
 
 def _draw_sounddevice_status(layout):
