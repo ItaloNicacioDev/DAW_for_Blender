@@ -22,8 +22,10 @@ de verdade, que deve estar instalado no Python que roda este script
 from __future__ import annotations
 
 import argparse
+import datetime
 import socket
 import sys
+import threading
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -37,16 +39,43 @@ from protocol import (  # noqa: E402
     send_frame,
 )
 
+# ═══════════════════════════════════════════════════════════════
+#  LOG EM ARQUIVO -- à prova de qualquer captura de console/pipe
+#  que esteja comendo o stdout/stderr (redirecionamento do
+#  Start-Process do PowerShell, terminal integrado de IDE, etc.).
+#  Sempre escreve aqui, além de tentar print() normal.
+# ═══════════════════════════════════════════════════════════════
+_LOG_PATH = Path(__file__).resolve().parent / "worker_debug.log"
+
+
+def _log(msg: str) -> None:
+    line = f"[{datetime.datetime.now().isoformat(timespec='seconds')}] {msg}"
+    try:
+        with open(_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+    try:
+        print(line, flush=True)
+    except Exception:
+        pass
+
+
+_log("=" * 60)
+_log("worker.py iniciando (import de protocol.py OK)")
+
 try:
     import numpy as np
-except ImportError:
-    print("ERRO: numpy nao encontrado no Python do worker.", file=sys.stderr)
+    _log(f"numpy OK, versao {np.__version__}")
+except ImportError as e:
+    _log(f"ERRO: numpy nao encontrado: {e}")
     raise
 
 try:
     import dawdreamer as dd
+    _log(f"dawdreamer OK, tem RenderEngine: {hasattr(dd, 'RenderEngine')}")
 except ImportError as e:
-    print(f"ERRO: dawdreamer nao encontrado no Python do worker: {e}", file=sys.stderr)
+    _log(f"ERRO: dawdreamer nao encontrado: {e}")
     raise
 
 
@@ -66,6 +95,11 @@ class LoadedPlugin:
 
 
 _LOADED: Dict[str, LoadedPlugin] = {}
+
+# Threads que estao rodando plugin.open_editor() (bloqueante ate a
+# janela ser fechada pelo usuario). Uma por vst_id, pra nao abrir a
+# mesma janela duas vezes nem travar o loop principal do worker.
+_EDITOR_THREADS: Dict[str, threading.Thread] = {}
 
 
 def _cmd_ping(header: dict, payload: bytes):
@@ -199,6 +233,53 @@ def _cmd_render_instrument(header: dict, payload: bytes):
     return resp, out.tobytes()
 
 
+def _cmd_open_editor(header: dict, payload: bytes):
+    """
+    Abre a janela nativa (GUI) do plugin numa thread separada.
+
+    plugin.open_editor() do dawdreamer é BLOQUEANTE -- só retorna quando
+    o usuário fecha a janela. Se chamássemos direto aqui, travaríamos o
+    loop principal do worker (nenhum outro comando, nem process_effect
+    de outro VST, seria atendido até a janela fechar). Por isso roda
+    numa thread daemon à parte; o comando em si responde OK assim que a
+    thread é disparada, sem esperar a janela fechar.
+    """
+    vst_id = header["vst_id"]
+    loaded = _LOADED.get(vst_id)
+    if loaded is None:
+        return {"ok": False, "error": f"VST '{vst_id}' nao carregado"}, b""
+
+    open_editor_fn = getattr(loaded.plugin, "open_editor", None)
+    if not callable(open_editor_fn):
+        return {"ok": False, "error": "Este plugin nao expoe open_editor() (dawdreamer)"}, b""
+
+    existing = _EDITOR_THREADS.get(vst_id)
+    if existing is not None and existing.is_alive():
+        return {"ok": True, "already_open": True}, b""
+
+    def _run_editor():
+        _log(f"abrindo editor de '{vst_id}' (janela nativa do plugin)...")
+        try:
+            open_editor_fn()
+        except Exception as e:
+            _log(f"ERRO no editor de '{vst_id}': {e}\n{traceback.format_exc()}")
+        finally:
+            _log(f"editor de '{vst_id}' fechado")
+
+    thread = threading.Thread(target=_run_editor, name=f"vst-editor-{vst_id}", daemon=True)
+    _EDITOR_THREADS[vst_id] = thread
+    thread.start()
+
+    return {"ok": True, "already_open": False}, b""
+
+
+def _cmd_is_editor_open(header: dict, payload: bytes):
+    vst_id = header["vst_id"]
+    thread = _EDITOR_THREADS.get(vst_id)
+    is_open = thread is not None and thread.is_alive()
+    return {"ok": True, "is_open": is_open}, b""
+
+
 _HANDLERS = {
     "ping": _cmd_ping,
     "load": _cmd_load,
@@ -208,6 +289,8 @@ _HANDLERS = {
     "get_parameter": _cmd_get_parameter,
     "process_effect": _cmd_process_effect,
     "render_instrument": _cmd_render_instrument,
+    "open_editor": _cmd_open_editor,
+    "is_editor_open": _cmd_is_editor_open,
 }
 
 
@@ -244,28 +327,37 @@ def _serve(conn: socket.socket) -> None:
 
 
 def main() -> None:
+    _log("main() iniciou")
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args()
+    _log(f"args parseados: host={args.host} port={args.port}")
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind((args.host, args.port))
     listener.listen(1)
     actual_port = listener.getsockname()[1]
+    _log(f"socket bind+listen OK na porta {actual_port}")
 
     # Handshake: primeira linha do stdout informa a porta real ao pai.
     print(format_port_handshake(actual_port), flush=True)
+    _log("handshake enviado, esperando conexao (accept)...")
 
     try:
         conn, _addr = listener.accept()
-    except Exception:
+        _log(f"conexao aceita de {_addr}")
+    except Exception as e:
+        _log(f"ERRO no accept(): {e}\n{traceback.format_exc()}")
         listener.close()
         return
 
     try:
         _serve(conn)
+        _log("_serve() retornou normalmente (conexao encerrada)")
+    except Exception as e:
+        _log(f"ERRO em _serve(): {e}\n{traceback.format_exc()}")
     finally:
         conn.close()
         listener.close()
@@ -276,7 +368,12 @@ def main() -> None:
             except Exception:
                 pass
         _LOADED.clear()
+        _log("worker encerrado, recursos liberados")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        _log(f"ERRO FATAL nao tratado em main(): {e}\n{traceback.format_exc()}")
+        raise
