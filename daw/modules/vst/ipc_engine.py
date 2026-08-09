@@ -307,6 +307,25 @@ class DawdreamerIPCBridge:
         out_samples = header["n_samples"]
         return np.frombuffer(payload, dtype=np.float32).reshape(out_channels, out_samples).copy()
 
+    def open_editor(self) -> bool:
+        """
+        Pede pro worker abrir a janela nativa (GUI) do plugin.
+
+        Retorna rapido (nao espera a janela fechar) -- o worker roda o
+        open_editor() do dawdreamer numa thread separada por baixo.
+        Retorna False se o plugin nao tiver editor nativo suportado.
+        """
+        if not self._loaded:
+            return False
+        header, _ = _manager.call("open_editor", vst_id=self.plugin_name)
+        return bool(header.get("ok", False))
+
+    def is_editor_open(self) -> bool:
+        if not self._loaded:
+            return False
+        header, _ = _manager.call("is_editor_open", vst_id=self.plugin_name)
+        return bool(header.get("is_open", False))
+
     def __repr__(self) -> str:
         status = "worker" if self._loaded else "nao carregado"
         return f"<DawdreamerIPCBridge '{self.plugin_name}' [{status}] @ {self.sample_rate}Hz>"
