@@ -29,6 +29,23 @@ _EXTENSION = {
 }
 
 
+def _ffmpeg_available(context) -> bool:
+    """
+    Verifica se este build do Blender tem suporte a FFmpeg compilado.
+
+    Builds da Steam do Blender historicamente NÃO incluem FFmpeg (motivo:
+    licenciamento de codec) -- nesse caso 'FFMPEG' nem aparece nos itens
+    válidos de render.image_settings.file_format, e tentar setar isso
+    direto derruba com TypeError em vez de um erro claro.
+    """
+    try:
+        prop = context.scene.render.image_settings.bl_rna.properties["file_format"]
+        valid_ids = {item.identifier for item in prop.enum_items}
+    except (AttributeError, KeyError):
+        return False
+    return "FFMPEG" in valid_ids
+
+
 def _configure_render_settings(context, filepath_noext: str):
     """Aplica as configurações do módulo Render às configurações de render da cena."""
     scene = context.scene
@@ -62,6 +79,15 @@ def render_video(context, filepath_noext: str) -> tuple[bool, str]:
     render da cena são restauradas ao final (filepath e formato de imagem).
     """
     settings = context.scene.daw_render_settings
+
+    if not _ffmpeg_available(context):
+        return False, (
+            "Este Blender não tem suporte a FFmpeg compilado (comum na "
+            "versão da Steam, por causa de licenciamento de codec). "
+            "Renderização de vídeo com áudio/codec H264 não é possível "
+            "nesta instalação -- baixe o Blender direto de blender.org "
+            "se precisar dessa funcionalidade."
+        )
 
     prev_filepath = context.scene.render.filepath
     prev_format = context.scene.render.image_settings.file_format
