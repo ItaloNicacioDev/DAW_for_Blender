@@ -36,7 +36,10 @@ def _mixdown_kwargs(settings) -> dict:
         "codec": codec,
         "format": fmt,
         "bitrate": 320 if codec in ('MP3', 'VORBIS') else 192,
-        "samplerate": int(settings.sample_rate),
+        # A API do bpy.ops.sound.mixdown usa "mixrate" (não "samplerate")
+        # para a taxa de amostragem -- nome mudou em algum momento das
+        # versões do Blender; "samplerate" nunca existiu como parâmetro.
+        "mixrate": int(settings.sample_rate),
     }
 
 
@@ -59,6 +62,28 @@ def render_mixdown(context, filepath: str) -> tuple[bool, str]:
             split_channels=False,
             **kwargs,
         )
+    except TypeError as e:
+        # Parâmetro não reconhecido nesta versão do Blender (a API do
+        # bpy.ops.sound.mixdown já mudou nome de parâmetro antes --
+        # "samplerate" virou "mixrate"). Em vez de travar o mixdown
+        # inteiro por causa de 1 kwarg desatualizado, tenta de novo sem
+        # ele (usa a taxa padrão do Blender) e avisa no retorno.
+        stray_kwargs = {k: v for k, v in kwargs.items() if k in str(e)}
+        if stray_kwargs:
+            fallback_kwargs = {k: v for k, v in kwargs.items() if k not in stray_kwargs}
+            try:
+                result = bpy.ops.sound.mixdown(
+                    filepath=filepath,
+                    check_existing=False,
+                    relative_path=False,
+                    accuracy=1024,
+                    split_channels=False,
+                    **fallback_kwargs,
+                )
+            except Exception as e2:
+                return False, str(e2)
+        else:
+            return False, str(e)
     except Exception as e:
         return False, str(e)
 
