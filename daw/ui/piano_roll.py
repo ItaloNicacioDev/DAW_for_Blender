@@ -39,6 +39,7 @@ import bpy
 import gpu
 import blf
 import math
+import numpy as np
 import struct
 import tempfile
 import time
@@ -124,6 +125,44 @@ class MidiStripData(bpy.types.PropertyGroup):
     notes:      CollectionProperty(type=MidiNote)
 
 
+def _instrument_enum_items(self, context):
+    """
+    Itens do seletor de instrumento do Piano Roll: sintetizadores
+    internos (builtin:N) + todos os VST instrumentos já carregados no
+    rack (vst:<vst_id>) -- ex.: Vital, BBC Symphony, Serum.
+
+    IMPORTANTE (limite de tempo real): tocar uma nota de um VST exige
+    uma chamada IPC pro worker (ver ipc_engine.py), que é bloqueante.
+    Isso é seguro para uma audição manual pontual, mas NÃO é seguro
+    disparar durante o playback do scheduler de 5ms -- travaria a UI de
+    novo (era exatamente o bug corrigido para os sintetizadores
+    internos). Por isso o scheduler de playback (`_pr_note_timer`) pula
+    silenciosamente notas de instrumentos VST e sugere usar
+    "Renderizar Notas → Áudio" para ouvir com o VST de verdade.
+    """
+    items = [
+        ('builtin:0', 'Acoustic Piano', '(interno)'),
+        ('builtin:1', 'Electric Piano', '(interno)'),
+        ('builtin:2', 'Strings', '(interno)'),
+        ('builtin:3', 'Organ', '(interno)'),
+        ('builtin:4', 'Bass', '(interno)'),
+        ('builtin:5', 'Synth Lead', '(interno)'),
+        ('builtin:6', 'Vibraphone', '(interno)'),
+        ('builtin:7', 'Choir', '(interno)'),
+    ]
+
+    rack = getattr(context.scene, "daw_vst_instruments", None)
+    if rack is not None:
+        for item in rack.instruments:
+            if not item.vst_id:
+                continue
+            label = item.vst_name or item.vst_id
+            status = "" if item.is_loaded else " (não carregado)"
+            items.append((f"vst:{item.vst_id}", f"{label}{status}", "Instrumento VST"))
+
+    return items
+
+
 class PianoRollState(bpy.types.PropertyGroup):
     notes:         CollectionProperty(type=MidiNote)
     zoom_x:        FloatProperty(default=1.0, min=0.1, max=8.0)
@@ -144,10 +183,8 @@ class PianoRollState(bpy.types.PropertyGroup):
         default='DRAW', name="Ferramenta")
     show_velocity: BoolProperty(default=True, name="Velocity")
     instrument:    EnumProperty(
-        items=[('0','Acoustic Piano',''),('1','Electric Piano',''),
-               ('2','Strings',''),('3','Organ',''),('4','Bass',''),
-               ('5','Synth Lead',''),('6','Vibraphone',''),('7','Choir','')],
-        default='0', name="Instrumento")
+        items=_instrument_enum_items,
+        name="Instrumento")
     progression:   StringProperty(default="", name="Progressão")
 
 
@@ -223,37 +260,93 @@ def _midi_to_freq(n): return 440.0 * (2.0 ** ((n - 69) / 12.0))
 def _cents(c): return 2.0 ** (c / 1200.0)
 
 
-def _synth_note_samples(midi: int, inst_id: int, dur: float, vel: float) -> list:
-    """Sintetiza nota e retorna lista de floats em [-1, 1]."""
+def _parse_instrument_id(raw) -> tuple:
+    """
+    Interpreta o valor de `state.instrument` (ex.: "builtin:2", "vst:my_synth").
+
+    Retorna ("builtin", int_id) ou ("vst", vst_id_str).
+    Aceita também o formato antigo (só um número como string, ex. "0"),
+    por compatibilidade com arquivos .blend salvos antes desta mudança.
+    """
+    raw = str(raw)
+    if raw.startswith("vst:"):
+        return ("vst", raw[len("vst:"):])
+    if raw.startswith("builtin:"):
+        try:
+            return ("builtin", int(raw[len("builtin:"):]))
+        except ValueError:
+            return ("builtin", 0)
+    try:
+        return ("builtin", int(raw))
+    except ValueError:
+        return ("builtin", 0)
+
+
+def _synth_note_samples(midi: int, inst_id: int, dur: float, vel: float) -> "np.ndarray":
+    """
+    Sintetiza nota e retorna array numpy de floats em [-1, 1].
+
+    Vetorizado com numpy (era um loop Python puro amostra-a-amostra com
+    math.sin() por harmônico -- ~22 mil iterações Python + várias
+    chamadas trigonométricas cada, para uma nota de 0.5s a 44100Hz.
+    Isso rodava DENTRO do timer de 5ms na thread principal do Blender
+    toda vez que uma nota nova (fora do cache) precisava tocar, travando
+    a UI por dezenas/centenas de ms -- essa era a causa real do "trava
+    quando toca as notas do piano roll" / "player geral trava".
+    A versão vetorizada faz a mesma matemática em arrays numpy inteiros
+    de uma vez (sem loop Python por amostra), ordens de magnitude mais
+    rápido -- na prática imperceptível mesmo pra notas fora do cache.
+    """
     inst = _INSTRUMENTS.get(inst_id, _INSTRUMENTS[0])
     freq = _midi_to_freq(midi)
-    n    = int(SAMPLE_RATE * dur)
-    vol  = (vel / 127.0) ** 0.8
+    n = int(SAMPLE_RATE * dur)
+    if n <= 0:
+        return np.zeros(0, dtype=np.float64)
+    vol = (vel / 127.0) ** 0.8
 
-    a_s = int(inst["attack"]  * n)
-    d_s = int(inst["decay"]   * n)
+    a_s = int(inst["attack"] * n)
+    d_s = int(inst["decay"] * n)
     r_s = int(inst["release"] * n)
     sus = inst["sustain"]
     s_s = max(0, n - a_s - d_s - r_s)
 
-    out = []
-    for i in range(n):
-        t = i / SAMPLE_RATE
-        if i < a_s:            env = i / max(a_s, 1)
-        elif i < a_s+d_s:      env = 1.0 - (i-a_s)/max(d_s,1)*(1-sus)
-        elif i < a_s+d_s+s_s:  env = sus
-        else:                  env = sus*(1-(i-a_s-d_s-s_s)/max(r_s,1))
+    t = np.arange(n, dtype=np.float64) / SAMPLE_RATE
 
-        sample = sum(amp * math.sin(2*math.pi*freq*h*_cents(det)*t)
-                     for h,amp,det in inst["harmonics"])
-        out.append(sample / len(inst["harmonics"]) * env * vol * 0.7)
+    # Envelope ADSR vetorizado (mesmos limiares/fórmulas do original,
+    # só calculados em bloco em vez de amostra por amostra).
+    idx = np.arange(n)
+    env = np.empty(n, dtype=np.float64)
+
+    attack_mask = idx < a_s
+    decay_mask = (idx >= a_s) & (idx < a_s + d_s)
+    sustain_mask = (idx >= a_s + d_s) & (idx < a_s + d_s + s_s)
+    release_mask = idx >= a_s + d_s + s_s
+
+    if a_s > 0:
+        env[attack_mask] = idx[attack_mask] / max(a_s, 1)
+    if d_s > 0:
+        env[decay_mask] = 1.0 - (idx[decay_mask] - a_s) / max(d_s, 1) * (1 - sus)
+    env[sustain_mask] = sus
+    if r_s > 0:
+        env[release_mask] = sus * (1 - (idx[release_mask] - a_s - d_s - s_s) / max(r_s, 1))
+    else:
+        env[release_mask] = sus
+
+    # Soma dos harmônicos, vetorizada (era um sum() com math.sin() por
+    # amostra dentro do loop -- aqui vira soma de arrays numpy).
+    out = np.zeros(n, dtype=np.float64)
+    for h, amp, det in inst["harmonics"]:
+        out += amp * np.sin(2 * np.pi * freq * h * _cents(det) * t)
+    out /= len(inst["harmonics"])
+    out *= env * vol * 0.7
+
     return out
 
 
 def _synth_note_pcm(midi, inst_id, dur, vel):
     floats = _synth_note_samples(midi, inst_id, dur, vel)
-    return struct.pack(f"<{len(floats)}h",
-                       *[max(-32767, min(32767, int(s*32767))) for s in floats])
+    pcm = np.clip(floats * 32767.0, -32767, 32767).astype(np.int16)
+    return pcm.tobytes()
 
 
 def _get_aud_device():
@@ -267,7 +360,92 @@ def _get_aud_device():
     return _aud_device
 
 
-def _play_note_sound(midi: int, inst_id: int, dur: float = 0.6, vel: int = 100):
+_vst_preview_cache: dict = {}  # (vst_id, midi, dur_arredondado, vel) -> audio numpy (channels, samples)
+
+
+def _play_rendered_audio(audio):
+    """
+    Toca um buffer já renderizado (numpy, shape (channels, n_samples) ou
+    (n_samples,), float32 em [-1,1]) através do `aud` do Blender.
+    Usado tanto pra preview de nota via VST quanto, futuramente, por
+    qualquer outra fonte de áudio já pronta.
+    """
+    try:
+        import aud
+        dev = _get_aud_device()
+        if not dev:
+            return
+        mono = audio[0] if getattr(audio, "ndim", 1) == 2 else audio
+        pcm = np.clip(np.asarray(mono, dtype=np.float64) * 32767.0, -32767, 32767).astype(np.int16)
+        try:
+            snd = aud.Sound.data(pcm.tobytes(), SAMPLE_RATE, 1, aud.FORMAT_S16)
+        except AttributeError:
+            snd = aud.Sound.buffer(pcm.tobytes(), SAMPLE_RATE, 1, aud.FORMAT_S16)
+        handle = dev.play(snd)
+        _active_handles.append(handle)
+        if len(_active_handles) > 64:
+            del _active_handles[:len(_active_handles) - 64]
+    except Exception as e:
+        print(f"[Piano] _play_rendered_audio: {e}")
+
+
+def _play_vst_note_preview(vst_id: str, midi: int, dur: float, vel: int):
+    """
+    Audição pontual de uma nota através de um VST de verdade (via worker
+    IPC). BLOQUEANTE -- só deve ser chamada a partir de um clique manual
+    do usuário (ver `from_scheduler` em `_play_note_sound`), nunca do
+    scheduler de playback de 5ms, senão trava a UI de novo.
+    """
+    try:
+        from ..modules.vst.utils import get_live_vst
+    except ImportError:
+        return
+
+    vst = get_live_vst(vst_id)
+    if vst is None or not vst.loaded:
+        print(f"[Piano] VST '{vst_id}' não está carregado -- carregue-o no rack de instrumentos primeiro")
+        return
+
+    key = (vst_id, midi, round(dur, 2), vel)
+    cached = _vst_preview_cache.get(key)
+    if cached is None:
+        try:
+            cached = vst.render_instrument([(midi, 0.0, dur, vel)], dur + 0.3)
+        except Exception as e:
+            print(f"[Piano] preview VST '{vst_id}': {e}")
+            return
+        _vst_preview_cache[key] = cached
+        if len(_vst_preview_cache) > 128:
+            _vst_preview_cache.pop(next(iter(_vst_preview_cache)))
+
+    _play_rendered_audio(cached)
+
+
+def _play_note_sound(midi: int, raw_instrument_id, dur: float = 0.6, vel: int = 100, from_scheduler: bool = False):
+    """
+    Toca uma nota com o instrumento selecionado no Piano Roll -- pode ser
+    um sintetizador interno (`builtin:N`) ou um VST carregado (`vst:id`).
+
+    `from_scheduler=True` é usado pelo timer de playback de 5ms
+    (`_pr_note_timer`): notas de VST são IGNORADAS nesse caso (silenciosas),
+    porque tocar via VST exige uma chamada IPC bloqueante pro worker --
+    fazer isso a cada nota durante o playback travaria a UI de novo (era
+    exatamente o bug já corrigido pros sintetizadores internos). Pra
+    ouvir notas com o VST de verdade durante a reprodução, use
+    "Renderizar Notas → Áudio" (bounce offline, depois toca como áudio
+    normal do Sequencer). Cliques manuais de audição (não vindos do
+    scheduler) continuam tocando o VST normalmente, já que são ações
+    pontuais do usuário, não um loop de tempo real.
+    """
+    kind, inst_ref = _parse_instrument_id(raw_instrument_id)
+
+    if kind == "vst":
+        if from_scheduler:
+            return
+        _play_vst_note_preview(inst_ref, midi, dur, vel)
+        return
+
+    inst_id = inst_ref
     try:
         import aud
         dev = _get_aud_device()
@@ -412,7 +590,7 @@ def _pr_note_timer():
         lookahead_beats = (0.015) * (bpm / 60.0)
 
         state    = ctx.scene.piano_roll
-        inst_id  = int(state.instrument)
+        raw_inst = state.instrument
 
         # Itera todos os strips MIDI
         for ms in state.midi_strips:
@@ -423,7 +601,7 @@ def _pr_note_timer():
                 if note.start <= current_beat + lookahead_beats:
                     if note.start >= current_beat - 0.02:  # não retoca nota já passada há mais de 20ms
                         dur_sec = max(note.length * (60.0 / bpm), 0.05)
-                        _play_note_sound(note.pitch, inst_id, dur_sec, note.velocity)
+                        _play_note_sound(note.pitch, raw_inst, dur_sec, note.velocity, from_scheduler=True)
                     _sched_triggered.add(key)
 
         # Notas soltas (sem strip)
@@ -434,7 +612,7 @@ def _pr_note_timer():
             if note.start <= current_beat + lookahead_beats:
                 if note.start >= current_beat - 0.02:
                     dur_sec = max(note.length * (60.0 / bpm), 0.05)
-                    _play_note_sound(note.pitch, inst_id, dur_sec, note.velocity)
+                    _play_note_sound(note.pitch, raw_inst, dur_sec, note.velocity, from_scheduler=True)
                 _sched_triggered.add(key)
 
     except Exception as e:
@@ -508,7 +686,7 @@ class DAW_OT_RenderNotesToStrip(bpy.types.Operator):
             return {'CANCELLED'}
 
         bpm     = _get_bpm()
-        inst_id = int(state.instrument)
+        kind, inst_ref = _parse_instrument_id(state.instrument)
         fps     = scene.render.fps
 
         # ── Calcula duração total necessária ──────────────────
@@ -516,34 +694,65 @@ class DAW_OT_RenderNotesToStrip(bpy.types.Operator):
         total_sec    = max_end_beat * (60.0 / bpm) + 1.0  # +1s de cauda
         total_samples = int(total_sec * SAMPLE_RATE)
 
-        # ── Mixdown offline: soma todas as notas num buffer float ──
         self.report({'INFO'}, f"Sintetizando {len(notes)} notas…")
-        buffer = [0.0] * total_samples
 
-        for note in notes:
-            start_sec    = note.start * (60.0 / bpm)
-            dur_sec      = max(note.length * (60.0 / bpm), 0.03)
-            start_sample = int(start_sec * SAMPLE_RATE)
+        if kind == "vst":
+            # ── Caminho VST: manda todas as notas de uma vez pro worker,
+            # que já cuida de polifonia/sobreposição de verdade através
+            # do próprio plugin -- não precisa somar buffer manualmente
+            # nota a nota como no caminho dos sintetizadores internos. ──
+            from ..modules.vst.utils import get_live_vst
 
-            # Tenta usar sample real primeiro
-            note_floats = None
-            sample = _load_instrument_sample(inst_id)
-            if sample is None:
-                note_floats = _synth_note_samples(note.pitch, inst_id, dur_sec, note.velocity)
+            vst = get_live_vst(inst_ref)
+            if vst is None or not vst.loaded:
+                self.report({'ERROR'}, f"VST '{inst_ref}' não está carregado")
+                return {'CANCELLED'}
 
-            if note_floats is not None:
-                for i, v in enumerate(note_floats):
-                    idx = start_sample + i
-                    if idx < total_samples:
-                        buffer[idx] += v
-            # Se sample real foi carregado via aud, não conseguimos os floats
-            # diretamente — recaímos na síntese como fallback seguro
-            if sample is not None and note_floats is None:
-                note_floats = _synth_note_samples(note.pitch, inst_id, dur_sec, note.velocity)
-                for i, v in enumerate(note_floats):
-                    idx = start_sample + i
-                    if idx < total_samples:
-                        buffer[idx] += v
+            midi_notes = [
+                (n.pitch, n.start * (60.0 / bpm), max(n.length * (60.0 / bpm), 0.03), n.velocity)
+                for n in notes
+            ]
+            try:
+                audio = vst.render_instrument(midi_notes, total_sec)
+            except Exception as e:
+                self.report({'ERROR'}, f"Falha ao renderizar via VST: {e}")
+                return {'CANCELLED'}
+
+            # audio: numpy (channels, n_samples) -- usa canal 0 (mono) pro
+            # pipeline de escrita de WAV existente, que espera uma lista
+            # de floats em [-1, 1].
+            mono = audio[0] if getattr(audio, "ndim", 1) == 2 else audio
+            buffer = mono.tolist()
+        else:
+            inst_id = inst_ref
+
+            # ── Mixdown offline: soma todas as notas num buffer float ──
+            buffer = [0.0] * total_samples
+
+            for note in notes:
+                start_sec    = note.start * (60.0 / bpm)
+                dur_sec      = max(note.length * (60.0 / bpm), 0.03)
+                start_sample = int(start_sec * SAMPLE_RATE)
+
+                # Tenta usar sample real primeiro
+                note_floats = None
+                sample = _load_instrument_sample(inst_id)
+                if sample is None:
+                    note_floats = _synth_note_samples(note.pitch, inst_id, dur_sec, note.velocity)
+
+                if note_floats is not None:
+                    for i, v in enumerate(note_floats):
+                        idx = start_sample + i
+                        if idx < total_samples:
+                            buffer[idx] += v
+                # Se sample real foi carregado via aud, não conseguimos os floats
+                # diretamente — recaímos na síntese como fallback seguro
+                if sample is not None and note_floats is None:
+                    note_floats = _synth_note_samples(note.pitch, inst_id, dur_sec, note.velocity)
+                    for i, v in enumerate(note_floats):
+                        idx = start_sample + i
+                        if idx < total_samples:
+                            buffer[idx] += v
 
         # ── Normaliza pico para -3dB ──────────────────────────
         peak = max(abs(v) for v in buffer) if buffer else 0.0
@@ -598,12 +807,15 @@ class DAW_OT_RenderNotesToStrip(bpy.types.Operator):
             pass
 
         # Cria o SOUND strip
+        # (frame_start pode vir como float de s.frame_start dependendo da
+        # versão do Blender/VSE -- new_sound() exige int estritamente)
+        frame_start_int = int(round(frame_start))
         try:
             sound_strip = seq.strips.new_sound(
                 name=audio_name,
                 filepath=wav_path,
                 channel=ch,
-                frame_start=frame_start,
+                frame_start=frame_start_int,
             )
         except AttributeError:
             try:
@@ -611,7 +823,7 @@ class DAW_OT_RenderNotesToStrip(bpy.types.Operator):
                     name=audio_name,
                     filepath=wav_path,
                     channel=ch,
-                    frame_start=frame_start,
+                    frame_start=frame_start_int,
                 )
             except Exception as e:
                 self.report({'ERROR'}, f"Falha ao criar strip de áudio: {e}")
@@ -903,7 +1115,7 @@ class DAW_OT_PianoRollModal(bpy.types.Operator):
         notes=_get_active_notes(state); n=notes.add()
         n.pitch=max(0,min(127,pitch)); n.start=max(0,sn)
         n.length=float(state.snap_mode); n.velocity=100
-        _play_note_sound(n.pitch, int(state.instrument), n.length*0.5+0.1, n.velocity)
+        _play_note_sound(n.pitch, state.instrument, n.length*0.5+0.1, n.velocity)
         if state.active_strip:
             _upsert_midi_strip(context, state.active_strip, len(notes))
         return len(notes)-1
@@ -987,7 +1199,7 @@ class DAW_OT_PianoRollModal(bpy.types.Operator):
                 if mx < PIANO_W:
                     p=self._pitch(my,state,region)
                     if 0<=p<=127:
-                        _play_note_sound(p, int(state.instrument), 0.5, 90)
+                        _play_note_sound(p, state.instrument, 0.5, 90)
                     return {'RUNNING_MODAL'}
 
                 beat=self._beat(mx,state,region); pitch=self._pitch(my,state,region)
@@ -1043,7 +1255,7 @@ class DAW_OT_PianoRollModal(bpy.types.Operator):
                 self._remove(self._beat(mx,state,region),self._pitch(my,state,region),state)
             elif mx < PIANO_W:
                 p=self._pitch(my,state,region)
-                if 0<=p<=127: _play_note_sound(p, int(state.instrument), 0.5, 90)
+                if 0<=p<=127: _play_note_sound(p, state.instrument, 0.5, 90)
             return {'RUNNING_MODAL'}
 
         return {'PASS_THROUGH'}
