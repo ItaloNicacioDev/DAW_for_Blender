@@ -395,6 +395,45 @@ class DAW_OT_ReloadVst(Operator):
         return {'FINISHED'} if ok else {'CANCELLED'}
 
 
+class DAW_OT_OpenVstEditor(Operator):
+    bl_idname = "daw.open_vst_editor"
+    bl_label = "Abrir Interface do Plugin"
+    bl_description = (
+        "Abre a janela nativa (GUI) do plugin, com os controles visuais "
+        "de verdade dele -- não bloqueia o Blender"
+    )
+    bl_options = {'REGISTER'}
+
+    channel_index: IntProperty(default=-1)
+    vst_index: IntProperty(default=-1)
+    is_instrument: BoolProperty(default=False)
+
+    def execute(self, context):
+        if self.is_instrument:
+            rack = context.scene.daw_vst_instruments
+            if not (0 <= self.vst_index < len(rack.instruments)):
+                return {'CANCELLED'}
+            item = rack.instruments[self.vst_index]
+        else:
+            channel_index = self.channel_index if self.channel_index >= 0 else _active_channel_index(context)
+            chain = get_or_create_chain(context.scene, channel_index)
+            if not (0 <= self.vst_index < len(chain.vsts)):
+                return {'CANCELLED'}
+            item = chain.vsts[self.vst_index]
+
+        vst = get_live_vst(item.vst_id)
+        if vst is None or not vst.loaded:
+            self.report({'WARNING'}, "Carregue o VST antes de abrir a interface")
+            return {'CANCELLED'}
+
+        ok = vst.open_editor()
+        if ok:
+            self.report({'INFO'}, f"Abrindo interface de '{item.vst_name}'...")
+        else:
+            self.report({'WARNING'}, "Este plugin não tem interface nativa suportada")
+        return {'FINISHED'} if ok else {'CANCELLED'}
+
+
 class DAW_OT_SetVstParameter(Operator):
     bl_idname = "daw.set_vst_parameter"
     bl_label = "Definir Parâmetro do VST"
@@ -887,6 +926,7 @@ classes = [
     DAW_OT_RemoveVstInstrument,
     DAW_OT_ToggleVstBypass,
     DAW_OT_ReloadVst,
+    DAW_OT_OpenVstEditor,
     DAW_OT_SetVstParameter,
     DAW_OT_AutoBounceVstInstrument,
     DAW_OT_ToggleVstLiveMonitoring,
