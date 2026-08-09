@@ -211,6 +211,12 @@ def _draw_vst_item(layout, item, is_instrument: bool, channel_index: int, index:
     op_reload.vst_index = index
     op_reload.is_instrument = is_instrument
 
+    if item.is_loaded:
+        op_editor = row.operator("daw.open_vst_editor", text="Abrir Interface", icon='WINDOW')
+        op_editor.channel_index = channel_index
+        op_editor.vst_index = index
+        op_editor.is_instrument = is_instrument
+
     # Parâmetros com scroll e busca
     _draw_params_with_scroll(box, item, is_instrument)
 
