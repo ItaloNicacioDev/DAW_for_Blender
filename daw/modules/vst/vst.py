@@ -193,6 +193,21 @@ class VST:
             except Exception:
                 pass
 
+    def open_editor(self) -> bool:
+        """
+        Abre a janela nativa (GUI) do plugin, se ele suportar. Não
+        bloqueia o Blender -- o worker roda isso numa thread separada
+        e responde na hora.
+        """
+        if self.bridge is None or not self.loaded:
+            return False
+        return self.bridge.open_editor()
+
+    def is_editor_open(self) -> bool:
+        if self.bridge is None or not self.loaded:
+            return False
+        return self.bridge.is_editor_open()
+
     def is_instrument(self) -> bool:
         """Retorna True se é um instrumento, False se é efeito"""
         return self.vst_type == VSTProgramType.INSTRUMENT
