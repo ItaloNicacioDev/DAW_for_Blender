@@ -38,23 +38,40 @@ import bpy
 # ═══════════════════════════════════════════════════════════════
 
 def get_bpm(scene) -> float:
+    """
+    BPM efetivo da timeline.
+
+    Usa a MESMA fonte que o Piano Roll de verdade do addon usa
+    (`scene.beat_grid.bpm`) -- é o valor que o usuário vê e edita na
+    tela. `scene.daw` nunca teve uma propriedade `bpm` própria (apesar
+    do que um comentário antigo deste arquivo sugeria) -- ler
+    `scene.daw.bpm` direto sempre ia estourar AttributeError.
+    """
+    try:
+        return float(scene.beat_grid.bpm)
+    except (AttributeError, TypeError):
+        pass
+
+    # Fallback: se algum dia `scene.daw.bpm` passar a existir de verdade,
+    # usa. Hoje isso normalmente não acontece e cai no default abaixo.
     daw_props = getattr(scene, "daw", None)
-    return float(daw_props.bpm) if daw_props else 120.0
+    bpm = getattr(daw_props, "bpm", None) if daw_props is not None else None
+    if bpm is not None:
+        try:
+            return float(bpm)
+        except (TypeError, ValueError):
+            pass
+
+    return 120.0
 
 
 def get_bpm_legacy_piano_roll(scene) -> float:
     """
-    BPM conforme o Piano Roll "de verdade" do projeto (`ui/piano_roll.py`)
-    o lê: `scene.beat_grid.bpm`. Essa propriedade NÃO é sincronizada com
-    `scene.daw.bpm` em lugar nenhum do addon original — são duas fontes de
-    BPM independentes. Para o bounce de instrumento VST bater com a
-    posição/tempo que o usuário vê desenhado no Piano Roll, é esta função
-    (e não `get_bpm`) que deve ser usada.
+    Alias de `get_bpm()` -- mantido por compatibilidade com quem já
+    chamava esta função esperando o BPM do Piano Roll especificamente.
+    Hoje `get_bpm()` já faz exatamente isso.
     """
-    try:
-        return float(scene.beat_grid.bpm)
-    except Exception:
-        return 120.0
+    return get_bpm(scene)
 
 
 def beat_to_frame(scene, beat: float) -> int:
