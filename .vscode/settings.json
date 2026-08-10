@@ -1,0 +1,5 @@
+{
+    "python.analysis.extraPaths": [
+        "./daw/vendor/py312_embed_win_amd64/Lib/site-packages"
+    ]
+}
