@@ -55,6 +55,18 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+# Força o stdout/stderr a UTF-8, independente da codepage do console do
+# Windows (que costuma ser cp1252 em sistemas PT-BR). Sem isso, print()
+# de texto com acento (ex.: "não", "codificação") pode sair em bytes
+# cp1252, enquanto o lado do Blender (ipc_engine.py) lê esse stdout
+# assumindo UTF-8 -- causa exatamente um
+# "'utf-8' codec can't decode byte 0xe7 ... invalid continuation byte"
+# (0xe7 é 'ç' em cp1252) na hora do handshake de porta.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from protocol import (  # noqa: E402
     ConnectionClosed,
