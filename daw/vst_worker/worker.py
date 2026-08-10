@@ -15,6 +15,30 @@ e entao aceita UMA conexao do addon (o cliente em `ipc_engine.py`).
 Fica vivo ate receber o comando "shutdown" ou a conexao cair -- nesse
 caso encerra sozinho (nao fica orfao caso o Blender feche/crashe).
 
+═══════════════════════════════════════════════════════════════════
+THREAD ÚNICA PARA TUDO QUE TOCA EM dawdreamer/JUCE
+═══════════════════════════════════════════════════════════════════
+JUCE exige que toda a interação com o sistema de janelas nativo (GUI de
+plugin, via `plugin.open_editor()`) aconteça na MESMA thread que
+inicializou esse sistema. Rodar open_editor() numa thread diferente da
+que criou o RenderEngine/plugin faz a chamada "funcionar" sem erro, só
+que a janela nunca aparece/desenha de verdade -- exatamente o sintoma
+relatado quando isso rodava numa thread solta por comando.
+
+Por isso: existe UMA thread dedicada (`_juce_thread_main`) que processa
+TODOS os comandos que tocam em dawdreamer -- load, parâmetros, render,
+E open_editor -- sempre na mesma thread, do início ao fim do processo.
+A thread de rede (`_serve`) só enfileira pedidos e espera a resposta;
+não chama dawdreamer diretamente nunca.
+
+open_editor() é bloqueante (só retorna quando a janela é fechada pelo
+usuário). Pra não travar o Blender enquanto a janela está aberta, esse
+comando específico é "fire-and-forget": a thread de rede responde OK
+assim que enfileira o pedido, sem esperar a janela fechar. A thread
+JUCE fica ocupada com aquele plugin até a janela fechar -- outros
+comandos ficam na fila esperando a vez (mesmo limite que a maioria dos
+hosts de plugin tem: uma GUI de plugin aberta por vez por thread).
+
 SEM dependencia de `bpy`. A UNICA dependencia externa e o `dawdreamer`
 de verdade, que deve estar instalado no Python que roda este script
 (nao no Python do Blender).
@@ -23,12 +47,13 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import queue
 import socket
 import sys
 import threading
 import traceback
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from protocol import (  # noqa: E402
@@ -81,6 +106,7 @@ except ImportError as e:
 
 # ═══════════════════════════════════════════════════════════════
 #  ESTADO: um RenderEngine + plugin processor por vst_id
+#  (só é tocado pela thread JUCE dedicada, nunca pela thread de rede)
 # ═══════════════════════════════════════════════════════════════
 
 class LoadedPlugin:
@@ -96,10 +122,11 @@ class LoadedPlugin:
 
 _LOADED: Dict[str, LoadedPlugin] = {}
 
-# Threads que estao rodando plugin.open_editor() (bloqueante ate a
-# janela ser fechada pelo usuario). Uma por vst_id, pra nao abrir a
-# mesma janela duas vezes nem travar o loop principal do worker.
-_EDITOR_THREADS: Dict[str, threading.Thread] = {}
+# vst_id -> True enquanto a janela do editor daquele plugin está aberta.
+# Lido pela thread de rede (is_editor_open), escrito pela thread JUCE.
+# Dict simples de bool é seguro o suficiente entre as duas threads aqui
+# (GIL cobre get/set atômico de um valor só; não precisa de lock extra).
+_EDITOR_OPEN: Dict[str, bool] = {}
 
 
 def _cmd_ping(header: dict, payload: bytes):
@@ -123,6 +150,7 @@ def _cmd_load(header: dict, payload: bytes):
 def _cmd_unload(header: dict, payload: bytes):
     vst_id = header["vst_id"]
     _LOADED.pop(vst_id, None)
+    _EDITOR_OPEN.pop(vst_id, None)
     return {"ok": True}, b""
 
 
@@ -233,16 +261,12 @@ def _cmd_render_instrument(header: dict, payload: bytes):
     return resp, out.tobytes()
 
 
-def _cmd_open_editor(header: dict, payload: bytes):
+def _cmd_open_editor_blocking(header: dict, payload: bytes):
     """
-    Abre a janela nativa (GUI) do plugin numa thread separada.
-
-    plugin.open_editor() do dawdreamer é BLOQUEANTE -- só retorna quando
-    o usuário fecha a janela. Se chamássemos direto aqui, travaríamos o
-    loop principal do worker (nenhum outro comando, nem process_effect
-    de outro VST, seria atendido até a janela fechar). Por isso roda
-    numa thread daemon à parte; o comando em si responde OK assim que a
-    thread é disparada, sem esperar a janela fechar.
+    Executa de verdade a abertura da GUI -- SEMPRE na thread JUCE
+    dedicada (nunca na thread de rede). Bloqueia até o usuário fechar a
+    janela. Quem chama isso (`_juce_thread_main`) já sabe que essa
+    chamada é bloqueante e não espera resposta imediata pra rede.
     """
     vst_id = header["vst_id"]
     loaded = _LOADED.get(vst_id)
@@ -251,33 +275,24 @@ def _cmd_open_editor(header: dict, payload: bytes):
 
     open_editor_fn = getattr(loaded.plugin, "open_editor", None)
     if not callable(open_editor_fn):
+        _EDITOR_OPEN[vst_id] = False
         return {"ok": False, "error": "Este plugin nao expoe open_editor() (dawdreamer)"}, b""
 
-    existing = _EDITOR_THREADS.get(vst_id)
-    if existing is not None and existing.is_alive():
-        return {"ok": True, "already_open": True}, b""
+    _log(f"[thread JUCE] abrindo editor de '{vst_id}' (janela nativa do plugin)...")
+    try:
+        open_editor_fn()
+        _log(f"[thread JUCE] editor de '{vst_id}' fechado pelo usuário")
+    except Exception as e:
+        _log(f"[thread JUCE] ERRO no editor de '{vst_id}': {e}\n{traceback.format_exc()}")
+    finally:
+        _EDITOR_OPEN[vst_id] = False
 
-    def _run_editor():
-        _log(f"abrindo editor de '{vst_id}' (janela nativa do plugin)...")
-        try:
-            open_editor_fn()
-        except Exception as e:
-            _log(f"ERRO no editor de '{vst_id}': {e}\n{traceback.format_exc()}")
-        finally:
-            _log(f"editor de '{vst_id}' fechado")
-
-    thread = threading.Thread(target=_run_editor, name=f"vst-editor-{vst_id}", daemon=True)
-    _EDITOR_THREADS[vst_id] = thread
-    thread.start()
-
-    return {"ok": True, "already_open": False}, b""
+    return {"ok": True}, b""
 
 
 def _cmd_is_editor_open(header: dict, payload: bytes):
     vst_id = header["vst_id"]
-    thread = _EDITOR_THREADS.get(vst_id)
-    is_open = thread is not None and thread.is_alive()
-    return {"ok": True, "is_open": is_open}, b""
+    return {"ok": True, "is_open": bool(_EDITOR_OPEN.get(vst_id, False))}, b""
 
 
 _HANDLERS = {
@@ -289,9 +304,64 @@ _HANDLERS = {
     "get_parameter": _cmd_get_parameter,
     "process_effect": _cmd_process_effect,
     "render_instrument": _cmd_render_instrument,
-    "open_editor": _cmd_open_editor,
+    "_open_editor_blocking": _cmd_open_editor_blocking,  # só chamado internamente pela thread JUCE
     "is_editor_open": _cmd_is_editor_open,
 }
+
+
+# ═══════════════════════════════════════════════════════════════
+#  THREAD JUCE DEDICADA -- única thread que toca em dawdreamer
+# ═══════════════════════════════════════════════════════════════
+
+class _Job:
+    __slots__ = ("header", "payload", "event", "result")
+
+    def __init__(self, header: dict, payload: bytes):
+        self.header = header
+        self.payload = payload
+        self.event = threading.Event()
+        self.result: Optional[Tuple[dict, bytes]] = None
+
+
+_juce_queue: "queue.Queue[_Job]" = queue.Queue()
+
+
+def _run_job(job: _Job) -> None:
+    cmd = job.header.get("cmd")
+    handler = _HANDLERS.get(cmd)
+    if handler is None:
+        job.result = ({"ok": False, "error": f"comando desconhecido: {cmd}"}, b"")
+    else:
+        try:
+            job.result = handler(job.header, job.payload)
+        except Exception as e:
+            job.result = (
+                {"ok": False, "error": f"{type(e).__name__}: {e}", "traceback": traceback.format_exc()},
+                b"",
+            )
+
+
+def _juce_thread_main() -> None:
+    _log("thread JUCE dedicada iniciada -- toda interação com dawdreamer passa por aqui")
+    while True:
+        job = _juce_queue.get()
+        if job is None:  # sentinela de shutdown
+            break
+        _run_job(job)
+        job.event.set()
+    _log("thread JUCE dedicada encerrada")
+
+
+_juce_thread = threading.Thread(target=_juce_thread_main, name="juce-thread", daemon=True)
+
+
+def _dispatch_sync(header: dict, payload: bytes) -> Tuple[dict, bytes]:
+    """Enfileira um job pra thread JUCE e ESPERA a resposta (usado por
+    todo comando exceto open_editor, que é fire-and-forget)."""
+    job = _Job(header, payload)
+    _juce_queue.put(job)
+    job.event.wait()
+    return job.result
 
 
 def _serve(conn: socket.socket) -> None:
@@ -308,17 +378,31 @@ def _serve(conn: socket.socket) -> None:
             send_frame(conn, {"id": req_id, "ok": True})
             break
 
-        handler = _HANDLERS.get(cmd)
-        if handler is None:
-            send_frame(conn, {"id": req_id, "ok": False, "error": f"comando desconhecido: {cmd}"})
+        if cmd == "open_editor":
+            # Fire-and-forget: enfileira a abertura de verdade na thread
+            # JUCE (que É bloqueante, só retorna quando a janela fecha)
+            # mas responde pro Blender IMEDIATAMENTE, sem esperar isso
+            # acontecer -- senão o Blender ficaria travado até o
+            # usuário fechar a janela do plugin.
+            vst_id = header.get("vst_id")
+            loaded = _LOADED.get(vst_id)
+            if loaded is None:
+                send_frame(conn, {"id": req_id, "ok": False, "error": f"VST '{vst_id}' nao carregado"})
+                continue
+            if not hasattr(loaded.plugin, "open_editor"):
+                send_frame(conn, {"id": req_id, "ok": False, "error": "Este plugin nao expoe open_editor() (dawdreamer)"})
+                continue
+            if _EDITOR_OPEN.get(vst_id):
+                send_frame(conn, {"id": req_id, "ok": True, "already_open": True})
+                continue
+
+            _EDITOR_OPEN[vst_id] = True
+            fire_job = _Job({"cmd": "_open_editor_blocking", "vst_id": vst_id}, b"")
+            _juce_queue.put(fire_job)  # não espera fire_job.event -- fire-and-forget
+            send_frame(conn, {"id": req_id, "ok": True, "already_open": False})
             continue
 
-        try:
-            resp, resp_payload = handler(header, payload)
-        except Exception as e:
-            resp = {"ok": False, "error": f"{type(e).__name__}: {e}", "traceback": traceback.format_exc()}
-            resp_payload = b""
-
+        resp, resp_payload = _dispatch_sync({**header, "cmd": cmd}, payload)
         resp["id"] = req_id
         try:
             send_frame(conn, resp, resp_payload)
@@ -333,6 +417,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args()
     _log(f"args parseados: host={args.host} port={args.port}")
+
+    _juce_thread.start()
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -361,6 +447,7 @@ def main() -> None:
     finally:
         conn.close()
         listener.close()
+        _juce_queue.put(None)  # sentinela pra thread JUCE encerrar
         for loaded in _LOADED.values():
             try:
                 loaded.engine = None
