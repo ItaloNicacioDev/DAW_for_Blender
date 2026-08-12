@@ -85,7 +85,7 @@ if (-not (Test-Path (Join-Path $TargetDir "python.exe"))) {
 
 # 5. Instala dawdreamer + numpy dentro do Python embutido ----------------
 Write-Host "[5/5] Instalando dawdreamer + numpy (isso demora um pouco, ~30-60MB)..." -ForegroundColor Yellow
-& (Join-Path $TargetDir "python.exe") -m pip install --no-warn-script-location dawdreamer numpy
+& (Join-Path $TargetDir "python.exe") -m pip install --no-warn-script-location dawdreamer numpy sounddevice
 
 Write-Host "`n=== Testando se o worker sobe corretamente ===" -ForegroundColor Cyan
 $workerScript = Join-Path $ScriptDir "worker.py"
