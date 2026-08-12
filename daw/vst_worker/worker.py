@@ -115,6 +115,100 @@ except ImportError as e:
     _log(f"ERRO: dawdreamer nao encontrado: {e}")
     raise
 
+try:
+    import sounddevice as _sd
+    _log(f"sounddevice OK, versao {_sd.__version__}")
+except ImportError as e:
+    _sd = None
+    _log(f"AVISO: sounddevice nao encontrado ({e}) -- motor de audio ao vivo (GUI de plugin) ficara desabilitado")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  MOTOR DE ÁUDIO AO VIVO -- roda enquanto a interface do plugin
+#  está aberta. Fica chamando engine.render() em loop contínuo e
+#  manda o resultado pra saída de áudio real (via sounddevice, direto
+#  do worker -- NÃO passa pelo Blender/aud). Isso é o que faz o
+#  teclado embutido de plugins como Vital ou BBC Symphony tocar som
+#  quando você clica nele: continuamos processando o plugin adiante
+#  no tempo o tempo todo, então qualquer coisa que ele gerar
+#  internamente (inclusive por causa da própria UI dele) aparece no
+#  áudio de saída de cada bloco, exatamente como aconteceria com
+#  qualquer host de VST de verdade.
+#
+#  RISCO CONHECIDO E ACEITO: esse relógio de áudio é independente do
+#  relógio do Blender/Sequencer -- não está sincronizado sample-a-
+#  -sample com o resto da mixagem. Serve pra "esse som combina com o
+#  resto?" mas não é confiável pra gravar direto assim.
+# ═══════════════════════════════════════════════════════════════
+
+class LiveSession:
+    def __init__(self, vst_id: str, loaded: "LoadedPlugin"):
+        self.vst_id = vst_id
+        self.loaded = loaded
+        self.stop_event = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+        self.stream = None
+        self._elapsed = 0.0
+
+    def start(self) -> None:
+        if _sd is None:
+            _log(f"[live:{self.vst_id}] sounddevice indisponível, motor ao vivo não iniciado")
+            return
+
+        block_samples = max(64, self.loaded.block_size)
+        block_dur = block_samples / float(self.loaded.sample_rate)
+
+        self.loaded.engine.load_graph([(self.loaded.plugin, [])])
+
+        def _callback(outdata, frames, time_info, status):
+            if status:
+                _log(f"[live:{self.vst_id}] status do stream: {status}")
+            try:
+                self.loaded.engine.render(block_dur)
+                self._elapsed += block_dur
+                block = np.asarray(self.loaded.plugin.get_audio(), dtype=np.float32)
+                # block: (channels, n_samples) -- adapta pro formato (frames, channels)
+                # que sounddevice espera em outdata.
+                n = min(frames, block.shape[1])
+                if block.shape[0] >= 2:
+                    outdata[:n, 0] = block[0, :n]
+                    outdata[:n, 1] = block[1, :n]
+                else:
+                    outdata[:n, 0] = block[0, :n]
+                    outdata[:n, 1] = block[0, :n]
+                if n < frames:
+                    outdata[n:, :] = 0.0
+            except Exception as e:
+                _log(f"[live:{self.vst_id}] ERRO no callback de áudio: {e}\n{traceback.format_exc()}")
+                outdata[:, :] = 0.0
+
+        try:
+            self.stream = _sd.OutputStream(
+                samplerate=self.loaded.sample_rate,
+                blocksize=block_samples,
+                channels=2,
+                dtype="float32",
+                callback=_callback,
+            )
+            self.stream.start()
+            _log(f"[live:{self.vst_id}] motor de áudio ao vivo iniciado (block={block_samples} @ {self.loaded.sample_rate}Hz)")
+        except Exception as e:
+            _log(f"[live:{self.vst_id}] ERRO ao iniciar stream de áudio: {e}\n{traceback.format_exc()}")
+            self.stream = None
+
+    def stop(self) -> None:
+        if self.stream is not None:
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception as e:
+                _log(f"[live:{self.vst_id}] ERRO ao parar stream: {e}")
+            self.stream = None
+        _log(f"[live:{self.vst_id}] motor de áudio ao vivo parado (tocou {self._elapsed:.1f}s no total)")
+
+
+_LIVE_SESSIONS: Dict[str, LiveSession] = {}
+
 
 # ═══════════════════════════════════════════════════════════════
 #  ESTADO: um RenderEngine + plugin processor por vst_id
