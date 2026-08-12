@@ -118,9 +118,15 @@ except ImportError as e:
 try:
     import sounddevice as _sd
     _log(f"sounddevice OK, versao {_sd.__version__}")
-except ImportError as e:
+except Exception as e:
+    # sounddevice pode levantar OSError (não ImportError) quando a
+    # biblioteca nativa PortAudio não é encontrada -- captura amplo de
+    # propósito, porque isso NÃO deve derrubar o worker inteiro. Sem
+    # sounddevice o resto continua funcionando normal, só o motor de
+    # áudio ao vivo (som enquanto a interface do plugin está aberta)
+    # fica desativado.
     _sd = None
-    _log(f"AVISO: sounddevice nao encontrado ({e}) -- motor de audio ao vivo (GUI de plugin) ficara desabilitado")
+    _log(f"AVISO: sounddevice indisponível ({type(e).__name__}: {e}) -- motor ao vivo desativado, resto OK")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -195,6 +201,15 @@ class LiveSession:
         except Exception as e:
             _log(f"[live:{self.vst_id}] ERRO ao iniciar stream de áudio: {e}\n{traceback.format_exc()}")
             self.stream = None
+
+    def trigger_note(self, pitch: int, velocity: int, duration: float) -> None:
+        """Injeta uma nota externa (ex.: clique no Piano Roll) enquanto o
+        motor ao vivo já está rodando -- agendada a partir do tempo
+        interno atual do engine, pra tocar no próximo bloco processado."""
+        try:
+            self.loaded.plugin.add_midi_note(int(pitch), int(velocity), self._elapsed + 0.01, float(duration))
+        except Exception as e:
+            _log(f"[live:{self.vst_id}] ERRO ao injetar nota: {e}")
 
     def stop(self) -> None:
         if self.stream is not None:
@@ -385,12 +400,19 @@ def _cmd_open_editor_blocking(header: dict, payload: bytes):
         return {"ok": False, "error": "Este plugin nao expoe open_editor() (dawdreamer)"}, b""
 
     _log(f"[thread JUCE] abrindo editor de '{vst_id}' (janela nativa do plugin)...")
+
+    live = LiveSession(vst_id, loaded)
+    live.start()
+    _LIVE_SESSIONS[vst_id] = live
+
     try:
         open_editor_fn()
         _log(f"[thread JUCE] editor de '{vst_id}' fechado pelo usuário")
     except Exception as e:
         _log(f"[thread JUCE] ERRO no editor de '{vst_id}': {e}\n{traceback.format_exc()}")
     finally:
+        live.stop()
+        _LIVE_SESSIONS.pop(vst_id, None)
         _EDITOR_OPEN[vst_id] = False
 
     return {"ok": True}, b""
@@ -412,6 +434,8 @@ _HANDLERS = {
     "render_instrument": _cmd_render_instrument,
     "_open_editor_blocking": _cmd_open_editor_blocking,  # só chamado internamente pela thread JUCE
     "is_editor_open": _cmd_is_editor_open,
+    # "trigger_live_note" NÃO está aqui de propósito -- é tratado direto
+    # em _serve(), sem passar pela fila da thread JUCE (ver comentário lá).
 }
 
 
@@ -506,6 +530,24 @@ def _serve(conn: socket.socket) -> None:
             fire_job = _Job({"cmd": "_open_editor_blocking", "vst_id": vst_id}, b"")
             _juce_queue.put(fire_job)  # não espera fire_job.event -- fire-and-forget
             send_frame(conn, {"id": req_id, "ok": True, "already_open": False})
+            continue
+
+        if cmd == "trigger_live_note":
+            # NÃO passa pela fila da thread JUCE -- ela fica inteiramente
+            # ocupada rodando open_editor_fn() (bloqueante) enquanto a
+            # janela do plugin está aberta, que é EXATAMENTE quando esse
+            # comando precisa funcionar. Chama LiveSession.trigger_note()
+            # direto daqui (thread de rede), que só faz um add_midi_note()
+            # -- seguro de chamar de uma thread diferente da que roda a
+            # GUI, do mesmo jeito que a própria callback de áudio do
+            # sounddevice (thread separada) já faz concorrentemente.
+            vst_id = header.get("vst_id")
+            live = _LIVE_SESSIONS.get(vst_id)
+            if live is None:
+                send_frame(conn, {"id": req_id, "ok": False, "error": "sem sessão ao vivo (abra a interface do plugin primeiro)"})
+                continue
+            live.trigger_note(header.get("pitch"), header.get("velocity", 100), header.get("duration", 1.0))
+            send_frame(conn, {"id": req_id, "ok": True})
             continue
 
         resp, resp_payload = _dispatch_sync({**header, "cmd": cmd}, payload)
