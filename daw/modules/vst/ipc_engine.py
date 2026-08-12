@@ -168,16 +168,56 @@ class _WorkerManager:
                 pass
             self._proc = None
 
-    def call(self, cmd: str, payload: bytes = b"", **fields) -> Tuple[Dict[str, Any], bytes]:
+    # Timeout por comando -- carregar plugin pode legitimamente demorar
+    # (bibliotecas de sample grandes tipo BBC Symphony, wavetables
+    # pesadas tipo Serum), então tem mais margem. Os demais são rápidos
+    # por natureza; se não voltarem nesse tempo, é sinal de plugin
+    # travado (ex.: checagem de licença/ativação esperando uma janela
+    # que nunca aparece) -- melhor matar e reiniciar o worker do que
+    # deixar o Blender inteiro travado esperando pra sempre.
+    _TIMEOUTS = {
+        "load": 60.0,
+        "unload": 10.0,
+        "list_parameters": 15.0,
+        "set_parameter": 5.0,
+        "get_parameter": 5.0,
+        "process_effect": 20.0,
+        "render_instrument": 60.0,
+        "open_editor": 10.0,       # fire-and-forget, deveria responder quase na hora
+        "is_editor_open": 5.0,
+        "trigger_live_note": 5.0,
+        "ping": 5.0,
+        "shutdown": 5.0,
+    }
+    _DEFAULT_TIMEOUT = 20.0
+
+    def call(self, cmd: str, payload: bytes = b"", timeout: Optional[float] = None, **fields) -> Tuple[Dict[str, Any], bytes]:
         """Envia um comando e espera a resposta. Reinicia o worker
-        automaticamente se ele tiver caido desde a ultima chamada."""
+        automaticamente se ele tiver caido desde a ultima chamada.
+
+        NUNCA bloqueia indefinidamente -- todo comando tem um timeout
+        (ver `_TIMEOUTS`). Se o worker não responder a tempo (plugin
+        travado, checagem de licença esperando input, etc.), o processo
+        é morto e reiniciado na próxima chamada, e uma exceção clara é
+        levantada aqui em vez de travar o Blender inteiro pra sempre.
+        """
         with self._lock:
             self._ensure_alive()
             req_id = next(self._id_counter)
             header = {"cmd": cmd, "id": req_id, **fields}
+            effective_timeout = timeout if timeout is not None else self._TIMEOUTS.get(cmd, self._DEFAULT_TIMEOUT)
             try:
+                self._sock.settimeout(effective_timeout)
                 send_frame(self._sock, header, payload)
                 resp_header, resp_payload = recv_frame(self._sock)
+            except socket.timeout:
+                self._kill()
+                raise WorkerProcessError(
+                    f"O worker não respondeu em {effective_timeout:.0f}s para '{cmd}' -- "
+                    f"provavelmente um plugin travado (ex.: checagem de licença/ativação "
+                    f"esperando uma janela que não aparece). Processo do worker reiniciado; "
+                    f"tente novamente ou verifique esse plugin especificamente."
+                )
             except (ConnectionClosed, OSError) as e:
                 self._kill()
                 raise WorkerProcessError(f"Conexao com o worker perdida: {e}") from e
