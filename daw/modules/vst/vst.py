@@ -208,6 +208,17 @@ class VST:
             return False
         return self.bridge.is_editor_open()
 
+    def trigger_live_note(self, pitch: int, velocity: int = 100, duration: float = 1.0) -> bool:
+        """
+        Toca uma nota em tempo real através do motor ao vivo (só ativo
+        enquanto a interface do plugin estiver aberta). Retorna False se
+        não houver sessão ao vivo -- quem chamou (piano roll) deve cair
+        de volta pro preview de um tiro só nesse caso.
+        """
+        if self.bridge is None or not self.loaded:
+            return False
+        return self.bridge.trigger_live_note(pitch, velocity, duration)
+
     def is_instrument(self) -> bool:
         """Retorna True se é um instrumento, False se é efeito"""
         return self.vst_type == VSTProgramType.INSTRUMENT
