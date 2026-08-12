@@ -51,6 +51,7 @@ import queue
 import socket
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -148,13 +149,20 @@ except Exception as e:
 # ═══════════════════════════════════════════════════════════════
 
 class LiveSession:
+    # Fila com folga (~0.5s de áudio pré-computado) pra absorver
+    # variação de tempo do processamento sem estourar o prazo real-time
+    # do callback de áudio.
+    _QUEUE_MAXSIZE = 40
+
     def __init__(self, vst_id: str, loaded: "LoadedPlugin"):
         self.vst_id = vst_id
         self.loaded = loaded
         self.stop_event = threading.Event()
-        self.thread: Optional[threading.Thread] = None
+        self.render_thread: Optional[threading.Thread] = None
         self.stream = None
         self._elapsed = 0.0
+        self._audio_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
+        self._underrun_count = 0
 
     def start(self) -> None:
         if _sd is None:
@@ -166,27 +174,59 @@ class LiveSession:
 
         self.loaded.engine.load_graph([(self.loaded.plugin, [])])
 
+        # ── Thread de RENDER: faz o trabalho pesado (chama o DSP do
+        # plugin de verdade) sem NENHUM prazo real-time -- pode demorar
+        # o quanto precisar por bloco, sem estourar callback nenhum.
+        # Plugins pesados (Serum2, wavetables com muito oversampling)
+        # continuam sendo processados normalmente aqui, só que fora do
+        # caminho crítico do driver de áudio. ─────────────────────────
+        def _render_loop():
+            while not self.stop_event.is_set():
+                try:
+                    self.loaded.engine.render(block_dur)
+                    self._elapsed += block_dur
+                    block = np.asarray(self.loaded.plugin.get_audio(), dtype=np.float32)
+                    if block.ndim == 1:
+                        block = block[np.newaxis, :]
+                    try:
+                        self._audio_queue.put(block, timeout=1.0)
+                    except queue.Full:
+                        pass  # consumidor (callback) está muito atrás -- descarta e segue
+                except Exception as e:
+                    _log(f"[live:{self.vst_id}] ERRO na thread de render: {e}\n{traceback.format_exc()}")
+                    time.sleep(0.05)  # evita loop de erro em CPU 100%
+
+        self.render_thread = threading.Thread(
+            target=_render_loop, name=f"live-render-{self.vst_id}", daemon=True
+        )
+        self.render_thread.start()
+
+        # ── Callback de áudio REAL-TIME: só copia dados já prontos da
+        # fila, nunca faz processamento pesado. Isso é o que evita o
+        # "DAW suspended processing" -- o driver de áudio sempre recebe
+        # resposta rápida, mesmo que o plugin seja lento por baixo. ────
         def _callback(outdata, frames, time_info, status):
             if status:
                 _log(f"[live:{self.vst_id}] status do stream: {status}")
             try:
-                self.loaded.engine.render(block_dur)
-                self._elapsed += block_dur
-                block = np.asarray(self.loaded.plugin.get_audio(), dtype=np.float32)
-                # block: (channels, n_samples) -- adapta pro formato (frames, channels)
-                # que sounddevice espera em outdata.
-                n = min(frames, block.shape[1])
-                if block.shape[0] >= 2:
-                    outdata[:n, 0] = block[0, :n]
-                    outdata[:n, 1] = block[1, :n]
-                else:
-                    outdata[:n, 0] = block[0, :n]
-                    outdata[:n, 1] = block[0, :n]
-                if n < frames:
-                    outdata[n:, :] = 0.0
-            except Exception as e:
-                _log(f"[live:{self.vst_id}] ERRO no callback de áudio: {e}\n{traceback.format_exc()}")
+                block = self._audio_queue.get_nowait()
+            except queue.Empty:
+                # fila vazia (thread de render não deu conta a tempo) --
+                # devolve silêncio nesse bloco em vez de travar/estourar
+                # o prazo do driver.
+                self._underrun_count += 1
                 outdata[:, :] = 0.0
+                return
+
+            n = min(frames, block.shape[1])
+            if block.shape[0] >= 2:
+                outdata[:n, 0] = block[0, :n]
+                outdata[:n, 1] = block[1, :n]
+            else:
+                outdata[:n, 0] = block[0, :n]
+                outdata[:n, 1] = block[0, :n]
+            if n < frames:
+                outdata[n:, :] = 0.0
 
         try:
             self.stream = _sd.OutputStream(
@@ -197,9 +237,10 @@ class LiveSession:
                 callback=_callback,
             )
             self.stream.start()
-            _log(f"[live:{self.vst_id}] motor de áudio ao vivo iniciado (block={block_samples} @ {self.loaded.sample_rate}Hz)")
+            _log(f"[live:{self.vst_id}] motor de áudio ao vivo iniciado (block={block_samples} @ {self.loaded.sample_rate}Hz, thread de render separada)")
         except Exception as e:
             _log(f"[live:{self.vst_id}] ERRO ao iniciar stream de áudio: {e}\n{traceback.format_exc()}")
+            self.stop_event.set()
             self.stream = None
 
     def trigger_note(self, pitch: int, velocity: int, duration: float) -> None:
@@ -212,6 +253,7 @@ class LiveSession:
             _log(f"[live:{self.vst_id}] ERRO ao injetar nota: {e}")
 
     def stop(self) -> None:
+        self.stop_event.set()
         if self.stream is not None:
             try:
                 self.stream.stop()
@@ -219,7 +261,12 @@ class LiveSession:
             except Exception as e:
                 _log(f"[live:{self.vst_id}] ERRO ao parar stream: {e}")
             self.stream = None
-        _log(f"[live:{self.vst_id}] motor de áudio ao vivo parado (tocou {self._elapsed:.1f}s no total)")
+        if self.render_thread is not None:
+            self.render_thread.join(timeout=2.0)
+        _log(
+            f"[live:{self.vst_id}] motor de áudio ao vivo parado "
+            f"(tocou {self._elapsed:.1f}s, {self._underrun_count} bloco(s) em silêncio por atraso)"
+        )
 
 
 _LIVE_SESSIONS: Dict[str, LiveSession] = {}
