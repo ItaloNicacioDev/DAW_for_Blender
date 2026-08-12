@@ -391,10 +391,16 @@ def _play_rendered_audio(audio):
 
 def _play_vst_note_preview(vst_id: str, midi: int, dur: float, vel: int):
     """
-    Audição pontual de uma nota através de um VST de verdade (via worker
-    IPC). BLOQUEANTE -- só deve ser chamada a partir de um clique manual
-    do usuário (ver `from_scheduler` em `_play_note_sound`), nunca do
-    scheduler de playback de 5ms, senão trava a UI de novo.
+    Audição pontual de uma nota através de um VST de verdade.
+
+    Se a interface do plugin estiver aberta (motor ao vivo rodando),
+    toca em tempo real através dela -- praticamente instantâneo, sem
+    round-trip de render offline. Senão, cai pro preview de um tiro só
+    via render_instrument (via worker IPC, bloqueante, com cache).
+
+    BLOQUEANTE no caso de fallback -- só deve ser chamada a partir de um
+    clique manual do usuário (ver `from_scheduler` em `_play_note_sound`),
+    nunca do scheduler de playback de 5ms, senão trava a UI de novo.
     """
     try:
         from ..modules.vst.utils import get_live_vst
@@ -405,6 +411,9 @@ def _play_vst_note_preview(vst_id: str, midi: int, dur: float, vel: int):
     if vst is None or not vst.loaded:
         print(f"[Piano] VST '{vst_id}' não está carregado -- carregue-o no rack de instrumentos primeiro")
         return
+
+    if vst.trigger_live_note(midi, vel, dur):
+        return  # tocou em tempo real via sessão ao vivo -- não precisa do fallback abaixo
 
     key = (vst_id, midi, round(dur, 2), vel)
     cached = _vst_preview_cache.get(key)
