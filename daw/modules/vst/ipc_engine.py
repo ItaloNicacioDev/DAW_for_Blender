@@ -328,6 +328,25 @@ class DawdreamerIPCBridge:
         header, _ = _manager.call("is_editor_open", vst_id=self.plugin_name)
         return bool(header.get("is_open", False))
 
+    def trigger_live_note(self, pitch: int, velocity: int = 100, duration: float = 1.0) -> bool:
+        """
+        Toca uma nota AGORA através da sessão ao vivo do plugin (só
+        funciona com a interface do plugin aberta -- é o motor de áudio
+        contínuo que começa junto com open_editor()). Retorna False se
+        não houver sessão ao vivo rodando (nesse caso, quem chamou deve
+        cair de volta pro preview de um tiro só via render_instrument).
+        """
+        if not self._loaded:
+            return False
+        try:
+            header, _ = _manager.call(
+                "trigger_live_note", vst_id=self.plugin_name,
+                pitch=int(pitch), velocity=int(velocity), duration=float(duration),
+            )
+        except WorkerProcessError:
+            return False  # sem sessão ao vivo -- quem chamou cai pro preview de um tiro só
+        return bool(header.get("ok", False))
+
     def __repr__(self) -> str:
         status = "worker" if self._loaded else "nao carregado"
         return f"<DawdreamerIPCBridge '{self.plugin_name}' [{status}] @ {self.sample_rate}Hz>"
