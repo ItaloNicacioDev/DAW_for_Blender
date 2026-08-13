@@ -224,3 +224,249 @@ def scan_multiple_directories(directories: str, recursive: bool = True) -> List[
                 seen_paths.add(item["path"])
                 results.append(item)
     return results
+
+
+# ═══════════════════════════════════════════════════════════════
+#  DESCOBERTA AUTOMÁTICA: pastas padrão do SO + registro do Windows
+#  + todos os discos -- pra não depender só do que o usuário adiciona
+#  manualmente.
+# ═══════════════════════════════════════════════════════════════
+
+# Nomes de pasta que nunca valem a pena descer -- ou são gigantes e
+# irrelevantes (Windows, node_modules) ou são pastas de sistema que só
+# geram erro de permissão sem nunca conter um VST de verdade.
+_SKIP_DIR_NAMES = {
+    "Windows", "$Recycle.Bin", "System Volume Information", "node_modules",
+    ".git", ".svn", "AppData", "$WinREAgent", "Recovery", "PerfLogs",
+    "Config.Msi", "MSOCache", "$SysReset",
+}
+
+
+def get_default_vst_search_paths() -> List[str]:
+    """Pastas onde plugins VST2/VST3 costumam ser instalados por padrão,
+    por sistema operacional. Sempre incluídas na varredura, além do que
+    o usuário adiciona manualmente."""
+    paths: List[str] = []
+
+    if os.name == "nt":
+        for env_var in ("ProgramFiles", "ProgramFiles(x86)", "CommonProgramFiles", "CommonProgramFiles(x86)"):
+            base = os.environ.get(env_var)
+            if not base:
+                continue
+            paths.extend([
+                os.path.join(base, "VST3"),
+                os.path.join(base, "VSTPlugins"),
+                os.path.join(base, "Steinberg", "VSTPlugins"),
+                os.path.join(base, "Common Files", "VST3"),
+                os.path.join(base, "Common Files", "VSTPlugins"),
+            ])
+    elif sys_platform_is_mac():
+        home = str(Path.home())
+        paths.extend([
+            "/Library/Audio/Plug-Ins/VST",
+            "/Library/Audio/Plug-Ins/VST3",
+            "/Library/Audio/Plug-Ins/Components",
+            os.path.join(home, "Library/Audio/Plug-Ins/VST"),
+            os.path.join(home, "Library/Audio/Plug-Ins/VST3"),
+        ])
+    else:  # Linux
+        home = str(Path.home())
+        paths.extend([
+            "/usr/lib/vst3", "/usr/lib/vst", "/usr/local/lib/vst3", "/usr/local/lib/vst",
+            os.path.join(home, ".vst3"), os.path.join(home, ".vst"),
+        ])
+
+    # Remove duplicatas mantendo ordem, e só devolve pastas que existem
+    seen = set()
+    existing = []
+    for p in paths:
+        if p not in seen and os.path.isdir(p):
+            seen.add(p)
+            existing.append(p)
+    return existing
+
+
+def sys_platform_is_mac() -> bool:
+    import sys as _sys
+    return _sys.platform == "darwin"
+
+
+def get_registry_vst_paths() -> List[str]:
+    """
+    No Windows, alguns instaladores registram a pasta de VST num lugar
+    customizado via Registro, em vez de usar as pastas padrão. Consulta
+    as chaves conhecidas. Sem efeito (lista vazia) fora do Windows.
+    """
+    if os.name != "nt":
+        return []
+
+    paths: List[str] = []
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    keys_to_check = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\VST3", "VST3PluginPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\VST3", "VST3PluginPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\VST", "VSTPluginsPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\VST", "VSTPluginsPath"),
+    ]
+    for hive, subkey, value_name in keys_to_check:
+        try:
+            with winreg.OpenKey(hive, subkey) as key:
+                value, _type = winreg.QueryValueEx(key, value_name)
+                if value and os.path.isdir(value):
+                    paths.append(value)
+        except (FileNotFoundError, OSError):
+            continue
+
+    return paths
+
+
+def get_all_drive_roots() -> List[str]:
+    """Todos os discos/drives disponíveis no sistema (pra varredura
+    'PC inteiro'). No Windows, letras de A: a Z:; em Unix, só '/'."""
+    if os.name == "nt":
+        import string
+        drives = []
+        for letter in string.ascii_uppercase:
+            root = f"{letter}:\\"
+            if os.path.isdir(root):
+                drives.append(root)
+        return drives
+    return ["/"]
+
+
+def scan_whole_system(recursive: bool = True, extra_directories: str = "") -> List[Dict[str, str]]:
+    """
+    Varredura completa: pastas adicionadas manualmente pelo usuário +
+    pastas padrão do SO + pastas do Registro (Windows) + TODOS os discos
+    do sistema (pulando pastas de sistema conhecidas por serem grandes e
+    irrelevantes, ver `_SKIP_DIR_NAMES`).
+
+    Pode demorar bastante num disco cheio -- é pensada pra rodar em
+    background (ver DAW_OT_ScanVstDirectoriesAsync) e ter o resultado
+    cacheado depois (ver `save_scan_cache`/`load_scan_cache`), pra não
+    precisar repetir isso toda vez que o Blender abre.
+    """
+    results: List[Dict[str, str]] = []
+    seen_paths = set()
+
+    def _add_all(directory: str):
+        for item in scan_directory_for_vsts(directory, recursive=recursive):
+            if item["path"] not in seen_paths:
+                seen_paths.add(item["path"])
+                results.append(item)
+
+    # 1. Pastas manuais do usuário (mais rápido, prioridade primeiro)
+    for raw in extra_directories.split(";"):
+        directory = raw.strip()
+        if directory:
+            _add_all(directory)
+
+    # 2. Pastas padrão do SO
+    for directory in get_default_vst_search_paths():
+        _add_all(directory)
+
+    # 3. Pastas customizadas do Registro do Windows
+    for directory in get_registry_vst_paths():
+        _add_all(directory)
+
+    # 4. Todos os discos -- a parte pesada. Usa os.walk manual aqui (em
+    # vez de reusar scan_directory_for_vsts por disco inteiro) só pra
+    # poder filtrar _SKIP_DIR_NAMES antes de descer, economizando tempo
+    # de verdade em pastas gigantes e irrelevantes tipo Windows/.
+    for root in get_all_drive_roots():
+        try:
+            walk_iter = os.walk(root, onerror=lambda e: None, followlinks=False)
+        except OSError:
+            continue
+        for dirpath, dirnames, filenames in walk_iter:
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_NAMES]
+
+            for dirname in list(dirnames):
+                if Path(dirname).suffix.lower() in (".vst3", ".vst"):
+                    entry = Path(dirpath) / dirname
+                    if str(entry) not in seen_paths:
+                        seen_paths.add(str(entry))
+                        fmt = "VST3" if entry.suffix.lower() == ".vst3" else "VST2"
+                        results.append({"path": str(entry), "name": entry.stem, "format": fmt})
+
+            for filename in filenames:
+                entry = Path(dirpath) / filename
+                if entry.suffix.lower() not in _VST_EXTENSIONS:
+                    continue
+                if str(entry) in seen_paths:
+                    continue
+                try:
+                    fmt = detect_plugin_format(entry)
+                except OSError:
+                    continue
+                if fmt == "UNKNOWN":
+                    continue
+                seen_paths.add(str(entry))
+                results.append({"path": str(entry), "name": entry.stem, "format": fmt})
+
+            dirnames[:] = [d for d in dirnames if Path(d).suffix.lower() not in (".vst3", ".vst")]
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════
+#  CACHE PERSISTENTE: evita reescanear o PC inteiro toda vez que o
+#  Blender abre. Fica num JSON na pasta de config do usuário (não no
+#  .blend, então persiste entre projetos diferentes).
+# ═══════════════════════════════════════════════════════════════
+
+def _cache_file_path() -> Path:
+    import bpy
+    config_dir = Path(bpy.utils.user_resource('CONFIG', path="daw", create=True))
+    return config_dir / "vst_scan_cache.json"
+
+
+def save_scan_cache(found: List[Dict[str, str]]) -> None:
+    import json
+    import time as _time
+
+    payload = {
+        "version": 1,
+        "scanned_at": _time.time(),
+        "plugins": found,
+    }
+    try:
+        with open(_cache_file_path(), "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        print(f"[DAW VST] Falha ao salvar cache de scan: {e}")
+
+
+def load_scan_cache() -> Optional[List[Dict[str, str]]]:
+    """Retorna a lista de plugins do último scan salvo, ou None se não
+    existir cache ainda (primeira vez usando o addon)."""
+    import json
+
+    path = _cache_file_path()
+    if not path.is_file():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload.get("plugins", [])
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[DAW VST] Falha ao ler cache de scan: {e}")
+        return None
+
+
+def get_scan_cache_timestamp() -> Optional[float]:
+    import json
+
+    path = _cache_file_path()
+    if not path.is_file():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload.get("scanned_at")
+    except (OSError, json.JSONDecodeError):
+        return None
