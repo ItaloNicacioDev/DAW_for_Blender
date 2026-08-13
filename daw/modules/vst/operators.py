@@ -35,6 +35,10 @@ from .utils import (
     sync_pure_bypass,
     make_unique_vst_id,
     scan_multiple_directories,
+    scan_whole_system,
+    save_scan_cache,
+    load_scan_cache,
+    get_scan_cache_timestamp,
     clamp_index,
 )
 from .live_monitor import get_live_monitor, LiveMonitorState
@@ -114,12 +118,21 @@ class DAW_OT_ScanVstDirectoriesAsync(Operator):
     Scan em background thread — a UI continua responsiva.
     Usa bpy.app.timers para aplicar o resultado na thread principal
     (única thread permitida a tocar em RNA/bpy.types).
+
+    Varre: pastas adicionadas manualmente + pastas padrão do SO (Program
+    Files\\VST3 etc.) + registro do Windows + TODOS OS DISCOS do sistema
+    (ver `scan_whole_system` em utils.py). Isso pode demorar — por isso é
+    sempre em background — mas o resultado é salvo em cache persistente
+    (fora do .blend) depois de terminar, então não precisa repetir a
+    varredura completa toda vez que o Blender abre; só quando o usuário
+    clicar em "Escanear" de novo de propósito.
     """
     bl_idname = "daw.scan_vst_directories_async"
     bl_label = "Escanear VSTs (Assíncrono)"
     bl_description = (
-        "Varre diretórios em background — a UI não trava. "
-        "O resultado aparece automaticamente quando terminar."
+        "Varre TODO o sistema (pastas adicionadas + pastas padrão + todos os discos) "
+        "em background — a UI não trava. Resultado fica salvo em cache; "
+        "só precisa escanear de novo se instalar VSTs novos."
     )
     bl_options = {'REGISTER'}
 
@@ -137,8 +150,9 @@ class DAW_OT_ScanVstDirectoriesAsync(Operator):
         _result_holder: list = []  # [List[Dict]] preenchido pela thread
 
         def _scan_thread():
-            found = scan_multiple_directories(directories, recursive=True)
+            found = scan_whole_system(recursive=True, extra_directories=directories)
             _result_holder.append(found)
+            save_scan_cache(found)
 
         def _apply_result():
             if not _result_holder:
@@ -167,7 +181,40 @@ class DAW_OT_ScanVstDirectoriesAsync(Operator):
         threading.Thread(target=_scan_thread, daemon=True).start()
         bpy.app.timers.register(_apply_result, first_interval=0.2)
 
-        self.report({'INFO'}, "Scan iniciado em background...")
+        self.report({'INFO'}, "Escaneando o sistema inteiro em background (pode demorar na primeira vez)...")
+        return {'FINISHED'}
+
+
+class DAW_OT_LoadVstScanCache(Operator):
+    """
+    Carrega o resultado do último scan salvo, sem escanear de novo.
+    Rápido (leitura de um JSON) -- é o que roda automaticamente quando o
+    painel VST Browser é aberto pela primeira vez numa sessão, pra
+    mostrar algo imediatamente sem esperar uma varredura completa.
+    """
+    bl_idname = "daw.load_vst_scan_cache"
+    bl_label = "Carregar Cache de VSTs"
+    bl_description = "Carrega a lista de plugins do último scan salvo (rápido, sem escanear de novo)"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        found = load_scan_cache()
+        if found is None:
+            self.report({'INFO'}, "Nenhum cache encontrado ainda -- use 'Escanear' primeiro")
+            return {'CANCELLED'}
+
+        browser = context.scene.daw_vst_browser
+        browser.discovered_vsts.clear()
+        existing_ids = []
+        for entry in found:
+            item = browser.discovered_vsts.add()
+            item.vst_path = entry["path"]
+            item.vst_name = entry["name"]
+            item.vst_id = make_unique_vst_id(entry["name"], existing_ids)
+            existing_ids.append(item.vst_id)
+            item.vst_type = "EFFECT"
+
+        self.report({'INFO'}, f"{len(found)} plugin(s) carregado(s) do cache")
         return {'FINISHED'}
 
 
@@ -918,6 +965,7 @@ class DAW_OT_ApplyVstEffectToStrip(Operator):
 classes = [
     DAW_OT_ScanVstDirectories,
     DAW_OT_ScanVstDirectoriesAsync,
+    DAW_OT_LoadVstScanCache,
     DAW_OT_PickVstDirectory,
     DAW_OT_AddVstEffect,
     DAW_OT_RemoveVstEffect,
