@@ -14,6 +14,7 @@ Responsabilidade:
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
@@ -338,91 +339,207 @@ def get_all_drive_roots() -> List[str]:
     return ["/"]
 
 
-def scan_whole_system(recursive: bool = True, extra_directories: str = "") -> List[Dict[str, str]]:
+# ═══════════════════════════════════════════════════════════════
+#  VARREDURA INCREMENTAL: mesma ideia do FL Studio -- guarda a data de
+#  modificação (mtime) de cada pasta já visitada. Numa nova varredura,
+#  se a pasta não mudou desde a última vez, reaproveita o que já foi
+#  achado nela sem tocar o disco de novo (nem sequer listar o
+#  conteúdo). Isso é o que torna scans repetidos rápidos -- só pastas
+#  novas ou modificadas (plugin instalado/removido) são revisitadas de
+#  verdade.
+# ═══════════════════════════════════════════════════════════════
+
+def _scan_dir_incremental(
+    root: str,
+    old_cache: Dict[str, dict],
+    new_cache: Dict[str, dict],
+    results: List[Dict[str, str]],
+    seen_paths: set,
+) -> None:
+    """Varre `root` recursivamente, usando/atualizando `old_cache`/`new_cache`
+    (dict: caminho_normalizado -> {"mtime": float, "subdirs": [...], "plugins": [...]})."""
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            current_mtime = os.stat(current).st_mtime
+        except OSError:
+            continue
+
+        cached_entry = old_cache.get(current)
+        if cached_entry is not None and cached_entry.get("mtime") == current_mtime:
+            # Pasta não mudou desde o último scan -- reaproveita sem
+            # tocar o disco. Ainda assim empilha as subpastas conhecidas
+            # pra checar CADA UMA independentemente (uma subpasta pode
+            # ter mudado mesmo que esta aqui não tenha).
+            new_cache[current] = cached_entry
+            for entry in cached_entry.get("plugins", []):
+                if entry["path"] not in seen_paths:
+                    seen_paths.add(entry["path"])
+                    results.append(entry)
+            for sub in cached_entry.get("subdirs", []):
+                stack.append(sub)
+            continue
+
+        # Pasta nova ou modificada -- lista de verdade.
+        try:
+            with os.scandir(current) as it:
+                dir_entries = list(it)
+        except OSError:
+            continue
+
+        subdirs: List[str] = []
+        plugins_here: List[Dict[str, str]] = []
+
+        for entry in dir_entries:
+            name = entry.name
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                continue
+
+            if is_dir:
+                if name in _SKIP_DIR_NAMES:
+                    continue
+                suffix = Path(name).suffix.lower()
+                if suffix in (".vst3", ".vst"):
+                    # Bundle .vst3/.vst como pasta -- conta como plugin,
+                    # NÃO desce pra dentro (evita duplicar o binário
+                    # interno como plugin separado).
+                    full = str(Path(current) / name)
+                    fmt = "VST3" if suffix == ".vst3" else "VST2"
+                    plugin_entry = {"path": full, "name": Path(name).stem, "format": fmt}
+                    plugins_here.append(plugin_entry)
+                else:
+                    full = str(Path(current) / name)
+                    subdirs.append(full)
+            else:
+                suffix = Path(name).suffix.lower()
+                if suffix not in _VST_EXTENSIONS:
+                    continue
+                full = Path(current) / name
+                try:
+                    fmt = detect_plugin_format(full)
+                except OSError:
+                    continue
+                if fmt == "UNKNOWN":
+                    continue
+                plugins_here.append({"path": str(full), "name": full.stem, "format": fmt})
+
+        new_cache[current] = {"mtime": current_mtime, "subdirs": subdirs, "plugins": plugins_here}
+        for entry in plugins_here:
+            if entry["path"] not in seen_paths:
+                seen_paths.add(entry["path"])
+                results.append(entry)
+        stack.extend(subdirs)
+
+
+def scan_whole_system(
+    recursive: bool = True,
+    extra_directories: str = "",
+    use_cache: bool = True,
+    progress_callback=None,
+) -> List[Dict[str, str]]:
     """
     Varredura completa: pastas adicionadas manualmente pelo usuário +
     pastas padrão do SO + pastas do Registro (Windows) + TODOS os discos
     do sistema (pulando pastas de sistema conhecidas por serem grandes e
     irrelevantes, ver `_SKIP_DIR_NAMES`).
 
-    Pode demorar bastante num disco cheio -- é pensada pra rodar em
-    background (ver DAW_OT_ScanVstDirectoriesAsync) e ter o resultado
-    cacheado depois (ver `save_scan_cache`/`load_scan_cache`), pra não
-    precisar repetir isso toda vez que o Blender abre.
+    Incremental (estilo FL Studio): reaproveita o cache por pasta
+    (mtime) da varredura anterior -- só pastas novas ou modificadas
+    desde então são realmente visitadas no disco. A primeira varredura
+    ainda precisa tocar tudo (não tem cache pra reaproveitar), mas as
+    seguintes ficam bem mais rápidas.
+
+    Paraleliza a varredura entre os discos/pastas de topo (a maior
+    parte do tempo é esperando o disco responder, não CPU -- múltiplas
+    threads ajudam de verdade aqui mesmo com o GIL).
     """
+    import concurrent.futures
+
     results: List[Dict[str, str]] = []
-    seen_paths = set()
+    seen_paths: set = set()
+    old_dir_cache = load_dir_cache() if use_cache else {}
+    new_dir_cache: Dict[str, dict] = {}
 
-    def _add_all(directory: str):
-        for item in scan_directory_for_vsts(directory, recursive=recursive):
-            if item["path"] not in seen_paths:
-                seen_paths.add(item["path"])
-                results.append(item)
+    roots: List[str] = []
 
-    # 1. Pastas manuais do usuário (mais rápido, prioridade primeiro)
     for raw in extra_directories.split(";"):
         directory = raw.strip()
         if directory:
-            _add_all(directory)
+            roots.append(directory)
 
-    # 2. Pastas padrão do SO
-    for directory in get_default_vst_search_paths():
-        _add_all(directory)
+    roots.extend(get_default_vst_search_paths())
+    roots.extend(get_registry_vst_paths())
+    roots.extend(get_all_drive_roots())
 
-    # 3. Pastas customizadas do Registro do Windows
-    for directory in get_registry_vst_paths():
-        _add_all(directory)
+    # Remove duplicatas/subpastas redundantes mantendo ordem (ex.: se
+    # "C:\" já está na lista, não precisa escanear "C:\Program Files"
+    # separadamente também -- seria trabalho repetido).
+    roots = sorted(set(roots), key=len)
+    deduped_roots: List[str] = []
+    for r in roots:
+        r_norm = os.path.normcase(os.path.normpath(r))
+        if not any(
+            r_norm != os.path.normcase(os.path.normpath(existing))
+            and r_norm.startswith(os.path.normcase(os.path.normpath(existing)) + os.sep)
+            for existing in deduped_roots
+        ):
+            deduped_roots.append(r)
 
-    # 4. Todos os discos -- a parte pesada. Usa os.walk manual aqui (em
-    # vez de reusar scan_directory_for_vsts por disco inteiro) só pra
-    # poder filtrar _SKIP_DIR_NAMES antes de descer, economizando tempo
-    # de verdade em pastas gigantes e irrelevantes tipo Windows/.
-    for root in get_all_drive_roots():
-        try:
-            walk_iter = os.walk(root, onerror=lambda e: None, followlinks=False)
-        except OSError:
-            continue
-        for dirpath, dirnames, filenames in walk_iter:
-            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_NAMES]
+    lock = threading.Lock()
+    done_count = [0]
 
-            for dirname in list(dirnames):
-                if Path(dirname).suffix.lower() in (".vst3", ".vst"):
-                    entry = Path(dirpath) / dirname
-                    if str(entry) not in seen_paths:
-                        seen_paths.add(str(entry))
-                        fmt = "VST3" if entry.suffix.lower() == ".vst3" else "VST2"
-                        results.append({"path": str(entry), "name": entry.stem, "format": fmt})
+    def _worker(root: str):
+        local_results: List[Dict[str, str]] = []
+        local_seen: set = set()
+        local_cache: Dict[str, dict] = {}
+        _scan_dir_incremental(root, old_dir_cache, local_cache, local_results, local_seen)
+        with lock:
+            for entry in local_results:
+                if entry["path"] not in seen_paths:
+                    seen_paths.add(entry["path"])
+                    results.append(entry)
+            new_dir_cache.update(local_cache)
+            done_count[0] += 1
+            if progress_callback:
+                progress_callback(done_count[0], len(deduped_roots))
 
-            for filename in filenames:
-                entry = Path(dirpath) / filename
-                if entry.suffix.lower() not in _VST_EXTENSIONS:
-                    continue
-                if str(entry) in seen_paths:
-                    continue
-                try:
-                    fmt = detect_plugin_format(entry)
-                except OSError:
-                    continue
-                if fmt == "UNKNOWN":
-                    continue
-                seen_paths.add(str(entry))
-                results.append({"path": str(entry), "name": entry.stem, "format": fmt})
+    max_workers = min(8, max(1, len(deduped_roots)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        list(pool.map(_worker, deduped_roots))
 
-            dirnames[:] = [d for d in dirnames if Path(d).suffix.lower() not in (".vst3", ".vst")]
+    if use_cache:
+        save_dir_cache(new_dir_cache)
 
     return results
 
 
 # ═══════════════════════════════════════════════════════════════
-#  CACHE PERSISTENTE: evita reescanear o PC inteiro toda vez que o
-#  Blender abre. Fica num JSON na pasta de config do usuário (não no
-#  .blend, então persiste entre projetos diferentes).
+#  CACHE PERSISTENTE
+#
+#  Dois arquivos, propósitos diferentes:
+#    - vst_scan_cache.json  : lista final de plugins (o que a UI mostra
+#                              instantaneamente ao abrir o Blender)
+#    - vst_dir_cache.json   : mtime por pasta visitada (o que torna o
+#                              PRÓXIMO scan completo rápido -- pastas
+#                              inalteradas nem são tocadas de novo)
+#
+#  Ficam na pasta de config do usuário (fora do .blend), então
+#  persistem entre projetos diferentes.
 # ═══════════════════════════════════════════════════════════════
 
 def _cache_file_path() -> Path:
     import bpy
     config_dir = Path(bpy.utils.user_resource('CONFIG', path="daw", create=True))
     return config_dir / "vst_scan_cache.json"
+
+
+def _dir_cache_file_path() -> Path:
+    import bpy
+    config_dir = Path(bpy.utils.user_resource('CONFIG', path="daw", create=True))
+    return config_dir / "vst_dir_cache.json"
 
 
 def save_scan_cache(found: List[Dict[str, str]]) -> None:
@@ -470,3 +587,41 @@ def get_scan_cache_timestamp() -> Optional[float]:
         return payload.get("scanned_at")
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def save_dir_cache(dir_cache: Dict[str, dict]) -> None:
+    """Salva o cache por pasta (mtime + subpastas + plugins achados),
+    usado pra acelerar a PRÓXIMA varredura completa."""
+    import json
+
+    try:
+        with open(_dir_cache_file_path(), "w", encoding="utf-8") as f:
+            json.dump(dir_cache, f, ensure_ascii=False)
+    except OSError as e:
+        print(f"[DAW VST] Falha ao salvar cache de pastas: {e}")
+
+
+def load_dir_cache() -> Dict[str, dict]:
+    import json
+
+    path = _dir_cache_file_path()
+    if not path.is_file():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[DAW VST] Falha ao ler cache de pastas: {e}")
+        return {}
+
+
+def clear_dir_cache() -> None:
+    """Apaga o cache por pasta -- força a próxima varredura completa a
+    tocar tudo do zero (útil se o cache ficar de alguma forma
+    inconsistente, ou pra forçar uma re-checagem total)."""
+    try:
+        path = _dir_cache_file_path()
+        if path.is_file():
+            path.unlink()
+    except OSError as e:
+        print(f"[DAW VST] Falha ao limpar cache de pastas: {e}")
