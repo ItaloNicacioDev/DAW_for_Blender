@@ -508,14 +508,27 @@ def _run_job(job: _Job) -> None:
     handler = _HANDLERS.get(cmd)
     if handler is None:
         job.result = ({"ok": False, "error": f"comando desconhecido: {cmd}"}, b"")
-    else:
-        try:
-            job.result = handler(job.header, job.payload)
-        except Exception as e:
-            job.result = (
-                {"ok": False, "error": f"{type(e).__name__}: {e}", "traceback": traceback.format_exc()},
-                b"",
-            )
+        return
+
+    t0 = time.perf_counter()
+    try:
+        job.result = handler(job.header, job.payload)
+        if not job.result[0].get("ok", True):
+            # Handler retornou ok=False de propósito (ex.: plugin não
+            # encontrado) -- não é uma exceção, mas ainda vale logar pra
+            # diagnosticar falhas de load sem precisar reproduzir de novo.
+            elapsed = time.perf_counter() - t0
+            _log(f"[juce] comando '{cmd}' (vst_id={job.header.get('vst_id')}) falhou "
+                 f"em {elapsed:.2f}s: {job.result[0].get('error')}")
+    except Exception as e:
+        elapsed = time.perf_counter() - t0
+        _log(f"[juce] EXCEÇÃO em '{cmd}' (vst_id={job.header.get('vst_id')}, "
+             f"path={job.header.get('path')}) após {elapsed:.2f}s: "
+             f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+        job.result = (
+            {"ok": False, "error": f"{type(e).__name__}: {e}", "traceback": traceback.format_exc()},
+            b"",
+        )
 
 
 def _juce_thread_main() -> None:
