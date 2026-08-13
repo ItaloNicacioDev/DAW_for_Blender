@@ -18,7 +18,7 @@ from bpy.types import Panel, UIList
 
 from . import ipc_engine
 from .live_monitor import _try_import_sounddevice
-from .utils import get_chain
+from .utils import get_chain, get_scan_cache_timestamp
 from .pressets import get_preset_manager
 
 
@@ -338,14 +338,24 @@ class DAW_PT_VstBrowser(Panel):
         row = col.row(align=True)
         row.operator("daw.pick_vst_directory", text="Adicionar Pasta", icon='FILE_FOLDER')
 
-        # Dois botões de scan: síncrono (garante atualização) e assíncrono (não trava)
+        # Escanear (completo: pastas + padrões do SO + registro + todos os
+        # discos, em background) vs botão pequeno de refresh rápido
+        # (só as pastas adicionadas manualmente, síncrono, mais rápido
+        # pra confirmar que um VST recém-instalado apareceu).
         scan_row = col.row(align=True)
         scan_icon = 'SORTTIME' if browser.is_scanning else 'VIEWZOOM'
-        scan_row.operator("daw.scan_vst_directories_async", text="Escanear", icon=scan_icon)
+        scan_row.operator("daw.scan_vst_directories_async", text="Escanear (sistema completo)", icon=scan_icon)
         scan_row.operator("daw.scan_vst_directories", text="", icon='FILE_REFRESH')
 
         if browser.is_scanning:
-            layout.label(text="Escaneando em background...", icon='SORTTIME')
+            layout.label(text="Escaneando o sistema inteiro em background...", icon='SORTTIME')
+
+        cache_ts = get_scan_cache_timestamp()
+        if cache_ts:
+            import datetime
+            dt = datetime.datetime.fromtimestamp(cache_ts)
+            layout.label(text=f"Último scan completo: {dt.strftime('%d/%m %H:%M')}", icon='FILE_TICK')
+        layout.operator("daw.load_vst_scan_cache", text="Carregar do Cache", icon='FILE_CACHE')
 
         layout.prop(browser, "search_term", text="", icon='VIEWZOOM')
 
