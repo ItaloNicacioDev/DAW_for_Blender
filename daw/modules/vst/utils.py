@@ -244,12 +244,52 @@ _SKIP_DIR_NAMES = {
 
 
 def get_default_vst_search_paths() -> List[str]:
-    """Pastas onde plugins VST2/VST3 costumam ser instalados por padrão,
-    por sistema operacional. Sempre incluídas na varredura, além do que
-    o usuário adiciona manualmente."""
+    """
+    Pastas onde plugins VST2/VST3 costumam ser instalados -- padrão do
+    SO + pastas específicas de marcas grandes (Waves, Native
+    Instruments, Arturia, iZotope, Spitfire, Toontrack, etc.), checadas
+    em TODOS os discos disponíveis (não só o disco do Windows) -- é
+    comum instalar plugins num disco secundário (ex.: E:\\VST\\).
+
+    Rápida por natureza: é uma lista curada e pequena de caminhos
+    conhecidos, nunca varre o disco inteiro procurando -- só confere se
+    cada caminho específico existe.
+    """
+    # Sufixos relativos onde plugins costumam morar, sob a raiz de cada
+    # disco (ex.: "E:\" + "VST3" = "E:\VST3"). Cobre tanto o padrão
+    # oficial VST3 quanto pastas de marcas grandes que às vezes fogem
+    # do padrão.
+    _RELATIVE_SUFFIXES = [
+        # Padrão oficial VST3/VST2
+        r"Program Files\Common Files\VST3",
+        r"Program Files\Common Files\VST2",
+        r"Program Files\VstPlugins",
+        r"Program Files\Steinberg\VstPlugins",
+        r"Program Files (x86)\Common Files\VST3",
+        r"Program Files (x86)\VstPlugins",
+        r"Program Files (x86)\Steinberg\VstPlugins",
+        # Marcas grandes com pasta própria conhecida (fallback além do
+        # padrão VST3 -- alguns instaladores duplicam ali também)
+        r"Program Files\Native Instruments",
+        r"Program Files\Waves",
+        r"Program Files\Arturia",
+        r"Program Files\iZotope",
+        r"Program Files\FabFilter",
+        r"Program Files\Xfer",
+        r"Program Files\Spitfire Audio",
+        r"Program Files\Toontrack",
+        r"Program Files\Image-Line\FL Studio\Plugins\VST3",
+        r"Program Files\Common Files\Avid\Audio\Plug-Ins",
+        # Convenção comum de quem instala num disco secundário sem usar
+        # o instalador padrão (como o E:\VST\ que você já usa)
+        r"VST", r"VST3", r"VSTPlugins", r"Plugins\VST", r"Plugins\VST3",
+    ]
+
     paths: List[str] = []
 
     if os.name == "nt":
+        # 1. Variáveis de ambiente padrão (cobre o disco onde o Windows
+        # está instalado, com o caminho exato que cada uma resolve)
         for env_var in ("ProgramFiles", "ProgramFiles(x86)", "CommonProgramFiles", "CommonProgramFiles(x86)"):
             base = os.environ.get(env_var)
             if not base:
@@ -261,6 +301,14 @@ def get_default_vst_search_paths() -> List[str]:
                 os.path.join(base, "Common Files", "VST3"),
                 os.path.join(base, "Common Files", "VSTPlugins"),
             ])
+
+        # 2. Mesmos padrões de pasta, mas testados em TODOS os discos
+        # disponíveis -- pega instalação em disco secundário sem
+        # precisar varrer o disco inteiro procurando.
+        for drive in get_all_drive_roots():
+            for suffix in _RELATIVE_SUFFIXES:
+                paths.append(os.path.join(drive, suffix))
+
     elif sys_platform_is_mac():
         home = str(Path.home())
         paths.extend([
@@ -281,8 +329,9 @@ def get_default_vst_search_paths() -> List[str]:
     seen = set()
     existing = []
     for p in paths:
-        if p not in seen and os.path.isdir(p):
-            seen.add(p)
+        p_norm = os.path.normcase(os.path.normpath(p))
+        if p_norm not in seen and os.path.isdir(p):
+            seen.add(p_norm)
             existing.append(p)
     return existing
 
@@ -441,20 +490,17 @@ def scan_whole_system(
     progress_callback=None,
 ) -> List[Dict[str, str]]:
     """
-    Varredura completa: pastas adicionadas manualmente pelo usuário +
-    pastas padrão do SO + pastas do Registro (Windows) + TODOS os discos
-    do sistema (pulando pastas de sistema conhecidas por serem grandes e
-    irrelevantes, ver `_SKIP_DIR_NAMES`).
+    Varredura rápida e persistente: pastas adicionadas manualmente pelo
+    usuário + pastas padrão/de marcas grandes (ver
+    `get_default_vst_search_paths`) + pastas do Registro (Windows) --
+    tudo já checado em TODOS os discos disponíveis.
 
-    Incremental (estilo FL Studio): reaproveita o cache por pasta
-    (mtime) da varredura anterior -- só pastas novas ou modificadas
-    desde então são realmente visitadas no disco. A primeira varredura
-    ainda precisa tocar tudo (não tem cache pra reaproveitar), mas as
-    seguintes ficam bem mais rápidas.
-
-    Paraleliza a varredura entre os discos/pastas de topo (a maior
-    parte do tempo é esperando o disco responder, não CPU -- múltiplas
-    threads ajudam de verdade aqui mesmo com o GIL).
+    NÃO varre o disco inteiro arquivo por arquivo -- só desce
+    recursivamente a partir de cada pasta conhecida da lista curada
+    (rápido mesmo sem cache, porque nunca visita pasta irrelevante tipo
+    Windows/ ou node_modules/ fora dessas raízes). Incremental (estilo
+    FL Studio) por cima disso: pastas que não mudaram desde o último
+    scan nem são tocadas de novo (ver `_scan_dir_incremental`).
     """
     import concurrent.futures
 
@@ -472,11 +518,10 @@ def scan_whole_system(
 
     roots.extend(get_default_vst_search_paths())
     roots.extend(get_registry_vst_paths())
-    roots.extend(get_all_drive_roots())
 
     # Remove duplicatas/subpastas redundantes mantendo ordem (ex.: se
-    # "C:\" já está na lista, não precisa escanear "C:\Program Files"
-    # separadamente também -- seria trabalho repetido).
+    # duas entradas da lista curada apontam pro mesmo lugar ou uma é
+    # subpasta da outra, não escaneia duas vezes).
     roots = sorted(set(roots), key=len)
     deduped_roots: List[str] = []
     for r in roots:
@@ -506,9 +551,10 @@ def scan_whole_system(
             if progress_callback:
                 progress_callback(done_count[0], len(deduped_roots))
 
-    max_workers = min(8, max(1, len(deduped_roots)))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        list(pool.map(_worker, deduped_roots))
+    if deduped_roots:
+        max_workers = min(8, max(1, len(deduped_roots)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            list(pool.map(_worker, deduped_roots))
 
     if use_cache:
         save_dir_cache(new_dir_cache)
