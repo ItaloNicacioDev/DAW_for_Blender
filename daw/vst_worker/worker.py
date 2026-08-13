@@ -169,7 +169,16 @@ class LiveSession:
             _log(f"[live:{self.vst_id}] sounddevice indisponível, motor ao vivo não iniciado")
             return
 
-        block_samples = max(64, self.loaded.block_size)
+        # Bloco do motor ao vivo: deliberadamente MAIOR que o block_size
+        # normal de processamento (512, ~11ms) -- alguns plugins (Serum2
+        # confirmado) mostram um aviso "DAW suspended processing" quando
+        # o host chama render() com muita frequência, porque cada
+        # chamada pode ativar/desativar o processamento no nível do
+        # protocolo VST3 por baixo do dawdreamer. Um bloco maior (~100ms)
+        # reduz drasticamente a frequência dessas chamadas, trocando um
+        # pouco de latência (imperceptível pra audição, não é uso
+        # performático nota-a-nota) por compatibilidade melhor.
+        block_samples = max(4096, self.loaded.block_size)
         block_dur = block_samples / float(self.loaded.sample_rate)
 
         self.loaded.engine.load_graph([(self.loaded.plugin, [])])
@@ -189,7 +198,7 @@ class LiveSession:
                     if block.ndim == 1:
                         block = block[np.newaxis, :]
                     try:
-                        self._audio_queue.put(block, timeout=1.0)
+                        self._audio_queue.put(block, timeout=0.2)
                     except queue.Full:
                         pass  # consumidor (callback) está muito atrás -- descarta e segue
                 except Exception as e:
