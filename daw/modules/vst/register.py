@@ -51,6 +51,39 @@ def _on_load_post(dummy):
         except Exception as e:
             print(f"[DAW][vst] Falha ao recarregar VSTs da cena '{scene.name}': {e}")
 
+    _load_scan_cache_into_browser()
+
+
+def _load_scan_cache_into_browser() -> None:
+    """
+    Carrega o resultado do último scan salvo (JSON fora do .blend) no VST
+    Browser, sem escanear de novo -- é o que faz o painel já vir com a
+    lista de plugins preenchida ao abrir o Blender, em vez de exigir
+    clicar em "Escanear" toda vez (que agora varre o sistema inteiro e
+    pode demorar).
+    """
+    try:
+        from .utils import load_scan_cache, make_unique_vst_id
+
+        found = load_scan_cache()
+        if not found:
+            return
+
+        for scene in bpy.data.scenes:
+            browser = getattr(scene, "daw_vst_browser", None)
+            if browser is None or len(browser.discovered_vsts) > 0:
+                continue  # já tem algo (ex.: scan manual rodou antes) -- não sobrescreve
+            existing_ids = []
+            for entry in found:
+                item = browser.discovered_vsts.add()
+                item.vst_path = entry["path"]
+                item.vst_name = entry["name"]
+                item.vst_id = make_unique_vst_id(entry["name"], existing_ids)
+                existing_ids.append(item.vst_id)
+                item.vst_type = "EFFECT"
+    except Exception as e:
+        print(f"[DAW][vst] Falha ao carregar cache de scan: {e}")
+
 
 def register():
     # properties.py já cuida do próprio register/unregister (classes +
