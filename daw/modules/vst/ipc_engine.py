@@ -110,6 +110,17 @@ class _WorkerManager:
         self._sock: Optional[socket.socket] = None
         self._lock = threading.RLock()
         self._id_counter = itertools.count(1)
+        # Incrementada toda vez que um processo worker novo sobe. Cada
+        # DawdreamerIPCBridge guarda em que geracao ele foi carregado;
+        # se a geracao mudou (worker morreu e reiniciou por causa de
+        # OUTRO plugin travado), o bridge sabe que precisa recarregar
+        # a si mesmo antes do proximo comando -- em vez de simplesmente
+        # falhar com "nao carregado".
+        self._generation = 0
+
+    @property
+    def generation(self) -> int:
+        return self._generation
 
     def _spawn(self) -> None:
         python_exe = find_worker_python()
@@ -147,6 +158,7 @@ class _WorkerManager:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(("127.0.0.1", port))
         self._sock = sock
+        self._generation += 1
 
     def _ensure_alive(self) -> None:
         if self._proc is not None and self._proc.poll() is None and self._sock is not None:
@@ -266,10 +278,15 @@ class DawdreamerIPCBridge:
         self.plugin_name: str = ""
         self.vst_type: Optional["VSTProgramType"] = None
         self._loaded = False
+        # Path original de load(), guardado pra poder recarregar
+        # sozinho se o worker reiniciar por causa de outro plugin.
+        self._load_path: Optional[Path] = None
+        self._load_generation: int = -1
 
     def load(self, path: str | Path, vst_type: "VSTProgramType") -> None:
         self.plugin_name = Path(path).stem
         self.vst_type = vst_type
+        self._load_path = Path(path)
         _manager.call(
             "load",
             vst_id=self.plugin_name,
@@ -279,6 +296,7 @@ class DawdreamerIPCBridge:
             block_size=self.block_size,
         )
         self._loaded = True
+        self._load_generation = _manager.generation
 
     def unload(self) -> None:
         if self._loaded:
@@ -287,12 +305,39 @@ class DawdreamerIPCBridge:
             except WorkerProcessError:
                 pass
         self._loaded = False
+        self._load_generation = -1
+
+    def _ensure_current_generation(self) -> None:
+        """Se o worker foi morto e reiniciado desde o ultimo load() deste
+        plugin (ex.: outro VST travou e derrubou o processo compartilhado),
+        este plugin nao existe mais do lado do worker novo -- mesmo que
+        `self._loaded` ainda diga True. Em vez de deixar o proximo comando
+        falhar com "nao carregado", recarrega esse plugin especifico de
+        forma transparente antes de prosseguir.
+
+        Levanta WorkerProcessError com uma mensagem clara se o proprio
+        recarregamento falhar (ex.: o plugin que causou o crash era este
+        mesmo)."""
+        if not self._loaded or self._load_path is None:
+            return
+        if self._load_generation == _manager.generation:
+            return
+        try:
+            self.load(self._load_path, self.vst_type)
+        except WorkerProcessError as e:
+            self._loaded = False
+            raise WorkerProcessError(
+                f"O worker de VST foi reiniciado (provavelmente outro plugin "
+                f"travou) e '{self.plugin_name}' nao pode ser recarregado "
+                f"automaticamente: {e}"
+            ) from e
 
     def list_parameters(self) -> List["VSTProgramParameter"]:
         from .vst import VSTProgramParameter
 
         if not self._loaded:
             return []
+        self._ensure_current_generation()
         header, _ = _manager.call("list_parameters", vst_id=self.plugin_name)
         return [
             VSTProgramParameter(id=p["id"], name=p["name"], value=p["value"], label=p.get("label", ""))
@@ -302,11 +347,13 @@ class DawdreamerIPCBridge:
     def set_parameter(self, param_id: int, value: float) -> None:
         if not self._loaded:
             return
+        self._ensure_current_generation()
         _manager.call("set_parameter", vst_id=self.plugin_name, param_id=int(param_id), value=float(value))
 
     def get_parameter(self, param_id: int) -> float:
         if not self._loaded:
             return 0.0
+        self._ensure_current_generation()
         header, _ = _manager.call("get_parameter", vst_id=self.plugin_name, param_id=int(param_id))
         return float(header.get("value", 0.0))
 
@@ -315,6 +362,7 @@ class DawdreamerIPCBridge:
 
         if not self._loaded:
             raise RuntimeError("Nenhum plugin carregado")
+        self._ensure_current_generation()
 
         arr = np.asarray(audio, dtype=np.float32)
         if arr.ndim == 1:
@@ -338,6 +386,7 @@ class DawdreamerIPCBridge:
 
         if not self._loaded:
             raise RuntimeError("Nenhum plugin carregado")
+        self._ensure_current_generation()
 
         header, payload = _manager.call(
             "render_instrument",
