@@ -30,28 +30,55 @@ Integração com project/load.py — adicione após carregar os outros módulos:
 """
 from __future__ import annotations
 
+try:
+    import bpy  # noqa: F401
+except ImportError:  # pragma: no cover - allows test/CLI usage outside Blender
+    bpy = None
+
 from .vst import VST, VSTProgramType, VSTProgramParameter, VSTProgramState
 from . import engine
 from . import ipc_engine
-from . import timeline_bridge
-from . import persistence
-from . import live_monitor
-from .pressets import get_preset_manager, VSTProgramPresetManager
-from .utils import (
-    get_live_vst,
-    register_live_vst,
-    unregister_live_vst,
-    get_or_create_live_vst,
-    sync_rna_from_pure,
-    sync_pure_bypass,
-    clamp_index,
-    get_chain,
-    get_or_create_chain,
-    make_unique_vst_id,
-    scan_directory_for_vsts,
-    scan_multiple_directories,
-)
-from .register import register, unregister
+
+if bpy is not None:
+    from . import timeline_bridge
+    from . import persistence
+    from . import live_monitor
+    from .pressets import get_preset_manager, VSTProgramPresetManager
+    from .utils import (
+        get_live_vst,
+        register_live_vst,
+        unregister_live_vst,
+        get_or_create_live_vst,
+        sync_rna_from_pure,
+        sync_pure_bypass,
+        clamp_index,
+        get_chain,
+        get_or_create_chain,
+        make_unique_vst_id,
+        scan_directory_for_vsts,
+        scan_multiple_directories,
+    )
+    from .register import register, unregister
+else:
+    get_preset_manager = None
+    VSTProgramPresetManager = None
+    timeline_bridge = None
+    persistence = None
+    live_monitor = None
+    get_live_vst = None
+    register_live_vst = None
+    unregister_live_vst = None
+    get_or_create_live_vst = None
+    sync_rna_from_pure = None
+    sync_pure_bypass = None
+    clamp_index = None
+    get_chain = None
+    get_or_create_chain = None
+    make_unique_vst_id = None
+    scan_directory_for_vsts = None
+    scan_multiple_directories = None
+    register = None
+    unregister = None
 
 __all__ = [
     # Modelo puro
