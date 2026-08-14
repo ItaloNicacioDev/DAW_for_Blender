@@ -201,22 +201,33 @@ class Serum2VST3HeavyTest(unittest.TestCase):
             self.assertIsNotNone(audio)
             self.assertIsInstance(audio, np.ndarray)
             
-            # Pode ser mono ou estéreo dependendo do bridge
+            # Detecta layout: (channels, samples) ou (samples, channels)
             expected_samples = int(2.0 * 44100)
+            
+            if audio.ndim == 2:
+                if audio.shape[0] <= 2:  # Provavelmente (channels, samples)
+                    num_channels = audio.shape[0]
+                    num_samples = audio.shape[1]
+                else:  # Provavelmente (samples, channels)
+                    num_channels = audio.shape[1]
+                    num_samples = audio.shape[0]
+            else:  # Mono (samples,)
+                num_channels = 1
+                num_samples = audio.shape[0]
+
             self.assertGreaterEqual(
-                audio.shape[0] if audio.ndim == 1 else audio.shape[0],
+                num_samples,
                 expected_samples * 0.99,
-                "Áudio muito curto ou truncado"
+                f"Áudio muito curto: {num_samples} < {expected_samples}"
             )
 
             # Verifica se há energia no áudio (não vazio)
             rms = np.sqrt(np.mean(audio ** 2))
             self.assertGreater(rms, 0.001, "Áudio vazio ou quase silencioso")
 
-            channels = 1 if audio.ndim == 1 else audio.shape[1]
             print(
-                f"✓ Serum 2 renderizou {audio.shape[0]} samples "
-                f"em {channels} canal(is) (RMS: {rms:.6f})"
+                f"✓ Serum 2 renderizou {num_samples} samples "
+                f"em {num_channels} canal(is) (RMS: {rms:.6f})"
             )
 
         except Exception as e:
