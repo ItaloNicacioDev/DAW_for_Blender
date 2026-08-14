@@ -8,20 +8,31 @@ bl_info = {
     "category": "Audio",
 }
 
-import bpy
+try:
+    import bpy
+except ImportError:  # pragma: no cover - uso em testes/CLI fora do Blender
+    bpy = None
+
 import importlib
 import traceback
 
-# ─────────────────────────────────────────────────────────────────
-#  UI "legada" (workspace, painéis simples, editores modais)
-# ─────────────────────────────────────────────────────────────────
-from .ui import panels, workspace, beat_grid
-from .ui import piano_roll as legacy_piano_roll
+if bpy is not None:
+    # ─────────────────────────────────────────────────────────────────
+    #  UI "legada" (workspace, painéis simples, editores modais)
+    # ─────────────────────────────────────────────────────────────────
+    from .ui import panels, workspace, beat_grid
+    from .ui import piano_roll as legacy_piano_roll
 
-# ─────────────────────────────────────────────────────────────────
-#  Motor de áudio / propriedades centrais da cena (scene.daw)
-# ─────────────────────────────────────────────────────────────────
-from .core import register as core_register
+    # ─────────────────────────────────────────────────────────────────
+    #  Motor de áudio / propriedades centrais da cena (scene.daw)
+    # ─────────────────────────────────────────────────────────────────
+    from .core import register as core_register
+else:
+    panels = None
+    workspace = None
+    beat_grid = None
+    legacy_piano_roll = None
+    core_register = None
 
 # ─────────────────────────────────────────────────────────────────
 #  Módulos funcionais da DAW (daw/modules/*)
@@ -99,12 +110,16 @@ def _unregister_submodules():
             traceback.print_exc()
 
 
-@bpy.app.handlers.persistent
-def on_load_post(scene, depsgraph=None):
-    try:
-        workspace.ensure_daw_workspace()
-    except Exception:
-        pass
+if bpy is not None:
+    @bpy.app.handlers.persistent
+    def on_load_post(scene, depsgraph=None):
+        try:
+            workspace.ensure_daw_workspace()
+        except Exception:
+            pass
+else:
+    def on_load_post(scene=None, depsgraph=None):
+        return None
 
 
 def _install_template():

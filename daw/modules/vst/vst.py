@@ -63,6 +63,25 @@ class VSTProgramState:
         return cls(**data)
 
 
+@dataclass
+class VSTAutomationPoint:
+    """Ponto de automação de parâmetro do VST."""
+    time: float
+    value: float
+    curve: str = "linear"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"time": self.time, "value": self.value, "curve": self.curve}
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> VSTAutomationPoint:
+        return cls(
+            time=float(data.get("time", 0.0)),
+            value=float(data.get("value", 0.0)),
+            curve=str(data.get("curve", "linear")),
+        )
+
+
 class VST:
     """Modelo puro de um plugin VST"""
 
@@ -83,6 +102,9 @@ class VST:
         # Estado de parâmetros: {param_id: normalized_value}
         self.parameters: Dict[int, float] = {}
         self.parameter_info: Dict[int, VSTProgramParameter] = {}
+
+        # Automação por parâmetro: {param_id: [VSTAutomationPoint(...), ...]}
+        self.automation: Dict[int, List[VSTAutomationPoint]] = {}
 
         # Histórico de programas (presets)
         self.programs: Dict[str, VSTProgramState] = {}
@@ -254,6 +276,15 @@ class VST:
                 return self.get_parameter(param_id)
         raise KeyError(f"Parâmetro '{param_name}' não encontrado")
 
+    def add_automation_point(self, param_id: int, time: float, value: float, curve: str = "linear") -> None:
+        """Adiciona um ponto de automação para um parâmetro."""
+        points = self.automation.setdefault(param_id, [])
+        points.append(VSTAutomationPoint(time=float(time), value=float(value), curve=curve))
+        points.sort(key=lambda p: p.time)
+
+    def get_automation_points(self, param_id: int) -> List[VSTAutomationPoint]:
+        return list(self.automation.get(param_id, []))
+
     def save_program(self, name: str) -> None:
         """Salva snapshot do estado atual como programa"""
         program = VSTProgramState(
@@ -279,6 +310,10 @@ class VST:
             "vst_id": self.vst_id,
             "bypass": self.bypass,
             "parameters": self.parameters,
+            "automation": {
+                str(param_id): [point.to_dict() for point in points]
+                for param_id, points in self.automation.items()
+            },
             "programs": {
                 name: program.to_dict()
                 for name, program in self.programs.items()
@@ -297,6 +332,10 @@ class VST:
             bypass=data["bypass"],
         )
         vst.parameters = data.get("parameters", {})
+        vst.automation = {
+            int(param_id): [VSTAutomationPoint.from_dict(point) for point in points]
+            for param_id, points in data.get("automation", {}).items()
+        }
         vst.programs = {
             name: VSTProgramState.from_dict(prog)
             for name, prog in data.get("programs", {}).items()
