@@ -35,7 +35,7 @@ try:
 except ImportError:  # pragma: no cover - allows test/CLI usage outside Blender
     bpy = None
 
-from .vst import VST, VSTProgramType, VSTProgramParameter, VSTProgramState
+from .vst import VST, VSTAutomationPoint, VSTProgramType, VSTProgramParameter, VSTProgramState
 from . import engine
 from . import ipc_engine
 
@@ -82,7 +82,7 @@ else:
 
 __all__ = [
     # Modelo puro
-    "VST", "VSTProgramType", "VSTProgramParameter", "VSTProgramState",
+    "VST", "VSTAutomationPoint", "VSTProgramType", "VSTProgramParameter", "VSTProgramState",
     # Utilitários de plugin (detecção de formato)
     "engine",
     # Motor real (worker IPC vendorizado)

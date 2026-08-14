@@ -285,6 +285,34 @@ class VST:
     def get_automation_points(self, param_id: int) -> List[VSTAutomationPoint]:
         return list(self.automation.get(param_id, []))
 
+    def get_automation_value(self, param_id: int, time: float) -> float:
+        """Resolve o valor de automação em um instante do tempo usando
+        interpolação linear entre pontos adjacentes.
+        """
+        points = self.automation.get(param_id)
+        if not points:
+            return float(self.parameters.get(param_id, 0.0))
+
+        if len(points) == 1:
+            return float(points[0].value)
+
+        points = sorted(points, key=lambda p: p.time)
+        if time <= points[0].time:
+            return float(points[0].value)
+        if time >= points[-1].time:
+            return float(points[-1].value)
+
+        for index in range(len(points) - 1):
+            left = points[index]
+            right = points[index + 1]
+            if left.time <= time <= right.time:
+                if right.time == left.time:
+                    return float(right.value)
+                t = (time - left.time) / (right.time - left.time)
+                return float(left.value + (right.value - left.value) * t)
+
+        return float(points[-1].value)
+
     def save_program(self, name: str) -> None:
         """Salva snapshot do estado atual como programa"""
         program = VSTProgramState(

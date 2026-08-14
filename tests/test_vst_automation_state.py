@@ -35,6 +35,16 @@ class VSTAutomationStateTests(unittest.TestCase):
         times = [event.time for event in vst.automation[4]]
         self.assertEqual(times, [0.5, 1.0, 2.0])
 
+    def test_automation_value_interpolates_between_points(self):
+        vst = VST(path="C:/Plugins/TestFx.vst3", name="TestFx")
+
+        vst.add_automation_point(7, 0.0, 0.0)
+        vst.add_automation_point(7, 2.0, 1.0)
+
+        self.assertAlmostEqual(vst.get_automation_value(7, 1.0), 0.5, places=6)
+        self.assertAlmostEqual(vst.get_automation_value(7, 0.0), 0.0, places=6)
+        self.assertAlmostEqual(vst.get_automation_value(7, 3.0), 1.0, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()
