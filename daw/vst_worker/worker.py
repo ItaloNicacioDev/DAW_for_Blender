@@ -306,6 +306,24 @@ _LOADED: Dict[str, LoadedPlugin] = {}
 _EDITOR_OPEN: Dict[str, bool] = {}
 
 
+def _stop_live_session(vst_id: str) -> None:
+    """Fecha qualquer sessão ao vivo associada a um vst_id, sem deixar
+    thread/stream pendurada em memória."""
+    live = _LIVE_SESSIONS.pop(vst_id, None)
+    if live is not None:
+        try:
+            live.stop()
+        except Exception:
+            pass
+
+
+def _clear_plugin_state(vst_id: str) -> None:
+    """Limpa editor, live-session e estado de render para esse plugin."""
+    _EDITOR_OPEN.pop(vst_id, None)
+    _stop_live_session(vst_id)
+    _LOADED.pop(vst_id, None)
+
+
 def _cmd_ping(header: dict, payload: bytes):
     return {"ok": True, "pong": True}, b""
 
@@ -326,8 +344,7 @@ def _cmd_load(header: dict, payload: bytes):
 
 def _cmd_unload(header: dict, payload: bytes):
     vst_id = header["vst_id"]
-    _LOADED.pop(vst_id, None)
-    _EDITOR_OPEN.pop(vst_id, None)
+    _clear_plugin_state(vst_id)
     return {"ok": True}, b""
 
 
@@ -457,6 +474,7 @@ def _cmd_open_editor_blocking(header: dict, payload: bytes):
 
     _log(f"[thread JUCE] abrindo editor de '{vst_id}' (janela nativa do plugin)...")
 
+    _EDITOR_OPEN[vst_id] = True
     live = LiveSession(vst_id, loaded)
     live.start()
     _LIVE_SESSIONS[vst_id] = live
@@ -467,8 +485,7 @@ def _cmd_open_editor_blocking(header: dict, payload: bytes):
     except Exception as e:
         _log(f"[thread JUCE] ERRO no editor de '{vst_id}': {e}\n{traceback.format_exc()}")
     finally:
-        live.stop()
-        _LIVE_SESSIONS.pop(vst_id, None)
+        _stop_live_session(vst_id)
         _EDITOR_OPEN[vst_id] = False
 
     return {"ok": True}, b""
@@ -665,12 +682,8 @@ def main() -> None:
         conn.close()
         listener.close()
         _juce_queue.put(None)  # sentinela pra thread JUCE encerrar
-        for loaded in _LOADED.values():
-            try:
-                loaded.engine = None
-                loaded.plugin = None
-            except Exception:
-                pass
+        for vst_id in list(_LOADED.keys()):
+            _clear_plugin_state(vst_id)
         _LOADED.clear()
         _log("worker encerrado, recursos liberados")
 
