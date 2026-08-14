@@ -22,3 +22,49 @@
 [2026-08-14T13:14:47] socket bind+listen OK na porta 54653
 [2026-08-14T13:14:47] handshake enviado, esperando conexao (accept)...
 [2026-08-14T13:14:47] conexao aceita de ('127.0.0.1', 54654)
+[2026-08-14T13:16:48] ============================================================
+[2026-08-14T13:16:48] worker.py iniciando (import de protocol.py OK)
+[2026-08-14T13:16:48] numpy OK, versao 2.5.1
+[2026-08-14T13:16:48] dawdreamer OK, tem RenderEngine: True
+[2026-08-14T13:16:48] AVISO: sounddevice indisponível (ModuleNotFoundError: No module named 'sounddevice') -- motor ao vivo desativado, resto OK
+[2026-08-14T13:16:48] main() iniciou
+[2026-08-14T13:16:48] args parseados: host=127.0.0.1 port=0
+[2026-08-14T13:16:48] thread JUCE dedicada iniciada -- toda interação com dawdreamer passa por aqui
+[2026-08-14T13:16:48] socket bind+listen OK na porta 62349
+[2026-08-14T13:16:48] handshake enviado, esperando conexao (accept)...
+[2026-08-14T13:16:48] conexao aceita de ('127.0.0.1', 62350)
+[2026-08-14T13:17:01] ============================================================
+[2026-08-14T13:17:01] worker.py iniciando (import de protocol.py OK)
+[2026-08-14T13:17:01] numpy OK, versao 2.5.1
+[2026-08-14T13:17:01] dawdreamer OK, tem RenderEngine: True
+[2026-08-14T13:17:01] AVISO: sounddevice indisponível (ModuleNotFoundError: No module named 'sounddevice') -- motor ao vivo desativado, resto OK
+[2026-08-14T13:17:01] main() iniciou
+[2026-08-14T13:17:01] args parseados: host=127.0.0.1 port=0
+[2026-08-14T13:17:01] thread JUCE dedicada iniciada -- toda interação com dawdreamer passa por aqui
+[2026-08-14T13:17:01] socket bind+listen OK na porta 62355
+[2026-08-14T13:17:01] handshake enviado, esperando conexao (accept)...
+[2026-08-14T13:17:01] conexao aceita de ('127.0.0.1', 62356)
+[2026-08-14T13:17:11] ============================================================
+[2026-08-14T13:17:11] worker.py iniciando (import de protocol.py OK)
+[2026-08-14T13:17:11] numpy OK, versao 2.5.1
+[2026-08-14T13:17:11] dawdreamer OK, tem RenderEngine: True
+[2026-08-14T13:17:11] AVISO: sounddevice indisponível (ModuleNotFoundError: No module named 'sounddevice') -- motor ao vivo desativado, resto OK
+[2026-08-14T13:17:11] main() iniciou
+[2026-08-14T13:17:11] args parseados: host=127.0.0.1 port=0
+[2026-08-14T13:17:11] thread JUCE dedicada iniciada -- toda interação com dawdreamer passa por aqui
+[2026-08-14T13:17:11] socket bind+listen OK na porta 62357
+[2026-08-14T13:17:11] handshake enviado, esperando conexao (accept)...
+[2026-08-14T13:17:11] conexao aceita de ('127.0.0.1', 62358)
+[2026-08-14T13:17:13] [thread JUCE] abrindo editor de 'Serum2' (janela nativa do plugin)...
+[2026-08-14T13:17:13] [live:Serum2] sounddevice indisponível, motor ao vivo não iniciado
+[2026-08-14T13:17:17] ============================================================
+[2026-08-14T13:17:17] worker.py iniciando (import de protocol.py OK)
+[2026-08-14T13:17:17] numpy OK, versao 2.5.1
+[2026-08-14T13:17:17] dawdreamer OK, tem RenderEngine: True
+[2026-08-14T13:17:17] AVISO: sounddevice indisponível (ModuleNotFoundError: No module named 'sounddevice') -- motor ao vivo desativado, resto OK
+[2026-08-14T13:17:17] main() iniciou
+[2026-08-14T13:17:17] args parseados: host=127.0.0.1 port=0
+[2026-08-14T13:17:17] thread JUCE dedicada iniciada -- toda interação com dawdreamer passa por aqui
+[2026-08-14T13:17:17] socket bind+listen OK na porta 62361
+[2026-08-14T13:17:17] handshake enviado, esperando conexao (accept)...
+[2026-08-14T13:17:17] conexao aceita de ('127.0.0.1', 62362)
