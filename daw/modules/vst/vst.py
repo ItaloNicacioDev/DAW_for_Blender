@@ -12,6 +12,7 @@ Processamento real: delegado a DawdreamerIPCBridge (ipc_engine.py)
 """
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -121,6 +122,15 @@ class VST:
         # None enquanto não carregado. Ver modules/vst/engine.py.
         self.bridge = None
 
+        # Estado NATIVO do plugin (bytes do dawdreamer via save_state()/
+        # load_state()), além dos parâmetros normalizados em `parameters`.
+        # Captura wavetable carregada, sample referenciado, modo interno
+        # e qualquer outra coisa que o plugin considere parte do seu
+        # estado mas que não apareça na lista de parâmetros automatizáveis.
+        # None se nunca foi capturado ou se o plugin/dawdreamer não
+        # suporta save_state() (builds antigos do dawdreamer).
+        self.native_state: Optional[bytes] = None
+
     # ------------------------------------------------------------------
     # Ciclo de vida (carregamento real via dawdreamer)
     # ------------------------------------------------------------------
@@ -188,23 +198,89 @@ class VST:
         Processa um buffer de áudio (numpy array estéreo) através deste VST,
         desde que seja um efeito e esteja carregado. Aplica bypass e os
         valores atuais de `self.parameters` antes de processar.
+
+        Se houver pontos de automação registrados (`self.automation`), a
+        curva é resolvida em um "schedule" e enviada ao worker, que
+        processa em pedaços curtos reaplicando os parâmetros -- em vez
+        de um valor constante durante todo o buffer.
         """
         if self.bridge is None or not self.loaded:
             raise RuntimeError(f"VST '{self.name}' não está carregado")
         if self.bypass:
             return audio
         self._push_parameters_to_bridge()
+        if self.has_automation():
+            n_samples = len(audio[0]) if len(audio) and hasattr(audio[0], "__len__") else len(audio)
+            duration = n_samples / float(getattr(self.bridge, "sample_rate", 44100))
+            schedule = self._build_automation_schedule(duration)
+            return self.bridge.process_effect(audio, automation=schedule)
         return self.bridge.process_effect(audio)
 
     def render_instrument(self, midi_notes, duration: float):
         """
         Renderiza este VST instrumento a partir de uma lista de notas MIDI:
         [(pitch, start_seconds, duration_seconds, velocity), ...]
+
+        Se houver pontos de automação registrados (`self.automation`), a
+        curva é resolvida e aplicada de verdade durante o bounce (ver
+        `_build_automation_schedule`) em vez de usar só o valor
+        constante de `self.parameters` do início ao fim.
         """
         if self.bridge is None or not self.loaded:
             raise RuntimeError(f"VST '{self.name}' não está carregado")
         self._push_parameters_to_bridge()
+        if self.has_automation():
+            schedule = self._build_automation_schedule(duration)
+            return self.bridge.render_instrument(midi_notes, duration, automation=schedule)
         return self.bridge.render_instrument(midi_notes, duration)
+
+    # ------------------------------------------------------------------
+    # Automação real durante o bounce
+    # ------------------------------------------------------------------
+
+    # Resolução da automação aplicada durante o bounce offline: a cada
+    # quantos segundos o valor de cada parâmetro automatizado é
+    # reamostrado e reenviado ao plugin. 50ms = 20 atualizações/segundo,
+    # suficiente para fades e curvas de automação normais de mixagem
+    # (não é uso performático nota-a-nota tipo um LFO de áudio-rate).
+    AUTOMATION_HOP_SECONDS = 0.05
+
+    def has_automation(self) -> bool:
+        """True se pelo menos um parâmetro tem pontos de automação."""
+        return any(points for points in self.automation.values())
+
+    def _build_automation_schedule(self, duration: float, hop: Optional[float] = None) -> List[List[Any]]:
+        """
+        Resolve `self.automation` em uma lista ordenada de pontos
+        `[tempo_em_segundos, {param_id_str: valor_normalizado}]`, prontos
+        pra enviar ao worker via IPC (ver DawdreamerIPCBridge.process_effect
+        / render_instrument em ipc_engine.py).
+
+        Só inclui parâmetros que de fato têm pontos de automação -- os
+        demais continuam com o valor constante já empurrado via
+        `_push_parameters_to_bridge()` antes do bounce.
+        """
+        if hop is None:
+            hop = self.AUTOMATION_HOP_SECONDS
+        automated_ids = [pid for pid, points in self.automation.items() if points]
+        if not automated_ids or duration <= 0:
+            return []
+
+        schedule: List[List[Any]] = []
+        t = 0.0
+        while t < duration:
+            schedule.append([
+                round(t, 6),
+                {str(pid): self.get_automation_value(pid, t) for pid in automated_ids},
+            ])
+            t += hop
+        # Garante um ponto final exatamente na duração, pra não deixar o
+        # último pedaço com o valor de um instante anterior ao fim.
+        schedule.append([
+            round(duration, 6),
+            {str(pid): self.get_automation_value(pid, duration) for pid in automated_ids},
+        ])
+        return schedule
 
     def _push_parameters_to_bridge(self) -> None:
         if self.bridge is None:
@@ -313,6 +389,43 @@ class VST:
 
         return float(points[-1].value)
 
+    # ------------------------------------------------------------------
+    # Estado nativo do plugin (chunk/bank real, via dawdreamer)
+    # ------------------------------------------------------------------
+    def capture_native_state(self) -> bool:
+        """
+        Captura o estado NATIVO atual do plugin (formato do dawdreamer)
+        e guarda em `self.native_state`. Precisa estar carregado. Retorna
+        False (sem levantar exceção) se não houver bridge, se o plugin
+        não estiver carregado, ou se o dawdreamer/plugin não suportar
+        save_state() -- nesse caso `self.native_state` permanece como
+        estava (só os parâmetros normalizados continuam disponíveis).
+        """
+        if self.bridge is None or not self.loaded:
+            return False
+        try:
+            data = self.bridge.save_state()
+        except Exception:
+            return False
+        if not data:
+            return False
+        self.native_state = data
+        return True
+
+    def restore_native_state(self) -> bool:
+        """Aplica `self.native_state` (se houver) ao plugin real carregado.
+        Chamar depois de `load()` ter sucesso. Retorna False se não
+        houver estado nativo salvo ou se a aplicação falhar."""
+        if self.bridge is None or not self.loaded or not self.native_state:
+            return False
+        try:
+            ok = self.bridge.load_state(self.native_state)
+        except Exception:
+            return False
+        if ok:
+            self._refresh_parameters_from_bridge()
+        return ok
+
     def save_program(self, name: str) -> None:
         """Salva snapshot do estado atual como programa"""
         program = VSTProgramState(
@@ -347,6 +460,13 @@ class VST:
                 for name, program in self.programs.items()
             },
             "current_program": self.current_program,
+            # Estado nativo do plugin (dawdreamer save_state()), em
+            # base64 porque é binário e este dict vira JSON. None se
+            # nunca foi capturado ou o dawdreamer/plugin não suporta.
+            "native_state": (
+                base64.b64encode(self.native_state).decode("ascii")
+                if self.native_state else None
+            ),
         }
 
     @classmethod
@@ -369,6 +489,12 @@ class VST:
             for name, prog in data.get("programs", {}).items()
         }
         vst.current_program = data.get("current_program", "default")
+        native_state_b64 = data.get("native_state")
+        if native_state_b64:
+            try:
+                vst.native_state = base64.b64decode(native_state_b64)
+            except Exception:
+                vst.native_state = None
         return vst
 
     def __repr__(self) -> str:
