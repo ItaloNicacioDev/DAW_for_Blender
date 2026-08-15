@@ -13,6 +13,7 @@ Arquivos JSON:
 """
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -91,10 +92,25 @@ class VSTProgramPresetManager:
 
         Returns:
             True se salvo com sucesso
+
+        Além dos parâmetros normalizados, tenta capturar o estado NATIVO
+        do plugin (vst.bridge.save_state(), via dawdreamer) e salvar
+        junto em base64 -- assim presets de synths como Serum/Vital, que
+        guardam boa parte do som fora da lista de parâmetros
+        automatizáveis (wavetable carregada, modo interno, etc.), voltam
+        exatamente como estavam ao recarregar o preset. Se o plugin não
+        estiver carregado ou o dawdreamer não suportar save_state()
+        nessa versão, o preset ainda é salvo normalmente, só sem o
+        estado nativo (comportamento anterior).
         """
         try:
             preset_path = self.get_preset_path(vst.name, vendor, preset_name)
             preset_path.parent.mkdir(parents=True, exist_ok=True)
+
+            native_state_b64 = None
+            if vst.bridge is not None and vst.loaded:
+                if vst.capture_native_state():
+                    native_state_b64 = base64.b64encode(vst.native_state).decode("ascii")
 
             preset_data = {
                 "name": preset_name,
@@ -103,6 +119,7 @@ class VSTProgramPresetManager:
                 "vendor": vendor,
                 "description": description,
                 "parameters": vst.parameters,
+                "native_state": native_state_b64,
                 "timestamp": 0,
             }
 
@@ -131,6 +148,11 @@ class VSTProgramPresetManager:
 
         Returns:
             True se carregado com sucesso
+
+        Se o preset tiver estado nativo salvo (ver save_preset) e o VST
+        já estiver carregado, o estado nativo é aplicado de verdade ao
+        plugin (vst.bridge.load_state()), além dos parâmetros
+        normalizados -- restaurando também o que não é automatizável.
         """
         try:
             preset_path = self.get_preset_path(vst.name, vendor, preset_name)
@@ -144,6 +166,19 @@ class VSTProgramPresetManager:
 
             # Restaurar parâmetros
             vst.parameters = preset_data.get("parameters", {})
+
+            # Restaurar estado nativo, se houver e o plugin estiver
+            # carregado. Guarda em vst.native_state de qualquer forma
+            # (mesmo sem bridge ainda) para ficar disponível caso o
+            # plugin seja carregado depois.
+            native_state_b64 = preset_data.get("native_state")
+            if native_state_b64:
+                try:
+                    vst.native_state = base64.b64decode(native_state_b64)
+                except Exception:
+                    vst.native_state = None
+                if vst.bridge is not None and vst.loaded:
+                    vst.restore_native_state()
 
             return True
 
