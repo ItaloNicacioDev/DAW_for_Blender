@@ -47,9 +47,11 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import os
 import queue
 import socket
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -403,6 +405,16 @@ def _cmd_get_parameter(header: dict, payload: bytes):
     return {"ok": True, "value": value}, b""
 
 
+def _apply_schedule_point(plugin, point: Dict[str, float]) -> None:
+    """Aplica um ponto de automação (dict {param_id_str: valor_normalizado})
+    ao plugin, chamando set_parameter() para cada parâmetro presente."""
+    for pid_str, value in point.items():
+        try:
+            plugin.set_parameter(int(pid_str), float(value))
+        except Exception:
+            pass
+
+
 def _cmd_process_effect(header: dict, payload: bytes):
     vst_id = header["vst_id"]
     loaded = _LOADED.get(vst_id)
@@ -412,17 +424,61 @@ def _cmd_process_effect(header: dict, payload: bytes):
     channels = int(header["channels"])
     n_samples = int(header["n_samples"])
     arr = np.frombuffer(payload, dtype=np.float32).reshape(channels, n_samples).copy()
+    schedule = header.get("automation") or []
 
-    duration = max(n_samples / float(loaded.sample_rate), 1.0 / loaded.sample_rate)
-    playback = loaded.engine.make_playback_processor(f"{vst_id}_in", arr)
-    loaded.engine.load_graph([
-        (playback, []),
-        (loaded.plugin, [f"{vst_id}_in"]),
-    ])
-    loaded.engine.render(duration)
-    out = np.asarray(loaded.plugin.get_audio(), dtype=np.float32)[:, :n_samples]
+    if not schedule:
+        duration = max(n_samples / float(loaded.sample_rate), 1.0 / loaded.sample_rate)
+        playback = loaded.engine.make_playback_processor(f"{vst_id}_in", arr)
+        loaded.engine.load_graph([
+            (playback, []),
+            (loaded.plugin, [f"{vst_id}_in"]),
+        ])
+        loaded.engine.render(duration)
+        out = np.asarray(loaded.plugin.get_audio(), dtype=np.float32)[:, :n_samples]
+        out = np.ascontiguousarray(out)
+        resp = {"ok": True, "channels": out.shape[0], "n_samples": out.shape[1]}
+        return resp, out.tobytes()
+
+    # Com automação: processa em pedaços curtos (definidos por
+    # `schedule`, montado por VST._build_automation_schedule() no lado
+    # do addon), reaplicando os parâmetros automatizados entre um
+    # pedaço e outro -- aproxima automação contínua sem exigir que o
+    # dawdreamer exponha automação por-sample nativamente.
+    #
+    # LIMITAÇÃO CONHECIDA: cada pedaço recarrega o grafo com um novo
+    # playback processor (a API do dawdreamer não permite "continuar"
+    # um processor de playback com áudio novo), então efeitos com cauda
+    # longa (reverb, delay) podem perder parte da cauda na fronteira
+    # entre pedaços. Para a maioria dos efeitos (EQ, compressor, drive)
+    # isso é imperceptível.
+    sr = float(loaded.sample_rate)
+    chunks_out = []
+    for i in range(len(schedule)):
+        t0, point = schedule[i]
+        t1 = schedule[i + 1][0] if i + 1 < len(schedule) else n_samples / sr
+        s0 = max(0, min(int(round(t0 * sr)), n_samples))
+        s1 = max(s0, min(int(round(t1 * sr)), n_samples))
+        if s1 <= s0:
+            continue
+        _apply_schedule_point(loaded.plugin, point)
+        segment = np.ascontiguousarray(arr[:, s0:s1])
+        seg_duration = max(segment.shape[1] / sr, 1.0 / sr)
+        playback = loaded.engine.make_playback_processor(f"{vst_id}_in", segment)
+        loaded.engine.load_graph([
+            (playback, []),
+            (loaded.plugin, [f"{vst_id}_in"]),
+        ])
+        loaded.engine.render(seg_duration)
+        seg_out = np.asarray(loaded.plugin.get_audio(), dtype=np.float32)[:, :segment.shape[1]]
+        chunks_out.append(np.ascontiguousarray(seg_out))
+
+    out = (
+        np.concatenate(chunks_out, axis=1)
+        if chunks_out else np.zeros((channels, 0), dtype=np.float32)
+    )
+    if out.shape[1] > n_samples:
+        out = out[:, :n_samples]
     out = np.ascontiguousarray(out)
-
     resp = {"ok": True, "channels": out.shape[0], "n_samples": out.shape[1]}
     return resp, out.tobytes()
 
@@ -435,6 +491,7 @@ def _cmd_render_instrument(header: dict, payload: bytes):
 
     midi_notes = header.get("midi_notes", [])
     duration = float(header["duration"])
+    schedule = header.get("automation") or []
 
     clear_midi = getattr(loaded.plugin, "clear_midi", None)
     if callable(clear_midi):
@@ -447,12 +504,120 @@ def _cmd_render_instrument(header: dict, payload: bytes):
         loaded.plugin.add_midi_note(int(pitch), int(velocity), float(start), float(note_duration))
 
     loaded.engine.load_graph([(loaded.plugin, [])])
-    loaded.engine.render(duration)
-    out = np.asarray(loaded.plugin.get_audio(), dtype=np.float32)
-    out = np.ascontiguousarray(out)
 
+    if not schedule:
+        loaded.engine.render(duration)
+        out = np.asarray(loaded.plugin.get_audio(), dtype=np.float32)
+        out = np.ascontiguousarray(out)
+        resp = {"ok": True, "channels": out.shape[0], "n_samples": out.shape[1]}
+        return resp, out.tobytes()
+
+    # Com automação: renderiza em pedaços curtos (montados por
+    # VST._build_automation_schedule() no addon), reaplicando os
+    # parâmetros automatizados entre um pedaço e outro. Diferente do
+    # process_effect, aqui NÃO é preciso recarregar o grafo a cada
+    # pedaço -- o mesmo engine.render(dt) chamado repetidas vezes avança
+    # o relógio interno continuamente (o mesmo mecanismo já usado pelo
+    # motor de áudio ao vivo em LiveSession._render_loop), então o
+    # estado interno do plugin (envelopes, cauda de reverb, LFOs) é
+    # preservado normalmente entre os pedaços.
+    chunks_out = []
+    for i in range(len(schedule)):
+        t0, point = schedule[i]
+        t1 = schedule[i + 1][0] if i + 1 < len(schedule) else duration
+        chunk_dur = t1 - t0
+        if chunk_dur <= 0:
+            continue
+        _apply_schedule_point(loaded.plugin, point)
+        loaded.engine.render(chunk_dur)
+        block = np.asarray(loaded.plugin.get_audio(), dtype=np.float32)
+        chunks_out.append(np.ascontiguousarray(block))
+
+    out = (
+        np.concatenate(chunks_out, axis=1)
+        if chunks_out else np.zeros((2, 0), dtype=np.float32)
+    )
+    out = np.ascontiguousarray(out)
     resp = {"ok": True, "channels": out.shape[0], "n_samples": out.shape[1]}
     return resp, out.tobytes()
+
+
+def _cmd_save_state(header: dict, payload: bytes):
+    """
+    Salva o estado NATIVO do plugin (formato próprio do dawdreamer, via
+    PluginProcessor.save_state()) -- diferente dos parâmetros
+    normalizados, isso captura tudo que o plugin considera parte do seu
+    estado (wavetable carregada, sample referenciado, modo interno,
+    parâmetros não-automatizáveis, etc.), do mesmo jeito que salvar o
+    estado de um plugin em qualquer host de VST de verdade.
+
+    dawdreamer só expõe save_state(caminho_de_arquivo) -- não existe
+    get_state() que devolva bytes direto -- então gravamos num arquivo
+    temporário, lemos os bytes de volta e apagamos o arquivo. Os bytes
+    voltam no payload da resposta; quem chamou (ipc_engine.py) decide
+    onde guardar (ex.: base64 dentro do JSON do projeto/preset).
+    """
+    vst_id = header["vst_id"]
+    loaded = _LOADED.get(vst_id)
+    if loaded is None:
+        return {"ok": False, "error": f"VST '{vst_id}' nao carregado"}, b""
+
+    save_state_fn = getattr(loaded.plugin, "save_state", None)
+    if not callable(save_state_fn):
+        return {
+            "ok": False,
+            "error": "Este plugin/versão do dawdreamer não suporta save_state() "
+                     "(estado nativo indisponível -- só os parâmetros normalizados "
+                     "serão salvos)",
+        }, b""
+
+    tmp_path: Optional[str] = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix=f"daw_state_{vst_id}_", suffix=".bin")
+        os.close(fd)
+        save_state_fn(tmp_path)
+        with open(tmp_path, "rb") as f:
+            data = f.read()
+        return {"ok": True, "size": len(data)}, data
+    except Exception as e:
+        return {"ok": False, "error": f"falha ao salvar estado nativo: {e}"}, b""
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _cmd_load_state(header: dict, payload: bytes):
+    """Restaura o estado NATIVO do plugin salvo por _cmd_save_state()."""
+    vst_id = header["vst_id"]
+    loaded = _LOADED.get(vst_id)
+    if loaded is None:
+        return {"ok": False, "error": f"VST '{vst_id}' nao carregado"}, b""
+
+    load_state_fn = getattr(loaded.plugin, "load_state", None)
+    if not callable(load_state_fn):
+        return {"ok": False, "error": "Este plugin/versão do dawdreamer não suporta load_state()"}, b""
+
+    if not payload:
+        return {"ok": False, "error": "Nenhum dado de estado recebido"}, b""
+
+    tmp_path: Optional[str] = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix=f"daw_state_{vst_id}_", suffix=".bin")
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        load_state_fn(tmp_path)
+        return {"ok": True}, b""
+    except Exception as e:
+        return {"ok": False, "error": f"falha ao restaurar estado nativo: {e}"}, b""
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def _cmd_open_editor_blocking(header: dict, payload: bytes):
@@ -505,6 +670,8 @@ _HANDLERS = {
     "get_parameter": _cmd_get_parameter,
     "process_effect": _cmd_process_effect,
     "render_instrument": _cmd_render_instrument,
+    "save_state": _cmd_save_state,
+    "load_state": _cmd_load_state,
     "_open_editor_blocking": _cmd_open_editor_blocking,  # só chamado internamente pela thread JUCE
     "is_editor_open": _cmd_is_editor_open,
     # "trigger_live_note" NÃO está aqui de propósito -- é tratado direto
