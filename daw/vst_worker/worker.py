@@ -289,7 +289,13 @@ _LIVE_SESSIONS: Dict[str, LiveSession] = {}
 # ═══════════════════════════════════════════════════════════════
 
 class LoadedPlugin:
-    __slots__ = ("engine", "plugin", "vst_type", "sample_rate", "block_size")
+    __slots__ = (
+        "engine", "plugin", "vst_type", "sample_rate", "block_size",
+        # Estado do "fluxo contínuo" usado pelo PlaybackSupervisor
+        # (modules/vst/realtime/prefetch.py) -- None enquanto nenhum
+        # stream_reset foi chamado ainda para este VST.
+        "stream_origin_time", "stream_elapsed",
+    )
 
     def __init__(self, engine, plugin, vst_type: str, sample_rate: int, block_size: int):
         self.engine = engine
@@ -297,6 +303,8 @@ class LoadedPlugin:
         self.vst_type = vst_type
         self.sample_rate = sample_rate
         self.block_size = block_size
+        self.stream_origin_time: Optional[float] = None
+        self.stream_elapsed: float = 0.0
 
 
 _LOADED: Dict[str, LoadedPlugin] = {}
@@ -620,6 +628,97 @@ def _cmd_load_state(header: dict, payload: bytes):
                 pass
 
 
+def _cmd_stream_reset(header: dict, payload: bytes):
+    """
+    Reinicia o "fluxo contínuo" de renderização deste VST: reconecta o
+    grafo do zero e reagenda todas as notas MIDI do clipe inteiro (o
+    dawdreamer aceita notas futuras adicionadas de antemão -- elas só
+    disparam quando o `engine.render()` acumulado alcançar o instante
+    delas).
+
+    Chamado pelo PlaybackSupervisor sempre que:
+      - o play começa (posição 0 ou onde o playhead estiver);
+      - o usuário dá seek/scrub pra uma posição diferente (não tem como
+        "pular pra frente" sem re-renderizar, então o supervisor decide
+        se vale a pena rodar rápido em background até lá, descartando o
+        áudio, ou simplesmente aceitar o silêncio até o buffer alcançar);
+      - os parâmetros mudaram de um jeito que afeta o passado da nota
+        atual (raro -- normalmente `invalidate_from` no RingBuffer já
+        resolve sem precisar de stream_reset).
+
+    Depois de um stream_reset, o "relógio interno" do engine deste VST
+    passa a valer 0.0 = `header["origin_time"]` (o instante absoluto da
+    timeline que corresponde ao começo do fluxo). stream_render_chunk()
+    só sabe render()'ar pra frente a partir daí.
+    """
+    vst_id = header["vst_id"]
+    loaded = _LOADED.get(vst_id)
+    if loaded is None:
+        return {"ok": False, "error": f"VST '{vst_id}' nao carregado"}, b""
+
+    midi_notes = header.get("midi_notes", [])
+    origin_time = float(header.get("origin_time", 0.0))
+
+    clear_midi = getattr(loaded.plugin, "clear_midi", None)
+    if callable(clear_midi):
+        try:
+            clear_midi()
+        except Exception:
+            pass
+
+    for pitch, start, note_duration, velocity in midi_notes:
+        loaded.plugin.add_midi_note(int(pitch), int(velocity), float(start), float(note_duration))
+
+    loaded.engine.load_graph([(loaded.plugin, [])])
+    loaded.stream_origin_time = origin_time
+    loaded.stream_elapsed = 0.0
+
+    return {"ok": True}, b""
+
+
+def _cmd_stream_render_chunk(header: dict, payload: bytes):
+    """
+    Renderiza o PRÓXIMO pedaço do fluxo contínuo iniciado por
+    stream_reset(), avançando o relógio interno do engine em
+    `chunk_seconds`. Precisa ser chamado em sequência, sem pular tempo
+    -- é exatamente o padrão "produtor sempre andando pra frente" do
+    PrefetchThread (ver modules/vst/realtime/prefetch.py).
+
+    `automation_point`, se fornecido, é um dict {param_id_str: valor}
+    aplicado ANTES deste pedaço ser renderizado (mesmo formato de um
+    ponto de VST._build_automation_schedule()).
+    """
+    vst_id = header["vst_id"]
+    loaded = _LOADED.get(vst_id)
+    if loaded is None:
+        return {"ok": False, "error": f"VST '{vst_id}' nao carregado"}, b""
+
+    if loaded.stream_origin_time is None:
+        return {
+            "ok": False,
+            "error": "stream não inicializado -- chame stream_reset antes de stream_render_chunk",
+        }, b""
+
+    chunk_seconds = float(header["chunk_seconds"])
+    automation_point = header.get("automation_point") or {}
+    if automation_point:
+        _apply_schedule_point(loaded.plugin, automation_point)
+
+    loaded.engine.render(chunk_seconds)
+    loaded.stream_elapsed += chunk_seconds
+
+    out = np.asarray(loaded.plugin.get_audio(), dtype=np.float32)
+    out = np.ascontiguousarray(out)
+
+    resp = {
+        "ok": True,
+        "channels": out.shape[0],
+        "n_samples": out.shape[1],
+        "stream_elapsed": loaded.stream_elapsed,
+    }
+    return resp, out.tobytes()
+
+
 def _cmd_open_editor_blocking(header: dict, payload: bytes):
     """
     Executa de verdade a abertura da GUI -- SEMPRE na thread JUCE
@@ -672,6 +771,8 @@ _HANDLERS = {
     "render_instrument": _cmd_render_instrument,
     "save_state": _cmd_save_state,
     "load_state": _cmd_load_state,
+    "stream_reset": _cmd_stream_reset,
+    "stream_render_chunk": _cmd_stream_render_chunk,
     "_open_editor_blocking": _cmd_open_editor_blocking,  # só chamado internamente pela thread JUCE
     "is_editor_open": _cmd_is_editor_open,
     # "trigger_live_note" NÃO está aqui de propósito -- é tratado direto
