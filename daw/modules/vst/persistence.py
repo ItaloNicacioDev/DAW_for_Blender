@@ -17,11 +17,14 @@ Por que este arquivo existe:
         - Rack de instrumentos: mesmos campos.
         - Configurações globais (diretórios, auto-bounce, limite de display).
 
-    O que NÃO é persistido:
-        - O estado interno do plugin VST (chunk/bank do plugin — exigiria
-          a API de estado nativo do VST, disponível só em hosts VST
-          completos). Os parâmetros normalizados (0–1) são suficientes
-          para reconstruir o som na maioria dos plugins.
+    O que é persistido (desde a integração com dawdreamer save_state()):
+        - Também o estado NATIVO do plugin (chunk/bank real, capturado
+          via vst.bridge.save_state()), em base64 dentro de cada item.
+          Cobre o que fica fora da lista de parâmetros automatizáveis
+          (wavetable carregada, sample referenciado, modo interno, etc.).
+          Se o plugin/dawdreamer não suportar save_state() (build antigo),
+          esse campo fica None e só os parâmetros normalizados (0–1) são
+          usados para reconstruir o som, como antes.
 
 Integração com project/save.py:
     No dict retornado por _serialize_scene() (ou equivalente), adicione:
@@ -33,11 +36,13 @@ Integração com project/load.py:
 """
 from __future__ import annotations
 
+import base64
 from typing import Any, Dict, List
 
 import bpy
 
 from .utils import (
+    get_live_vst,
     get_or_create_chain,
     get_or_create_live_vst,
     sync_rna_from_pure,
@@ -49,7 +54,19 @@ from .utils import (
 # ═══════════════════════════════════════════════════════════════
 
 def _serialize_vst_item(item) -> Dict[str, Any]:
-    """Serializa um DawVstProperty para dict JSON-safe."""
+    """Serializa um DawVstProperty para dict JSON-safe.
+
+    Se o VST puro correspondente estiver carregado, também tenta
+    capturar o estado nativo do plugin (vst.bridge.save_state()) e
+    embutir em base64 -- ver cabeçalho do módulo. Silenciosamente
+    ausente (None) se o plugin não estiver carregado ou não suportar.
+    """
+    native_state_b64 = None
+    live_vst = get_live_vst(item.vst_id)
+    if live_vst is not None and live_vst.bridge is not None and live_vst.loaded:
+        if live_vst.capture_native_state():
+            native_state_b64 = base64.b64encode(live_vst.native_state).decode("ascii")
+
     return {
         "vst_path": item.vst_path,
         "vst_name": item.vst_name,
@@ -61,6 +78,7 @@ def _serialize_vst_item(item) -> Dict[str, Any]:
             str(p.param_id): p.param_value
             for p in item.parameters
         },
+        "native_state": native_state_b64,
     }
 
 
@@ -154,6 +172,19 @@ def _restore_vst_item(item_rna, item_data: Dict[str, Any], context) -> bool:
                 vst.bridge.set_parameter(int(param_id_str), float(value))
             except Exception:
                 pass
+
+    # Estado nativo do plugin (ver _serialize_vst_item): restaura por
+    # cima dos parâmetros normalizados, se disponível e o plugin
+    # carregou. Isso traz de volta o que os parâmetros sozinhos não
+    # cobrem (wavetable, sample, modo interno, etc.).
+    native_state_b64 = item_data.get("native_state")
+    if native_state_b64:
+        try:
+            vst.native_state = base64.b64decode(native_state_b64)
+        except Exception:
+            vst.native_state = None
+        if ok and vst.native_state:
+            vst.restore_native_state()
 
     sync_rna_from_pure(item_rna, vst)
     return ok
