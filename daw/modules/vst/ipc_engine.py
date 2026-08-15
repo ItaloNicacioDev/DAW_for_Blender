@@ -193,8 +193,14 @@ class _WorkerManager:
         "list_parameters": 15.0,
         "set_parameter": 5.0,
         "get_parameter": 5.0,
-        "process_effect": 20.0,
-        "render_instrument": 60.0,
+        # Bounces com automação (ver VST._build_automation_schedule) fazem
+        # várias chamadas engine.render() em sequência do lado do worker
+        # em vez de uma só -- folga extra pra não estourar em cadeias
+        # longas com muitos pontos de automação.
+        "process_effect": 40.0,
+        "render_instrument": 90.0,
+        "save_state": 15.0,
+        "load_state": 15.0,
         "open_editor": 10.0,       # fire-and-forget, deveria responder quase na hora
         "is_editor_open": 5.0,
         "trigger_live_note": 5.0,
@@ -357,7 +363,14 @@ class DawdreamerIPCBridge:
         header, _ = _manager.call("get_parameter", vst_id=self.plugin_name, param_id=int(param_id))
         return float(header.get("value", 0.0))
 
-    def process_effect(self, audio):
+    def process_effect(self, audio, automation: Optional[list] = None):
+        """
+        `automation`, se fornecido, é uma lista de pontos
+        `[tempo_em_segundos, {param_id_str: valor_normalizado}]` já
+        resolvidos (ver VST._build_automation_schedule() em vst.py). O
+        worker processa o áudio em pedaços entre um ponto e o próximo,
+        reaplicando os parâmetros automatizados a cada pedaço.
+        """
         import numpy as np
 
         if not self._loaded:
@@ -376,12 +389,26 @@ class DawdreamerIPCBridge:
             vst_id=self.plugin_name,
             channels=channels,
             n_samples=n_samples,
+            automation=automation or [],
         )
         out_channels = header["channels"]
         out_samples = header["n_samples"]
         return np.frombuffer(payload, dtype=np.float32).reshape(out_channels, out_samples).copy()
 
-    def render_instrument(self, midi_notes: Sequence[Tuple[int, float, float, int]], duration: float):
+    def render_instrument(
+        self,
+        midi_notes: Sequence[Tuple[int, float, float, int]],
+        duration: float,
+        automation: Optional[list] = None,
+    ):
+        """
+        `automation`: mesmo formato de `process_effect()`. Quando
+        presente, o worker renderiza em pedaços curtos usando chamadas
+        sucessivas de `engine.render()` (que avança o relógio interno
+        continuamente), reaplicando os parâmetros automatizados entre
+        um pedaço e outro -- em vez de um único valor fixo pra toda a
+        duração do bounce.
+        """
         import numpy as np
 
         if not self._loaded:
@@ -393,10 +420,37 @@ class DawdreamerIPCBridge:
             vst_id=self.plugin_name,
             midi_notes=[list(n) for n in midi_notes],
             duration=float(duration),
+            automation=automation or [],
         )
         out_channels = header["channels"]
         out_samples = header["n_samples"]
         return np.frombuffer(payload, dtype=np.float32).reshape(out_channels, out_samples).copy()
+
+    def save_state(self) -> bytes:
+        """
+        Retorna o estado NATIVO do plugin (bytes no formato do
+        dawdreamer, não JSON) -- captura tudo que faz parte do estado
+        real do plugin, além dos parâmetros normalizados. Retorna
+        b"" se não carregado ou se o plugin/dawdreamer não suportar
+        save_state() (ex.: build antigo do dawdreamer).
+        """
+        if not self._loaded:
+            return b""
+        self._ensure_current_generation()
+        header, payload = _manager.call("save_state", vst_id=self.plugin_name)
+        if not header.get("ok", False):
+            return b""
+        return payload
+
+    def load_state(self, data: bytes) -> bool:
+        """Restaura um estado nativo salvo por save_state(). Retorna
+        False silenciosamente se `data` estiver vazio ou o plugin não
+        suportar (ex.: plugin diferente do que gerou o estado)."""
+        if not self._loaded or not data:
+            return False
+        self._ensure_current_generation()
+        header, _ = _manager.call("load_state", payload=data, vst_id=self.plugin_name)
+        return bool(header.get("ok", False))
 
     def open_editor(self) -> bool:
         """
