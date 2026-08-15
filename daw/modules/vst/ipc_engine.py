@@ -201,6 +201,13 @@ class _WorkerManager:
         "render_instrument": 90.0,
         "save_state": 15.0,
         "load_state": 15.0,
+        # Comandos de streaming (playback quase-tempo-real, ver
+        # modules/vst/realtime/): chamados muitas vezes em sequência com
+        # pedaços curtos, então o timeout por chamada pode ser bem menor
+        # que os outros -- se um pedaço de ~0.3s demorar mais que isso
+        # pra processar, algo está muito errado (plugin travado).
+        "stream_reset": 10.0,
+        "stream_render_chunk": 5.0,
         "open_editor": 10.0,       # fire-and-forget, deveria responder quase na hora
         "is_editor_open": 5.0,
         "trigger_live_note": 5.0,
@@ -425,6 +432,52 @@ class DawdreamerIPCBridge:
         out_channels = header["channels"]
         out_samples = header["n_samples"]
         return np.frombuffer(payload, dtype=np.float32).reshape(out_channels, out_samples).copy()
+
+    # ------------------------------------------------------------------
+    # Streaming (playback quase-tempo-real via pré-render adiantado)
+    # Ver modules/vst/realtime/prefetch.py para quem chama isso e como.
+    # ------------------------------------------------------------------
+    def stream_reset(self, midi_notes: Sequence[Tuple[int, float, float, int]], origin_time: float) -> bool:
+        """
+        Reinicia o fluxo contínuo deste VST a partir de `origin_time`
+        (segundos absolutos da timeline). Chame de novo sempre que o
+        playhead der um salto (play do início, seek/scrub) -- chamadas
+        de `stream_render_chunk()` só avançam pra frente a partir daqui.
+        """
+        if not self._loaded:
+            raise RuntimeError("Nenhum plugin carregado")
+        self._ensure_current_generation()
+        header, _ = _manager.call(
+            "stream_reset",
+            vst_id=self.plugin_name,
+            midi_notes=[list(n) for n in midi_notes],
+            origin_time=float(origin_time),
+        )
+        return bool(header.get("ok", False))
+
+    def stream_render_chunk(self, chunk_seconds: float, automation_point: Optional[dict] = None):
+        """
+        Renderiza o próximo pedaço do fluxo contínuo iniciado por
+        `stream_reset()`. Precisa ser chamado em sequência (sem pular
+        tempo) -- é assim que o PrefetchThread mantém o estado interno
+        do plugin (envelopes, cauda de reverb, LFOs) coerente entre um
+        pedaço e o próximo, sem recarregar o grafo a cada chamada.
+        """
+        import numpy as np
+
+        if not self._loaded:
+            raise RuntimeError("Nenhum plugin carregado")
+        self._ensure_current_generation()
+        header, payload = _manager.call(
+            "stream_render_chunk",
+            vst_id=self.plugin_name,
+            chunk_seconds=float(chunk_seconds),
+            automation_point=automation_point or {},
+        )
+        out_channels = header["channels"]
+        out_samples = header["n_samples"]
+        audio = np.frombuffer(payload, dtype=np.float32).reshape(out_channels, out_samples).copy()
+        return audio, header.get("stream_elapsed", 0.0)
 
     def save_state(self) -> bytes:
         """
