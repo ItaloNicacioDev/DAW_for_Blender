@@ -220,12 +220,42 @@ class DAW_Preferences(AddonPreferences):
         # Áudio
         box = layout.box()
         box.label(text="Áudio", icon='SPEAKER')
-        box.prop(self.audio, "output_device", text="Saída")
+        row = box.row(align=True)
+        row.prop(self.audio, "output_device", text="Saída")
+        row.operator("daw.test_output_device", text="", icon='PLAY_SOUND')
         box.prop(self.audio, "input_device",  text="Entrada")
         row = box.row(align=True)
         row.prop(self.audio, "samplerate",  text="Sample Rate")
         row.prop(self.audio, "buffer_size", text="Buffer")
         box.prop(self.audio, "enable_dither")
+
+        # [FIX v3] Diagnóstico de dispositivo/driver: avisa quando não há
+        # sounddevice instalado (lista de dispositivos limitada) ou
+        # quando não há nenhum host API ASIO disponível no sistema --
+        # útil pra interfaces externas (ex.: TEYUN) que só aparecem
+        # corretamente, ou com baixa latência, com um driver ASIO
+        # instalado. Ver modules/recorder/input.py::get_audio_diagnostics().
+        try:
+            from ..recorder.input import get_audio_diagnostics
+            diag = get_audio_diagnostics()
+            if diag["recommendation"]:
+                warn_box = box.box()
+                col = warn_box.column(align=True)
+                col.label(text="Dispositivo não aparece ou latência alta?", icon='ERROR')
+                for line in diag["recommendation"].split("\n"):
+                    line = line.strip()
+                    if line:
+                        col.label(text=line)
+                row_links = warn_box.row(align=True)
+                op1 = row_links.operator("wm.url_open", text="ASIO4ALL", icon='URL')
+                op1.url = "https://asio4all.org"
+                op2 = row_links.operator("wm.url_open", text="FlexASIO", icon='URL')
+                op2.url = "https://github.com/dechamps/FlexASIO"
+            elif diag["has_asio_hostapi"]:
+                asio_names = [h for h in diag["hostapis"] if "ASIO" in h.upper()]
+                box.label(text=f"Driver ASIO detectado: {', '.join(asio_names)}", icon='CHECKMARK')
+        except Exception as e:
+            box.label(text=f"Diagnóstico de áudio indisponível: {e}", icon='ERROR')
 
         # UI
         box2 = layout.box()
