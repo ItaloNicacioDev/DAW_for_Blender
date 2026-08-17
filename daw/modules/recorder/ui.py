@@ -77,9 +77,25 @@ class DAW_PT_recorder_input(Panel):
         layout = self.layout
         settings = context.scene.daw_recorder_settings
 
-        row = layout.row(align=True)
-        row.prop(settings, "input_device", text="")
-        row.operator("daw.recorder_refresh_devices", text="", icon='FILE_REFRESH')
+        # [FIX v3] O dispositivo agora é configurado num único lugar --
+        # Preferências do addon (Editar > Preferências > Add-ons > DAW),
+        # não mais aqui. Isso evita ter dois seletores de dispositivo
+        # (Recorder + Preferências) que listavam a mesma coisa mas podiam
+        # ficar dessincronizados. Aqui só mostramos o valor atual e um
+        # atalho pra ir configurar.
+        try:
+            from ..settings.preferences import get_preferences
+            prefs = get_preferences()
+            row = layout.row(align=True)
+            row.prop(prefs.audio, "input_device", text="")
+            row.operator("daw.recorder_refresh_devices", text="", icon='FILE_REFRESH')
+            layout.operator(
+                "daw.open_audio_preferences",
+                text="Config. de Áudio (Entrada/Saída, ASIO...)",
+                icon='PREFERENCES',
+            )
+        except Exception as e:
+            layout.label(text=f"Preferências indisponíveis: {e}", icon='ERROR')
 
         layout.prop(settings, "input_gain_db")
         layout.prop(
