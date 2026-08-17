@@ -47,7 +47,12 @@ class RecordingSession:
         mgr = get_input_manager()
         if not mgr.stream or not mgr.stream.active:
             sr = int(settings.sample_rate)
-            mgr.start(settings.input_device, sr)
+            # [FIX v3] device_identifier=None -> mgr.start() resolve pra
+            # get_default_input_identifier(), a config global única
+            # (ver modules/recorder/input.py). Antes lia de
+            # settings.input_device, campo que foi removido por ser uma
+            # cópia redundante da mesma configuração.
+            mgr.start(None, sr)
 
         if record_frame_handler not in bpy.app.handlers.frame_change_post:
             bpy.app.handlers.frame_change_post.append(record_frame_handler)
