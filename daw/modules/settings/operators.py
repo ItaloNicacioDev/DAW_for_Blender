@@ -277,6 +277,39 @@ class SETTINGS_OT_ValidateSetting(Operator):
             return {'CANCELLED'}
 
 
+class DAW_OT_open_audio_preferences(Operator):
+    """
+    Abre a janela de Preferências do Blender já na aba Add-ons, pra
+    chegar rápido na configuração de áudio global (Saída/Entrada,
+    Sample Rate, Buffer, recomendação de driver ASIO). Usado pelo
+    painel "Recorder" (SEQUENCE_EDITOR) como atalho, já que a
+    configuração de dispositivo não vive mais lá (ver [FIX v3] em
+    modules/recorder/ui.py) -- fica só aqui, num único lugar.
+
+    Não dá pra abrir a caixa do addon já expandida via API pública do
+    Blender (isso depende de estado interno da UI, não exposto) -- o
+    melhor que dá pra fazer de forma estável entre versões é abrir a
+    aba certa e deixar o usuário clicar pra expandir "Blender DAW"
+    (ele já aparece com a busca pré-filtrada, ver `search_filter`).
+    """
+    bl_idname = "daw.open_audio_preferences"
+    bl_label = "Abrir Configuração de Áudio"
+    bl_description = "Abre as Preferências do Blender na seção de Add-ons > DAW"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        bpy.ops.screen.userpref_show('INVOKE_DEFAULT')
+        try:
+            context.preferences.active_section = 'ADDONS'
+        except Exception:
+            pass  # nome da seção pode variar entre versões -- não é crítico
+        try:
+            context.window_manager.addon_search = "DAW"
+        except Exception:
+            pass  # atributo pode não existir em todas as versões do Blender
+        return {'FINISHED'}
+
+
 classes = [
     SETTINGS_OT_ResetToDefault,
     SETTINGS_OT_SavePreset,
@@ -286,6 +319,7 @@ classes = [
     SETTINGS_OT_RefreshTheme,
     SETTINGS_OT_OpenConfigFolder,
     SETTINGS_OT_ValidateSetting,
+    DAW_OT_open_audio_preferences,
 ]
 
 
