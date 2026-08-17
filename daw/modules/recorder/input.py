@@ -7,12 +7,33 @@ externas). sounddevice é tentado como alternativa para captura de stream em tem
 real, mas a listagem de dispositivos sempre funciona via aud, que já vem instalado
 no Python embutido do Blender.
 
+[FIX v3] Corrige um bug real: o identificador salvo no EnumProperty
+(`input_device`/`output_device`, em modules/settings/preferences.py) é o
+ÍNDICE do dispositivo na lista do sounddevice (ex.: "3"), não o nome --
+mas `InputDeviceManager.start()` comparava `dev['name'] == device_name`,
+que nunca batia com um índice numérico. Resultado: o dispositivo
+selecionado na UI nunca era usado de verdade, sempre caía no default do
+sistema. `resolve_device_index()` resolve isso corretamente.
+
+[FIX v3] Também unifica a seleção de dispositivo: antes existia uma cópia
+redundante de `input_device`/`output_device` em
+`modules/recorder/properties.py` (por projeto/Scene) além da cópia em
+`modules/settings/preferences.py` (global, AddonPreferences) -- as duas
+listavam os MESMOS dispositivos e ficavam fora de sincronia uma da
+outra. Agora só existe uma fonte de verdade: as preferências globais do
+addon. `get_default_input_identifier()`/`get_default_output_identifier()`
+abaixo são o único lugar que o resto do addon deveria consultar.
+
 Estratégia:
-  - Listagem de dispositivos: aud.Device (sempre disponível no Blender)
-  - Captura de stream em tempo real: sounddevice (se instalado)
-  - Fallback: buffer de zeros com aviso claro na UI
+  - Listagem de dispositivos: sounddevice (detalhado, com host API) se
+    disponível; aud como fallback (sempre presente no Blender, porém
+    sem diferenciar entrada/saída nem host API).
+  - Captura de stream em tempo real: sounddevice (se instalado).
+  - Fallback: buffer de zeros com aviso claro na UI.
 """
 from __future__ import annotations
+
+from typing import Optional
 
 import numpy as np
 
@@ -73,20 +94,35 @@ def _list_devices_via_sounddevice():
     """
     Lista dispositivos via sounddevice (requer instalação no Python do Blender).
     Retorna (entrada, saída) — cada um é lista de tuplas (idx_str, nome, desc).
+
+    O idx_str usado como identificador do EnumProperty é o ÍNDICE do
+    dispositivo em `sounddevice.query_devices()` -- é isso que
+    `resolve_device_index()` espera receber de volta.
     """
     try:
         import sounddevice as sd
         devices = sd.query_devices()
+        try:
+            hostapis = sd.query_hostapis()
+        except Exception:
+            hostapis = []
+
         inputs  = []
         outputs = []
         for idx, dev in enumerate(devices):
             name = dev['name']
+            hostapi_name = ""
+            try:
+                hostapi_name = hostapis[dev['hostapi']]['name']
+            except Exception:
+                pass
+            suffix = f" [{hostapi_name}]" if hostapi_name else ""
             if dev['max_input_channels'] > 0:
                 inputs.append((str(idx), name,
-                               f"{name} [in:{dev['max_input_channels']}ch]"))
+                               f"{name}{suffix} [in:{dev['max_input_channels']}ch]"))
             if dev['max_output_channels'] > 0:
                 outputs.append((str(idx), name,
-                                f"{name} [out:{dev['max_output_channels']}ch]"))
+                                f"{name}{suffix} [out:{dev['max_output_channels']}ch]"))
         return inputs, outputs
     except ImportError:
         return None, None
@@ -123,6 +159,118 @@ def get_output_devices():
 
 
 # ═══════════════════════════════════════════════════════════════
+#  RESOLUÇÃO DE ÍNDICE  [FIX v3]
+# ═══════════════════════════════════════════════════════════════
+
+def resolve_device_index(identifier) -> Optional[int]:
+    """
+    Converte o identificador salvo no EnumProperty (string do índice em
+    `sounddevice.query_devices()`, ou 'Default'/'-1'/vazio) num índice
+    inteiro válido pra passar em `sounddevice.Stream(device=...)`.
+    Retorna None pra usar o dispositivo padrão do sistema -- tanto
+    quando o identificador pede explicitamente o default quanto quando
+    o índice salvo não existe mais (ex.: dispositivo foi desconectado
+    desde a última vez que a lista foi gerada).
+    """
+    if identifier in (None, "Default", "-1", "", "erro"):
+        return None
+    try:
+        idx = int(identifier)
+    except (TypeError, ValueError):
+        return None
+    try:
+        import sounddevice as sd
+        if 0 <= idx < len(sd.query_devices()):
+            return idx
+    except Exception:
+        pass
+    return None
+
+
+def get_default_input_identifier() -> str:
+    """Fonte única de verdade pro dispositivo de entrada configurado
+    globalmente (modules/settings/preferences.py -> DAW_PreferencesAudio).
+    Import tardio pra evitar import circular entre os dois módulos."""
+    try:
+        from ..settings.preferences import get_preferences
+        return get_preferences().audio.input_device
+    except Exception:
+        return "Default"
+
+
+def get_default_output_identifier() -> str:
+    """Equivalente de saída de `get_default_input_identifier()`."""
+    try:
+        from ..settings.preferences import get_preferences
+        return get_preferences().audio.output_device
+    except Exception:
+        return "Default"
+
+
+# ═══════════════════════════════════════════════════════════════
+#  DIAGNÓSTICO E RECOMENDAÇÃO DE DRIVER
+# ═══════════════════════════════════════════════════════════════
+
+def get_audio_diagnostics() -> dict:
+    """
+    Diagnóstico do estado atual do áudio no Python do Blender: se
+    sounddevice está instalado, se algum host API ASIO foi detectado, e
+    uma recomendação textual pronta pra mostrar na UI quando o
+    dispositivo físico do usuário não aparece na lista ou quando não há
+    ASIO disponível (latência mais alta, sem acesso exclusivo ao
+    hardware).
+
+    Retorna:
+        {
+            "has_sounddevice": bool,
+            "has_asio_hostapi": bool,
+            "hostapis": [nomes...],
+            "recommendation": str | None,  # None = tudo certo, nada a avisar
+        }
+    """
+    diag = {
+        "has_sounddevice": False,
+        "has_asio_hostapi": False,
+        "hostapis": [],
+        "recommendation": None,
+    }
+
+    try:
+        import sounddevice as sd
+    except Exception:
+        diag["recommendation"] = (
+            "sounddevice não está instalado no Python do Blender -- a lista de "
+            "dispositivos abaixo é limitada (via aud, sem detalhes de canais/driver). "
+            "Instale sounddevice pra ver todos os dispositivos de verdade e poder "
+            "gravar:\n"
+            "    <pasta_do_blender>\\python\\bin\\python.exe -m pip install sounddevice"
+        )
+        return diag
+
+    diag["has_sounddevice"] = True
+    try:
+        hostapis = sd.query_hostapis()
+        diag["hostapis"] = [h["name"] for h in hostapis]
+        diag["has_asio_hostapi"] = any("ASIO" in h["name"].upper() for h in hostapis)
+    except Exception:
+        pass
+
+    if not diag["has_asio_hostapi"]:
+        diag["recommendation"] = (
+            "Nenhum driver ASIO detectado no sistema. Se sua interface de áudio "
+            "não aparecer na lista abaixo, ou você quiser latência mais baixa e "
+            "acesso exclusivo ao hardware (recomendado pra gravação/monitoramento "
+            "sério), instale um driver ASIO:\n"
+            "  - ASIO4ALL: driver universal, funciona com quase qualquer placa/interface\n"
+            "  - FlexASIO: alternativa open-source baseada em PortAudio\n"
+            "Depois de instalar, clique em 'Atualizar Dispositivos' -- o driver ASIO "
+            "aparece como um host API novo na lista, geralmente com menor latência "
+            "que MME/WDM/DirectSound."
+        )
+    return diag
+
+
+# ═══════════════════════════════════════════════════════════════
 #  INPUT DEVICE MANAGER
 # ═══════════════════════════════════════════════════════════════
 
@@ -140,7 +288,7 @@ class InputDeviceManager:
             return
         self._initialized = True
         self.stream = None
-        self.device_name = "Default"
+        self.device_identifier = "Default"
         self.sample_rate = 48000
         self.channels = 1
         self.blocksize = 1024
@@ -178,9 +326,18 @@ class InputDeviceManager:
         """
         return get_input_devices()
 
-    def start(self, device_name: str = "Default", samplerate: int = 48000):
+    def start(self, device_identifier: Optional[str] = None, samplerate: int = 48000) -> bool:
         """
         Inicia stream de captura.
+
+        `device_identifier`: mesmo identificador salvo no EnumProperty
+            (índice como string, ou None/'Default'). Se None, usa
+            `get_default_input_identifier()` -- ou seja, a configuração
+            global do addon (Preferências > Áudio > Entrada), que é a
+            ÚNICA fonte de verdade agora [FIX v3] (antes cada painel
+            podia ter seu próprio dispositivo configurado
+            separadamente, e ficavam fora de sincronia).
+
         [FIX v2] Se sounddevice não estiver disponível, loga aviso claro
         em vez de falhar silenciosamente.
         """
@@ -189,15 +346,13 @@ class InputDeviceManager:
                   "Instale no Python interno do Blender para ativar gravação.")
             return False
 
+        if device_identifier is None:
+            device_identifier = get_default_input_identifier()
+        self.device_identifier = device_identifier
+
         try:
             import sounddevice as sd
-            device_id = None
-            if device_name not in ("Default", "-1", ""):
-                devices = sd.query_devices()
-                for idx, dev in enumerate(devices):
-                    if dev['name'] == device_name and dev['max_input_channels'] > 0:
-                        device_id = idx
-                        break
+            device_id = resolve_device_index(device_identifier)  # [FIX v3]
 
             self.stream = sd.InputStream(
                 device=device_id,
@@ -208,7 +363,8 @@ class InputDeviceManager:
                 callback=self._audio_callback,
             )
             self.stream.start()
-            print(f"[DAW Recorder] Stream iniciado: {device_name or 'Default'} @ {samplerate}Hz")
+            label = device_id if device_id is not None else "Default (sistema)"
+            print(f"[DAW Recorder] Stream iniciado: device={label} @ {samplerate}Hz")
             return True
         except Exception as e:
             print(f"[DAW Recorder] Erro ao iniciar entrada: {e}")

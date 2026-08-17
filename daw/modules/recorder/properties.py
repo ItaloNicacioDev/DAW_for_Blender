@@ -2,9 +2,15 @@
 """
 Propriedades e estados do módulo Recorder.
 
-[FIX v2] input_device agora é EnumProperty com callback que lê dispositivos
-reais do sistema via aud/sounddevice, em vez de StringProperty de texto livre
-que nunca mostrava nada útil.
+[FIX v3] `input_device`/`output_device` foram REMOVIDOS daqui -- eram uma
+cópia redundante da mesma configuração que já existe em
+`modules/settings/preferences.py` (DAW_PreferencesAudio), listando os
+mesmos dispositivos via a mesma função (`recorder.input.get_*_devices`)
+mas guardando o valor escolhido em dois lugares separados que ficavam
+fora de sincronia (escolher o dispositivo aqui não mudava o que as
+Preferências do addon mostravam, e vice-versa). Agora a configuração
+global do addon é a ÚNICA fonte de verdade -- ver
+`modules/recorder/input.py::get_default_input_identifier()`.
 """
 from __future__ import annotations
 
@@ -19,34 +25,6 @@ from bpy.props import (
     CollectionProperty,
 )
 from bpy.types import PropertyGroup
-
-
-# ═══════════════════════════════════════════════════════════════
-#  CALLBACKS DE DISPOSITIVOS  [FIX v2]
-# ═══════════════════════════════════════════════════════════════
-
-def _input_device_items(self, context):
-    """Callback de items para input_device — lê dispositivos reais."""
-    try:
-        from .input import get_input_devices
-        items = get_input_devices()
-        if items:
-            return items
-    except Exception as e:
-        print(f"[DAW Recorder] Erro ao listar entradas: {e}")
-    return [('Default', 'Default (Sistema)', 'Dispositivo de entrada padrão')]
-
-
-def _output_device_items(self, context):
-    """Callback de items para output_device — lê dispositivos reais."""
-    try:
-        from .input import get_output_devices
-        items = get_output_devices()
-        if items:
-            return items
-    except Exception as e:
-        print(f"[DAW Recorder] Erro ao listar saídas: {e}")
-    return [('Default', 'Default (Sistema)', 'Dispositivo de saída padrão')]
 
 
 class DAW_RecorderTrackArm(PropertyGroup):
@@ -67,22 +45,6 @@ class DAW_RecorderSettings(PropertyGroup):
         name="Pausado",
         description="Gravação pausada",
         default=False,
-    )
-
-    # [FIX v2] Era StringProperty(default="Default") — campo de texto livre.
-    # Agora é EnumProperty com callback que consulta aud/sounddevice
-    # toda vez que a UI renderiza o dropdown.
-    input_device: EnumProperty(
-        name="Dispositivo de Entrada",
-        description="Dispositivo de captura de áudio do sistema",
-        items=_input_device_items,
-    )
-
-    # [FIX v2] Saída também corrigida
-    output_device: EnumProperty(
-        name="Dispositivo de Saída",
-        description="Dispositivo de saída de áudio do sistema",
-        items=_output_device_items,
     )
 
     input_gain_db: FloatProperty(

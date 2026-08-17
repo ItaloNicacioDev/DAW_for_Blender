@@ -228,7 +228,9 @@ class DAW_OT_recorder_toggle_monitor(Operator):
         mgr = get_input_manager()
         if settings.monitor_input or settings.is_recording:
             if not mgr.stream:
-                mgr.start(settings.input_device, int(settings.sample_rate))
+                # [FIX v3] device_identifier=None -> resolve pra config
+                # global (única fonte de verdade agora).
+                mgr.start(None, int(settings.sample_rate))
             start_monitoring()
         else:
             stop_monitoring()
@@ -252,19 +254,65 @@ class DAW_OT_recorder_refresh_devices(Operator):
         return {'FINISHED'}
 
 
+class DAW_OT_test_output_device(Operator):
+    """Toca um beep curto (~0.3s, 440Hz) no dispositivo de saída
+    configurado globalmente, pra confirmar que ele está ativo e sendo
+    reconhecido corretamente -- sem precisar abrir um VST ou clicar
+    play na timeline só pra testar."""
+    bl_idname = "daw.test_output_device"
+    bl_label = "Testar Saída"
+    bl_description = "Toca um beep curto no dispositivo de saída configurado"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        try:
+            import sounddevice as sd
+            import numpy as np
+        except Exception as e:
+            self.report({'ERROR'}, f"sounddevice não disponível: {e}")
+            return {'CANCELLED'}
+
+        from .input import resolve_device_index, get_default_output_identifier
+
+        identifier = get_default_output_identifier()
+        device_id = resolve_device_index(identifier)
+
+        sr = 44100
+        duration = 0.3
+        t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+        tone = 0.2 * np.sin(2 * np.pi * 440.0 * t).astype('float32')
+        stereo = np.column_stack([tone, tone])
+
+        try:
+            sd.play(stereo, samplerate=sr, device=device_id, blocking=False)
+        except Exception as e:
+            self.report({'ERROR'}, f"Falha ao tocar no dispositivo de saída: {e}")
+            return {'CANCELLED'}
+
+        label = f"índice {device_id}" if device_id is not None else "padrão do sistema"
+        self.report({'INFO'}, f"Tocando beep de teste no dispositivo {label}")
+        return {'FINISHED'}
+
+
 class DAW_OT_recorder_select_device(Operator):
     bl_idname = "daw.recorder_select_device"
     bl_label = "Selecionar Dispositivo"
-    bl_description = "Define o dispositivo de entrada ativo"
+    bl_description = "Define o dispositivo de entrada ativo (config. global do addon)"
     bl_options = {'REGISTER', 'UNDO'}
 
     device_name: StringProperty(name="Dispositivo", default="Default")
 
     def execute(self, context):
-        settings = context.scene.daw_recorder_settings
-        settings.input_device = self.device_name
+        # [FIX v3] Escreve na config global (Preferências do addon), não
+        # mais num campo de Scene -- é a única fonte de verdade agora,
+        # compartilhada com o painel "Recorder" e qualquer outro lugar
+        # do addon que precise do dispositivo de entrada configurado.
+        from ..settings.preferences import get_preferences
+        prefs = get_preferences()
+        prefs.audio.input_device = self.device_name
 
         mgr = get_input_manager()
+        settings = context.scene.daw_recorder_settings
         if mgr.stream:
             mgr.stop()
             mgr.start(self.device_name, int(settings.sample_rate))
@@ -335,6 +383,7 @@ classes = [
     DAW_OT_recorder_pause,
     DAW_OT_recorder_toggle_monitor,
     DAW_OT_recorder_refresh_devices,
+    DAW_OT_test_output_device,
     DAW_OT_recorder_select_device,
     DAW_OT_recorder_arm_track,
     DAW_OT_recorder_disarm_track,
