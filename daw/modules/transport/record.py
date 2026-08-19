@@ -29,10 +29,35 @@ class DAW_OT_transport_record(Operator):
                 bpy.ops.screen.animation_play()
             transport.is_playing = True
             transport.is_paused = False
+
+            # [FIX] O REC da barra de transporte, antes, só alternava esse
+            # estado visual e dava play -- nunca chamava o módulo Recorder
+            # de verdade (daw.recorder_start), que é quem captura áudio das
+            # tracks armadas e cria a strip ao vivo no VSE. Resultado: o
+            # usuário clicava em "Gravar" e literalmente nada acontecia
+            # com o áudio, sem nenhum erro visível (o botão certo era
+            # outro, escondido dentro do painel Recorder). Agora o REC
+            # principal também dispara a gravação de áudio, se houver
+            # pelo menos uma track armada.
+            try:
+                if bpy.ops.daw.recorder_start.poll():
+                    bpy.ops.daw.recorder_start('EXEC_DEFAULT')
+            except AttributeError:
+                pass  # módulo recorder não registrado
+            except Exception as e:
+                print(f"[DAW Transport] Falha ao iniciar gravação de áudio: {e}")
         else:
             if screen.is_animation_playing:
                 bpy.ops.screen.animation_play()
             transport.is_playing = False
+
+            try:
+                if bpy.ops.daw.recorder_stop.poll():
+                    bpy.ops.daw.recorder_stop('EXEC_DEFAULT')
+            except AttributeError:
+                pass
+            except Exception as e:
+                print(f"[DAW Transport] Falha ao finalizar gravação de áudio: {e}")
 
         redraw_ui(context)
         return {"FINISHED"}
