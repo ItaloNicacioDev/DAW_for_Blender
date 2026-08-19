@@ -311,6 +311,19 @@ class InputDeviceManager:
                   "desativada. Para ativar: instale sounddevice no Python do Blender.\n"
                   "  Exemplo (Windows): <blender_dir>/python/bin/python.exe -m pip install sounddevice\n"
                   "  A listagem de dispositivos funciona normalmente via aud.")
+        except OSError as e:
+            # [FIX] O pacote sounddevice pode estar instalado (import ok)
+            # mas a lib nativa PortAudio não estar presente no sistema
+            # (ex.: Linux sem libportaudio2, ou Windows sem a DLL
+            # correta) -- nesse caso sounddevice levanta OSError na
+            # importação, não ImportError, e antes isso não era pego:
+            # qualquer chamada a start() explodia com um traceback feio
+            # em vez de cair no fallback de buffer de zeros com aviso.
+            self.has_sounddevice = False
+            print(f"[DAW Recorder] sounddevice instalado, mas indisponível ({e}) — "
+                  "captura em tempo real desativada. Verifique se a biblioteca nativa "
+                  "PortAudio está instalada no sistema (ex.: 'apt install libportaudio2' "
+                  "no Linux).")
 
     def _audio_callback(self, indata, frames, time_info, status):
         if indata is not None and len(indata) > 0:
