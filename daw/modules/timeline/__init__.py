@@ -14,8 +14,12 @@ from . import (
     snapping,
     zoom,
     utils,
-    register,
 )
+# [FIX] Ver comentário equivalente em modules/settings/__init__.py -- sem
+# alias, `from . import register` colidia com `def register()` abaixo e
+# quebrava com "AttributeError: 'function' object has no attribute
+# 'register'", impedindo o módulo timeline de registrar.
+from . import register as register_module
 
 __all__ = [
     "properties",
@@ -27,13 +31,13 @@ __all__ = [
     "snapping",
     "zoom",
     "utils",
-    "register",
+    "register_module",
 ]
 
 
 def register():
-    register.register()
+    register_module.register()
 
 
 def unregister():
-    register.unregister()
+    register_module.unregister()
