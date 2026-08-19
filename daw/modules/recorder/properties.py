@@ -158,6 +158,30 @@ class DAW_RecorderSettings(PropertyGroup):
         default="//recordings/",
     )
 
+    live_waveform_preview: BoolProperty(
+        name="Strip ao Vivo",
+        description=(
+            "Cria a strip de áudio no VSE assim que a gravação começa, e "
+            "atualiza a waveform e a duração dela periodicamente enquanto "
+            "grava -- como a visualização 'ao vivo' de uma DAW"
+        ),
+        default=True,
+    )
+
+    live_waveform_interval: FloatProperty(
+        name="Intervalo de Atualização (s)",
+        description=(
+            "De quanto em quanto tempo a strip ao vivo é atualizada. "
+            "Valores menores deixam a waveform mais fluida, mas custam "
+            "mais (o áudio já gravado é reescrito em disco e a strip é "
+            "recriada a cada atualização)"
+        ),
+        default=0.25,
+        min=0.05,
+        max=2.0,
+        precision=2,
+    )
+
     # [FIX v2] Mensagem de status dos dispositivos visível na UI
     device_status: StringProperty(
         name="Status de Dispositivo",
