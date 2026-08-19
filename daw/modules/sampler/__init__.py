@@ -85,8 +85,12 @@ from . import (
     utils,
     operators,
     ui,
-    register,
 )
+# [FIX] Ver comentário equivalente em modules/settings/__init__.py -- sem
+# alias, `from . import register` colidia com `def register()` abaixo e
+# quebrava com "AttributeError: 'function' object has no attribute
+# 'register'", impedindo o módulo sampler de registrar.
+from . import register as register_module
 
 __all__ = [
     'adsr',
@@ -100,18 +104,18 @@ __all__ = [
     'utils',
     'operators',
     'ui',
-    'register',
+    'register_module',
 ]
 
 
 def register():
     """Registra o addon (chamado automaticamente pelo Blender)."""
-    register.register()
+    register_module.register()
 
 
 def unregister():
     """Desregistra o addon (chamado automaticamente pelo Blender)."""
-    register.unregister()
+    register_module.unregister()
 
 
 if __name__ == "__main__":
