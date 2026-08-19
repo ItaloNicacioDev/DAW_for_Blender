@@ -63,7 +63,25 @@ class DAW_OT_recorder_start(Operator):
             self.report({'ERROR'}, "Não foi possível iniciar a gravação")
             return {'CANCELLED'}
 
-        self.report({'INFO'}, "Gravação iniciada")
+        if session.last_error:
+            # [FIX] session.start() agora guarda erros que antes eram
+            # engolidos em silêncio (ex.: falha ao criar a pasta de
+            # gravação) -- reporta pro usuário em vez de deixar a
+            # gravação "ligada" sem strip e sem áudio, sem explicação.
+            self.report({'WARNING'}, session.last_error)
+        else:
+            self.report({'INFO'}, "Gravação iniciada")
+
+        mgr = get_input_manager()
+        if not mgr.has_sounddevice:
+            self.report(
+                {'WARNING'},
+                "sounddevice não está instalado no Python do Blender — "
+                "a gravação está 'ligada', mas nenhum áudio real será "
+                "capturado. Instale sounddevice no Python interno do "
+                "Blender para gravar de verdade.",
+            )
+
         return {'FINISHED'}
 
 
