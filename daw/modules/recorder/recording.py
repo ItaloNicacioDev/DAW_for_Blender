@@ -55,6 +55,7 @@ class RecordingSession:
         self.live_strip_names = {}     # track_idx -> nome da strip no VSE
         self._live_last_len = {}       # track_idx -> nº de samples já vistos
         self._live_timer_active = False
+        self.last_error = ""           # última mensagem de erro (pro operador reportar)
 
     def start(self, scene, track_indices: list[int]):
         if self.is_recording:
@@ -67,6 +68,7 @@ class RecordingSession:
         self._frame_count = 0
         self.track_buffers = {idx: [] for idx in track_indices}
         self.recorded_filepaths = {}
+        self.last_error = ""
 
         mgr = get_input_manager()
         if not mgr.stream or not mgr.stream.active:
@@ -81,6 +83,22 @@ class RecordingSession:
         if record_frame_handler not in bpy.app.handlers.frame_change_post:
             bpy.app.handlers.frame_change_post.append(record_frame_handler)
 
+        # [FIX] A captura de áudio (process_frame) só roda dentro do handler
+        # de frame_change_post -- ou seja, só é chamada quando o playhead
+        # avança de fato. Se o usuário chamar `daw.recorder_start` sem a
+        # timeline estar tocando (ex.: pelo painel Recorder isolado, sem
+        # passar pelo REC da barra de transporte), nenhum frame avança e
+        # process_frame nunca roda: a gravação fica "ligada" mas nenhuma
+        # amostra é capturada, silenciosamente. Garantimos aqui que o
+        # playback sempre esteja rodando enquanto a sessão está gravando,
+        # não importa por qual botão ela foi iniciada.
+        screen = bpy.context.screen
+        if screen is not None and not screen.is_animation_playing:
+            try:
+                bpy.ops.screen.animation_play()
+            except Exception as e:
+                print(f"[DAW Recorder] Falha ao iniciar playback automaticamente: {e}")
+
         settings.is_recording = True
         settings.record_start_frame = self.start_frame
 
@@ -93,8 +111,22 @@ class RecordingSession:
         if getattr(settings, 'live_waveform_preview', True):
             try:
                 out_dir = ensure_recording_dir(bpy.context)
-            except Exception:
+            except Exception as e:
                 out_dir = None
+                # [FIX] Antes esse erro era engolido em silêncio -- se o
+                # .blend nunca foi salvo, "//recordings/" pode resolver
+                # pra um caminho não gravável (ex.: a pasta de instalação
+                # do Blender no Windows) e o mkdir falha com
+                # PermissionError, sem strip nenhuma aparecer e sem
+                # nenhum aviso pro usuário. Guardamos o erro pra o
+                # operador (`daw.recorder_start`) reportar na barra de
+                # status do Blender.
+                self.last_error = (
+                    f"Não foi possível criar a pasta de gravação "
+                    f"('{settings.export_path}'): {e}. Salve o arquivo .blend "
+                    f"ou ajuste o Caminho de Exportação em Recorder > Formato."
+                )
+                print(f"[DAW Recorder] {self.last_error}")
 
             if out_dir:
                 samplerate = int(settings.sample_rate)
@@ -118,6 +150,7 @@ class RecordingSession:
                         )
                     except Exception as e:
                         print(f"[DAW Recorder] Falha ao criar strip ao vivo (track {idx}): {e}")
+                        self.last_error = self.last_error or str(e)
 
             interval = max(0.05, float(getattr(settings, 'live_waveform_interval', 0.25)))
             if not self._live_timer_active:
@@ -144,6 +177,16 @@ class RecordingSession:
 
         if record_frame_handler in bpy.app.handlers.frame_change_post:
             bpy.app.handlers.frame_change_post.remove(record_frame_handler)
+
+        # Contrapartida do auto-play em start(): se a reprodução foi
+        # deixada rodando (loop), paramos aqui também, senão o playhead
+        # fica correndo indefinidamente depois que a gravação já parou.
+        screen = bpy.context.screen
+        if screen is not None and screen.is_animation_playing:
+            try:
+                bpy.ops.screen.animation_cancel(restore_frame=False)
+            except Exception as e:
+                print(f"[DAW Recorder] Falha ao parar playback automaticamente: {e}")
 
         if not settings.monitor_input:
             get_input_manager().stop()
