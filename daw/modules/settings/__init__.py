@@ -54,8 +54,16 @@ from . import (
     utils,
     operators,
     ui,
-    register,
 )
+# [FIX] Importado com alias -- `from . import register` sem alias colide
+# com a função `def register()` definida embaixo neste mesmo arquivo: o
+# nome global `register` acaba sendo sobrescrito pela função no momento
+# em que ela é definida, então `register.register()` (dentro da própria
+# função) passava a chamar um atributo da função, não do submódulo, e
+# quebrava com "AttributeError: 'function' object has no attribute
+# 'register'". Isso fazia o módulo settings (preferências de áudio,
+# incluindo `prefs.audio`) nunca registrar de verdade.
+from . import register as register_module
 
 __all__ = [
     'preferences',
@@ -64,20 +72,20 @@ __all__ = [
     'utils',
     'operators',
     'ui',
-    'register',
+    'register_module',
 ]
 
 
 def register():
     """Registra o módulo (chamado automaticamente pelo Blender)."""
-    register.register()
-    register.register_handlers()
+    register_module.register()
+    register_module.register_handlers()
 
 
 def unregister():
     """Desregistra o módulo (chamado automaticamente pelo Blender)."""
-    register.unregister_handlers()
-    register.unregister()
+    register_module.unregister_handlers()
+    register_module.unregister()
 
 
 if __name__ == "__main__":
