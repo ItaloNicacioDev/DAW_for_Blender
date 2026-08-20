@@ -39,8 +39,32 @@ class DAW_OT_AddChannel(Operator):
         ch.instrument_type = self.instrument_type
         ch.color = get_color_by_index(len(rack.channels) - 1)
         ch.step_count = rack.step_count
+        # Cada track novo nasce apontando pro próximo canal do VSE ainda
+        # não usado por nenhum outro track do rack, pra não sobrepor
+        # strips de tracks diferentes no mesmo canal por padrão -- o
+        # usuário pode trocar depois em "Canal VSE" na lista.
+        used = {c.vse_channel for c in rack.channels[:-1]}
+        next_channel = 1
+        while next_channel in used:
+            next_channel += 1
+        ch.vse_channel = next_channel
         rack.active_channel_index = len(rack.channels) - 1
-        self.report({'INFO'}, f"Canal '{ch.name}' adicionado")
+        self.report({'INFO'}, f"Canal '{ch.name}' adicionado (VSE canal {next_channel})")
+        return {'FINISHED'}
+
+
+class DAW_OT_SelectChannel(Operator):
+    bl_idname = "daw.select_channel"
+    bl_label = "Selecionar Track"
+    bl_description = "Torna este track o canal ativo (pra editar detalhes abaixo)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    index: IntProperty(default=0)
+
+    def execute(self, context):
+        rack = _rack(context)
+        if 0 <= self.index < len(rack.channels):
+            rack.active_channel_index = self.index
         return {'FINISHED'}
 
 
@@ -294,6 +318,7 @@ class DAW_OT_AssignChannelToGroup(Operator):
 
 classes = [
     DAW_OT_AddChannel,
+    DAW_OT_SelectChannel,
     DAW_OT_RemoveChannel,
     DAW_OT_DuplicateChannel,
     DAW_OT_MoveChannel,
