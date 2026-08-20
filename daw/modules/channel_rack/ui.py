@@ -4,7 +4,20 @@ Painéis de UI do Blender para o Channel Rack.
 
 Segue o mesmo padrão dos outros painéis do projeto:
     - bl_space_type = 'SEQUENCE_EDITOR' (onde a DAW vive)
-    - bl_category   = "DAW"
+    - bl_category   = "Tracks" (aba própria, ver DAW_PT_ChannelRack)
+
+Refinamento visual (pedido: aproximar da identidade visual do material
+de divulgação, dentro do que os widgets nativos do Blender permitem):
+    - Chips de cor sólida gerados em runtime por canal (icons.py) no
+      lugar do color-picker pequeno -- mais parecido com os blocos
+      coloridos cheios da imagem de referência.
+    - Toolbar com botões maiores (scale_y) no topo, agrupados por
+      função, em vez de uma coluna estreita ao lado da lista.
+    - Seções com cabeçalho + ícone + separador, pra dar a sensação de
+      "cards" distintos (mais próximo dos painéis soltos do mockup).
+    - Botão "Solo" usa `alert=True` quando ativo -- o Blender pinta o
+      botão num tom avermelhado nativo, igual à convenção universal de
+      solo em DAWs, sem precisar de nenhuma cor customizada.
 """
 from __future__ import annotations
 
@@ -16,6 +29,7 @@ from .icons import (
     icon_for_mute,
     icon_for_solo,
     icon_for_step,
+    get_color_icon_value,
     ICON_ADD,
     ICON_REMOVE,
     ICON_DUPLICATE,
@@ -33,11 +47,11 @@ class DAW_UL_ChannelList(UIList):
         channel = item
         row = layout.row(align=True)
 
+        # Chip de cor sólida (gerado em runtime) em vez do color-picker
+        # pequeno -- funciona como identificador visual forte do track,
+        # igual às barras coloridas da imagem de referência.
+        row.label(text="", icon_value=get_color_icon_value(channel.color))
         row.label(text="", icon=icon_for_instrument(channel.instrument_type))
-
-        sub = row.row()
-        sub.scale_x = 0.35
-        sub.prop(channel, "color", text="")
 
         row.prop(channel, "name", text="", emboss=False)
 
@@ -45,7 +59,9 @@ class DAW_UL_ChannelList(UIList):
             channel, "mute", text="",
             icon=icon_for_mute(channel.mute), emboss=False,
         )
-        row.prop(
+        solo_row = row.row(align=True)
+        solo_row.alert = channel.solo  # destaque nativo em vermelho quando ativo
+        solo_row.prop(
             channel, "solo", text="",
             icon=icon_for_solo(channel.solo), emboss=False,
         )
@@ -95,31 +111,84 @@ class DAW_PT_ChannelRack(Panel):
         layout = self.layout
         rack = context.scene.daw_channel_rack
 
-        # --- Lista de canais ---
-        row = layout.row()
-        row.template_list(
+        # --- Toolbar (maior, agrupada, no topo -- em vez de uma coluna
+        # estreita espremida ao lado da lista) ---
+        toolbar = layout.row(align=True)
+        toolbar.scale_y = 1.4
+        toolbar.operator("daw.add_channel", text="Track", icon=ICON_ADD)
+        toolbar.operator("daw.duplicate_channel", text="", icon=ICON_DUPLICATE)
+        toolbar.operator("daw.remove_channel", text="", icon=ICON_REMOVE)
+        move = toolbar.row(align=True)
+        move.operator("daw.move_channel", text="", icon='TRIA_UP').direction = "UP"
+        move.operator("daw.move_channel", text="", icon='TRIA_DOWN').direction = "DOWN"
+
+        layout.separator(factor=0.5)
+
+        # --- Lista de canais (seleção, monitor, canal VSE, lock) ---
+        layout.template_list(
             "DAW_UL_channel_list", "",
             rack, "channels",
             rack, "active_channel_index",
             rows=5,
         )
 
-        col = row.column(align=True)
-        col.operator("daw.add_channel", text="", icon=ICON_ADD)
-        col.operator("daw.remove_channel", text="", icon=ICON_REMOVE)
-        col.separator()
-        col.operator("daw.duplicate_channel", text="", icon=ICON_DUPLICATE)
-        col.separator()
-        col.operator("daw.move_channel", text="", icon='TRIA_UP').direction = "UP"
-        col.operator("daw.move_channel", text="", icon='TRIA_DOWN').direction = "DOWN"
-
-        # --- Propriedades do canal ativo ---
         channel = None
         if 0 <= rack.active_channel_index < len(rack.channels):
             channel = rack.channels[rack.active_channel_index]
 
+        layout.separator(factor=1.5)
+
+        # --- Grade com TODOS os tracks + steps visíveis ao mesmo tempo ---
+        # (visual de "channel rack" clássico -- cada linha é um track
+        # inteiro, com nome/mute/solo/steps visíveis simultaneamente, em
+        # vez de só o canal selecionado acima. É a seção que mais se
+        # aproxima do layout da imagem de referência).
+        if len(rack.channels) > 0:
+            box = layout.box()
+            header = box.row()
+            header.label(text="Tracks", icon='SEQUENCE')
+
+            col = box.column(align=True)
+            for i, ch in enumerate(rack.channels):
+                row = col.row(align=True)
+                row.scale_y = 1.15  # linhas mais "encorpadas", parecido com o mockup
+
+                sel = row.operator(
+                    "daw.select_channel", text="",
+                    icon_value=get_color_icon_value(ch.color),
+                    depress=(i == rack.active_channel_index),
+                )
+                sel.index = i
+
+                name_col = row.column()
+                name_col.scale_x = 1.3
+                name_col.label(text=ch.name)
+
+                row.prop(ch, "mute", text="M", toggle=True)
+                solo_cell = row.row(align=True)
+                solo_cell.alert = ch.solo
+                solo_cell.prop(ch, "solo", text="S", toggle=True)
+
+                grid = row.row(align=True)
+                for s in range(min(rack.step_count, 16)):
+                    op = grid.operator(
+                        "daw.toggle_step",
+                        text="",
+                        icon=icon_for_step(ch.steps[s]),
+                        depress=ch.steps[s],
+                    )
+                    op.channel_index = i
+                    op.step_index = s
+
+        layout.separator(factor=1.5)
+
+        # --- Propriedades do canal ativo ---
         if channel is not None:
             box = layout.box()
+            row = box.row()
+            row.label(text="", icon_value=get_color_icon_value(channel.color))
+            row.label(text=channel.name)
+
             box.prop(channel, "instrument_type")
             if channel.instrument_type == "SAMPLER":
                 box.prop(channel, "sample_path", text="Amostra")
@@ -135,40 +204,9 @@ class DAW_PT_ChannelRack(Panel):
             row = box.row(align=True)
             row.operator("daw.clear_channel_steps", text="Limpar Pattern", icon='TRASH')
 
-        # --- Grade com TODOS os tracks + steps visíveis ao mesmo tempo ---
-        # (visual de "channel rack" clássico -- cada linha é um track
-        # inteiro, com nome/mute/solo/steps visíveis simultaneamente, em
-        # vez de só o canal selecionado acima).
-        if len(rack.channels) > 0:
-            box = layout.box()
-            box.label(text="Tracks", icon='SEQUENCE')
-            for i, ch in enumerate(rack.channels):
-                row = box.row(align=True)
-                row.alert = (i == rack.active_channel_index)
-
-                sel = row.operator("daw.select_channel", text="", icon='RESTRICT_SELECT_OFF' if i == rack.active_channel_index else 'RESTRICT_SELECT_ON', emboss=False)
-                sel.index = i
-
-                name_col = row.column()
-                name_col.scale_x = 1.3
-                name_col.label(text=ch.name)
-
-                row.prop(ch, "mute", text="M", toggle=True)
-                row.prop(ch, "solo", text="S", toggle=True)
-
-                grid = row.row(align=True)
-                for s in range(min(rack.step_count, 16)):
-                    op = grid.operator(
-                        "daw.toggle_step",
-                        text="",
-                        icon=icon_for_step(ch.steps[s]),
-                        depress=ch.steps[s],
-                    )
-                    op.channel_index = i
-                    op.step_index = s
-
         # --- Steps do canal ativo (edição detalhada, todos os steps) ---
         if channel is not None:
+            layout.separator(factor=1.0)
             box = layout.box()
             box.label(text=f"Pattern — {channel.name}", icon='SEQUENCE')
 
@@ -183,12 +221,8 @@ class DAW_PT_ChannelRack(Panel):
                 op.channel_index = rack.active_channel_index
                 op.step_index = i
 
-        # --- Botão de adicionar mais tracks (também disponível na
-        # coluna ao lado da lista, acima -- duplicado aqui só por
-        # conveniência quando a lista já está cheia/rolada) ---
-        layout.operator("daw.add_channel", text="Adicionar Track", icon=ICON_ADD)
-
-        # --- Opções gerais do rack ---
+        # --- Opções gerais do rack (rodapé) ---
+        layout.separator(factor=1.5)
         box = layout.box()
         box.label(text="Opções do Rack", icon='SETTINGS')
         box.prop(rack, "step_count")
@@ -200,7 +234,7 @@ class DAW_PT_ChannelGroups(Panel):
     bl_idname = "DAW_PT_channel_groups"
     bl_space_type = 'SEQUENCE_EDITOR'
     bl_region_type = 'UI'
-    bl_category = "DAW"
+    bl_category = "Tracks"
     bl_parent_id = "DAW_PT_channel_rack"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -213,7 +247,7 @@ class DAW_PT_ChannelGroups(Panel):
         for i, group in enumerate(rack.groups):
             box = col.box()
             r = box.row(align=True)
-            r.label(text="", icon=ICON_GROUP)
+            r.label(text="", icon_value=get_color_icon_value(group.color))
             r.prop(group, "color", text="")
             r.prop(group, "name", text="")
             r.prop(group, "muted", text="", icon=icon_for_mute(group.muted))
