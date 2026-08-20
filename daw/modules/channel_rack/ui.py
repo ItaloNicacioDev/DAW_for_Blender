@@ -228,6 +228,14 @@ class DAW_PT_ChannelRack(Panel):
         box.prop(rack, "step_count")
         box.prop(rack, "master_volume")
 
+        row = box.row(align=True)
+        row.prop(rack, "show_corner_overlay", text="Overlay no canto", icon='OVERLAY', toggle=True)
+        # Botão manual pro caso do overlay ainda não ter conseguido
+        # iniciar sozinho (ex.: addon foi ativado antes do workspace
+        # da DAW existir) -- ensure_started() já tenta de novo
+        # sozinho, mas isto dá um jeito imediato de forçar.
+        reopen = row.operator("daw.channel_rack_overlay", text="", icon='FILE_REFRESH')
+
 
 class DAW_PT_ChannelGroups(Panel):
     bl_label = "Grupos"
