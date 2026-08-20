@@ -26,7 +26,7 @@ from .icons import (
 
 
 class DAW_UL_ChannelList(UIList):
-    """Lista de canais do Channel Rack (nome, cor, mute/solo)."""
+    """Lista de canais do Channel Rack (nome, cor, mute/solo, monitor, canal VSE)."""
     bl_idname = "DAW_UL_channel_list"
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
@@ -49,6 +49,24 @@ class DAW_UL_ChannelList(UIList):
             channel, "solo", text="",
             icon=icon_for_solo(channel.solo), emboss=False,
         )
+
+        # Medidor de nível ao vivo (VU). `UILayout.progress()` só existe
+        # a partir do Blender 4.0 -- guardado por segurança em versões
+        # mais antigas, cai pra um label com o nível em % em vez de travar.
+        meter = row.row(align=True)
+        meter.scale_x = 1.6
+        try:
+            meter.progress(
+                factor=channel.meter_level,
+                type='BAR',
+                text="",
+            )
+        except AttributeError:
+            meter.label(text=f"{int(channel.meter_level * 100)}%")
+
+        # Canal do VSE que este track controla/observa.
+        row.prop(channel, "vse_channel", text="")
+
         row.prop(
             channel, "locked", text="",
             icon=ICON_LOCKED if channel.locked else ICON_UNLOCKED, emboss=False,
@@ -60,8 +78,18 @@ class DAW_PT_ChannelRack(Panel):
     bl_idname = "DAW_PT_channel_rack"
     bl_space_type = 'SEQUENCE_EDITOR'
     bl_region_type = 'UI'
-    bl_category = "DAW"
-    bl_order = 2
+    # Aba própria ("Tracks"), separada de "DAW" onde ficam Mixer/VST
+    # Browser/etc -- pedido explícito pra este painel não ficar
+    # misturado com os outros. (Nota: Blender não tem um jeito de addon
+    # criar uma janela/editor totalmente independente/flutuante fora do
+    # sistema de abas do N-sidebar -- isso exigiria um Editor Type novo,
+    # que só pode ser registrado em C dentro do próprio Blender, não via
+    # addon Python. A aba dedicada é o equivalente mais próximo disso
+    # que a API permite; o usuário ainda pode arrastar essa região pra
+    # fora e virar uma janela separada de verdade, como qualquer região
+    # do Blender.)
+    bl_category = "Tracks"
+    bl_order = 0
 
     def draw(self, context):
         layout = self.layout
@@ -101,9 +129,45 @@ class DAW_PT_ChannelRack(Panel):
             row.prop(channel, "pan")
 
             row = box.row(align=True)
+            row.prop(channel, "monitor_source", text="Monitor")
+            row.prop(channel, "vse_channel", text="Canal VSE")
+
+            row = box.row(align=True)
             row.operator("daw.clear_channel_steps", text="Limpar Pattern", icon='TRASH')
 
-        # --- Steps do canal ativo ---
+        # --- Grade com TODOS os tracks + steps visíveis ao mesmo tempo ---
+        # (visual de "channel rack" clássico -- cada linha é um track
+        # inteiro, com nome/mute/solo/steps visíveis simultaneamente, em
+        # vez de só o canal selecionado acima).
+        if len(rack.channels) > 0:
+            box = layout.box()
+            box.label(text="Tracks", icon='SEQUENCE')
+            for i, ch in enumerate(rack.channels):
+                row = box.row(align=True)
+                row.alert = (i == rack.active_channel_index)
+
+                sel = row.operator("daw.select_channel", text="", icon='RESTRICT_SELECT_OFF' if i == rack.active_channel_index else 'RESTRICT_SELECT_ON', emboss=False)
+                sel.index = i
+
+                name_col = row.column()
+                name_col.scale_x = 1.3
+                name_col.label(text=ch.name)
+
+                row.prop(ch, "mute", text="M", toggle=True)
+                row.prop(ch, "solo", text="S", toggle=True)
+
+                grid = row.row(align=True)
+                for s in range(min(rack.step_count, 16)):
+                    op = grid.operator(
+                        "daw.toggle_step",
+                        text="",
+                        icon=icon_for_step(ch.steps[s]),
+                        depress=ch.steps[s],
+                    )
+                    op.channel_index = i
+                    op.step_index = s
+
+        # --- Steps do canal ativo (edição detalhada, todos os steps) ---
         if channel is not None:
             box = layout.box()
             box.label(text=f"Pattern — {channel.name}", icon='SEQUENCE')
@@ -118,6 +182,11 @@ class DAW_PT_ChannelRack(Panel):
                 )
                 op.channel_index = rack.active_channel_index
                 op.step_index = i
+
+        # --- Botão de adicionar mais tracks (também disponível na
+        # coluna ao lado da lista, acima -- duplicado aqui só por
+        # conveniência quando a lista já está cheia/rolada) ---
+        layout.operator("daw.add_channel", text="Adicionar Track", icon=ICON_ADD)
 
         # --- Opções gerais do rack ---
         box = layout.box()
