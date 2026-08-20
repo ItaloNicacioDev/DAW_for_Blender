@@ -14,6 +14,8 @@ from .properties import (
 )
 from .operators import classes as operator_classes
 from .ui import classes as ui_classes
+from .overlay import classes as overlay_classes
+from . import overlay
 from .icons import clear_color_icon_cache
 
 
@@ -23,6 +25,7 @@ _all_classes = [
     ChannelRackProperties,
     *operator_classes,
     *ui_classes,
+    *overlay_classes,
 ]
 
 METER_TICK_INTERVAL = 0.1  # ~10x/seg -- suave o bastante pro olho, barato o bastante pra não pesar
@@ -105,11 +108,19 @@ def register():
         _meter_timer_registered[0] = True
         bpy.app.timers.register(_meter_update_tick, first_interval=METER_TICK_INTERVAL)
 
+    # Liga o overlay fixo do canto inferior direito automaticamente --
+    # não depende do usuário clicar em nada pra ele aparecer (ver
+    # overlay.py::ensure_started, que reagenda sozinho até achar um
+    # Sequencer aberto onde desenhar).
+    overlay.ensure_started()
+
     print("[DAW] Módulo channel_rack registrado")
 
 
 def unregister():
     _meter_timer_registered[0] = False  # próximo tick do timer se auto-cancela
+
+    overlay.force_stop()
 
     clear_color_icon_cache()
 
