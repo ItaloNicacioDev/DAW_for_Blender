@@ -123,6 +123,42 @@ class ChannelProperties(PropertyGroup):
         min=-1,
     )
 
+    # ── Roteamento de VSE + monitoramento ao vivo ──────────────────────
+    vse_channel: IntProperty(
+        name="Canal VSE",
+        description="Canal do Video Sequence Editor que este track do "
+                     "Channel Rack controla -- strips de áudio criadas "
+                     "por este track (bounce, gravação ao vivo, etc.) vão "
+                     "para este canal do VSE",
+        default=1,
+        min=1,
+        max=128,
+    )
+
+    monitor_source: EnumProperty(
+        name="Fonte do Monitor",
+        description="De onde o medidor de nível (VU) deste track lê o "
+                     "áudio ao vivo",
+        items=(
+            ('NONE', 'Nenhuma', 'Sem monitoramento ao vivo -- medidor fica em silêncio'),
+            ('INPUT', 'Entrada de Áudio', 'Lê o nível do dispositivo de entrada '
+             'configurado globalmente (Preferências > Áudio) -- use para tracks '
+             'de gravação ao vivo (voz, instrumento via linha/microfone)'),
+        ),
+        default='NONE',
+    )
+
+    meter_level: FloatProperty(
+        name="Nível (VU)",
+        description="Nível de pico atual, 0.0-1.0 -- atualizado ao vivo por "
+                     "um timer enquanto monitor_source != 'NONE' (ver "
+                     "channel_rack/register.py::_meter_update_tick)",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
+    )
+
     step_count: IntProperty(
         name="Steps",
         description="Quantidade de steps ativos no pattern deste canal",
