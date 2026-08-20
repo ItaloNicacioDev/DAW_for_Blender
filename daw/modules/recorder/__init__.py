@@ -11,6 +11,7 @@ from __future__ import annotations
 from . import properties
 from . import utils
 from . import input
+from . import live_strip  # gravacao ao vivo (strip crescendo na timeline) -- sem classes bpy, so funcoes puras usadas por recording.py
 from . import monitoring
 from . import recording
 from . import operators
