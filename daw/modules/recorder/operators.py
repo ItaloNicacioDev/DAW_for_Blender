@@ -5,6 +5,7 @@ Operadores do módulo Recorder.
 from __future__ import annotations
 
 import os
+import struct
 import time
 
 import bpy
@@ -23,8 +24,71 @@ from .utils import (
     disarm_all_tracks,
     create_sound_strip,
     frames_to_timecode,
-    write_wav,
 )
+
+
+# ---------------------------------------------------------------------------
+# Exportação WAV (sem dependências externas além de numpy)
+# ---------------------------------------------------------------------------
+
+def _float_to_pcm16(data: np.ndarray) -> bytes:
+    clipped = np.clip(data, -1.0, 1.0)
+    ints = (clipped * 32767.0).astype('<i2')
+    return ints.tobytes()
+
+
+def _float_to_pcm24(data: np.ndarray) -> bytes:
+    clipped = np.clip(data, -1.0, 1.0)
+    ints = (clipped * 8388607.0).astype(np.int32)
+    out = bytearray(len(ints) * 3)
+    for i, v in enumerate(ints):
+        b = int(v).to_bytes(4, byteorder='little', signed=True)
+        out[i * 3:i * 3 + 3] = b[:3]
+    return bytes(out)
+
+
+def _float_to_pcm32f(data: np.ndarray) -> bytes:
+    return data.astype('<f4').tobytes()
+
+
+def write_wav(filepath: str, data: np.ndarray, samplerate: int, bit_depth: str, channels: int = 1):
+    """Escreve um arquivo WAV mono a partir de um array numpy float32 em [-1, 1].
+
+    Suporta 16-bit PCM, 24-bit PCM e 32-bit float (IEEE), sem depender de
+    bibliotecas externas como soundfile/scipy.
+    """
+    if bit_depth == '16':
+        fmt_tag = 1
+        bits = 16
+        payload = _float_to_pcm16(data)
+    elif bit_depth == '24':
+        fmt_tag = 1
+        bits = 24
+        payload = _float_to_pcm24(data)
+    else:  # '32' -> float IEEE
+        fmt_tag = 3
+        bits = 32
+        payload = _float_to_pcm32f(data)
+
+    block_align = channels * (bits // 8)
+    byte_rate = samplerate * block_align
+    data_size = len(payload)
+
+    with open(filepath, 'wb') as f:
+        f.write(b'RIFF')
+        f.write(struct.pack('<I', 36 + data_size))
+        f.write(b'WAVE')
+        f.write(b'fmt ')
+        f.write(struct.pack('<I', 16))
+        f.write(struct.pack('<H', fmt_tag))
+        f.write(struct.pack('<H', channels))
+        f.write(struct.pack('<I', samplerate))
+        f.write(struct.pack('<I', byte_rate))
+        f.write(struct.pack('<H', block_align))
+        f.write(struct.pack('<H', bits))
+        f.write(b'data')
+        f.write(struct.pack('<I', data_size))
+        f.write(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -63,32 +127,14 @@ class DAW_OT_recorder_start(Operator):
             self.report({'ERROR'}, "Não foi possível iniciar a gravação")
             return {'CANCELLED'}
 
-        if session.last_error:
-            # [FIX] session.start() agora guarda erros que antes eram
-            # engolidos em silêncio (ex.: falha ao criar a pasta de
-            # gravação) -- reporta pro usuário em vez de deixar a
-            # gravação "ligada" sem strip e sem áudio, sem explicação.
-            self.report({'WARNING'}, session.last_error)
-        else:
-            self.report({'INFO'}, "Gravação iniciada")
-
-        mgr = get_input_manager()
-        if not mgr.has_sounddevice:
-            self.report(
-                {'WARNING'},
-                "sounddevice não está instalado no Python do Blender — "
-                "a gravação está 'ligada', mas nenhum áudio real será "
-                "capturado. Instale sounddevice no Python interno do "
-                "Blender para gravar de verdade.",
-            )
-
+        self.report({'INFO'}, "Gravação iniciada")
         return {'FINISHED'}
 
 
 class DAW_OT_recorder_stop(Operator):
     bl_idname = "daw.recorder_stop"
     bl_label = "Parar"
-    bl_description = "Para a gravação e exporta os arquivos de áudio capturados"
+    bl_description = "Para a gravação (o arquivo e a strip já foram atualizados ao vivo durante a captura)"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -98,65 +144,24 @@ class DAW_OT_recorder_stop(Operator):
 
     def execute(self, context):
         scene = context.scene
-        settings = scene.daw_recorder_settings
         session = get_session()
 
-        track_buffers = session.stop(scene)
-        if not track_buffers:
+        # RecordingSession.stop() já: fecha os LiveWavWriter (arquivo
+        # final passa a ter um cabeçalho WAV correto e completo), dá um
+        # último refresh na strip ao vivo de cada track (cobrindo os
+        # frames desde o último refresh periódico), e remove
+        # strips/arquivos de tracks que não capturaram nada. Não
+        # precisa reconstruir nem escrever WAV nem criar strip aqui --
+        # tudo isso já aconteceu ao vivo, frame a frame, durante a
+        # gravação (ver modules/recorder/recording.py).
+        results = session.stop(scene)
+
+        if not results:
             self.report({'WARNING'}, "Nenhum áudio capturado")
             return {'CANCELLED'}
 
-        out_dir = ensure_recording_dir(context)
-        samplerate = int(settings.sample_rate)
-        bit_depth = settings.bit_depth
-        # Reaproveita o session_id do início da gravação (usado nos nomes
-        # dos arquivos "ao vivo") pra que o .wav final caia exatamente no
-        # mesmo caminho que a strip ao vivo já estava usando -- sem isso
-        # sobrariam dois arquivos por track (o parcial e o final).
-        timestamp = session.session_id or time.strftime("%Y%m%d_%H%M%S")
-
-        exported = 0
-        for track_idx, chunks in track_buffers.items():
-            if not chunks:
-                continue
-
-            data = np.concatenate(chunks).astype('float32')
-            filepath = session.live_filepaths.get(track_idx)
-            if not filepath:
-                filename = f"track{track_idx}_{timestamp}.wav"
-                filepath = os.path.join(out_dir, filename)
-
-            try:
-                write_wav(filepath, data, samplerate, bit_depth)
-            except Exception as e:
-                self.report({'ERROR'}, f"Falha ao exportar track {track_idx}: {e}")
-                continue
-
-            session.recorded_filepaths[track_idx] = filepath
-            exported += 1
-
-            try:
-                if track_idx in session.live_strip_names:
-                    # Já existia uma strip "ao vivo" pra essa track: troca
-                    # ela pela versão final (mesmo arquivo, já completo),
-                    # em vez de criar uma segunda strip por cima.
-                    session.finalize_live_strip(context, track_idx, filepath)
-                else:
-                    create_sound_strip(
-                        context,
-                        filepath=filepath,
-                        channel=track_idx + 1,
-                        frame_start=session.start_frame,
-                        name=f"Rec_{track_idx}_{timestamp}",
-                    )
-            except Exception as e:
-                self.report({'WARNING'}, f"Falha ao criar strip para track {track_idx}: {e}")
-
-        if exported:
-            self.report({'INFO'}, f"{exported} arquivo(s) exportado(s) para {out_dir}")
-        else:
-            self.report({'WARNING'}, "Nenhum arquivo foi exportado")
-
+        names = ", ".join(os.path.basename(p) for p in results.values())
+        self.report({'INFO'}, f"{len(results)} track(s) gravada(s): {names}")
         return {'FINISHED'}
 
 
