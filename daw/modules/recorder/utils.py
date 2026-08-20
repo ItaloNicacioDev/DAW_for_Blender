@@ -6,19 +6,14 @@ from __future__ import annotations
 
 import math
 import struct
-
 import bpy
 import numpy as np
 
 
-# ---------------------------------------------------------------------------
-# Exportação WAV (sem dependências externas além de numpy)
-#
-# Vive aqui (em vez de operators.py) porque tanto os operadores quanto a
-# RecordingSession (recording.py) precisam gravar/regravar o .wav -- a
-# sessão escreve o arquivo periodicamente durante a gravação, pra alimentar
-# a strip "ao vivo" no VSE (ver create_or_update_live_strip abaixo).
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════
+#  ESCRITA DE WAV (compartilhado entre o export final em operators.py
+#  e a gravação incremental ao vivo em live_strip.py)
+# ═══════════════════════════════════════════════════════════════
 
 def _float_to_pcm16(data: np.ndarray) -> bytes:
     clipped = np.clip(data, -1.0, 1.0)
@@ -40,34 +35,40 @@ def _float_to_pcm32f(data: np.ndarray) -> bytes:
     return data.astype('<f4').tobytes()
 
 
+def bit_depth_to_fmt(bit_depth: str):
+    """Devolve (fmt_tag, bits) do cabeçalho WAV pro bit_depth escolhido
+    nas configurações do Recorder ('16', '24' ou '32' = float)."""
+    if bit_depth == '16':
+        return 1, 16
+    elif bit_depth == '32':
+        return 3, 32  # IEEE float
+    else:
+        return 1, 24
+
+
+def encode_pcm(data: np.ndarray, bit_depth: str) -> bytes:
+    if bit_depth == '16':
+        return _float_to_pcm16(data)
+    elif bit_depth == '32':
+        return _float_to_pcm32f(data)
+    else:
+        return _float_to_pcm24(data)
+
+
 def write_wav(filepath: str, data: np.ndarray, samplerate: int, bit_depth: str, channels: int = 1):
     """Escreve um arquivo WAV mono a partir de um array numpy float32 em [-1, 1].
 
     Suporta 16-bit PCM, 24-bit PCM e 32-bit float (IEEE), sem depender de
-    bibliotecas externas como soundfile/scipy. Usado tanto pela exportação
-    final quanto pelos "flushes" periódicos da gravação ao vivo -- nos dois
-    casos o arquivo é reescrito do zero a partir do buffer acumulado, então
-    é seguro chamar repetidamente no mesmo caminho.
+    bibliotecas externas como soundfile/scipy.
     """
-    if bit_depth == '16':
-        fmt_tag = 1
-        bits = 16
-        payload = _float_to_pcm16(data)
-    elif bit_depth == '24':
-        fmt_tag = 1
-        bits = 24
-        payload = _float_to_pcm24(data)
-    else:  # '32' -> float IEEE
-        fmt_tag = 3
-        bits = 32
-        payload = _float_to_pcm32f(data)
+    fmt_tag, bits = bit_depth_to_fmt(bit_depth)
+    payload = encode_pcm(data, bit_depth)
 
     block_align = channels * (bits // 8)
     byte_rate = samplerate * block_align
     data_size = len(payload)
 
-    tmp_path = filepath + ".tmp"
-    with open(tmp_path, 'wb') as f:
+    with open(filepath, 'wb') as f:
         f.write(b'RIFF')
         f.write(struct.pack('<I', 36 + data_size))
         f.write(b'WAVE')
@@ -82,13 +83,6 @@ def write_wav(filepath: str, data: np.ndarray, samplerate: int, bit_depth: str, 
         f.write(b'data')
         f.write(struct.pack('<I', data_size))
         f.write(payload)
-
-    # Escreve em arquivo temporário e substitui via os.replace (atômico na
-    # maioria dos SO's). Evita que o VSE tente ler o .wav no meio de uma
-    # escrita durante os refreshes da strip ao vivo, o que corrompia o
-    # cache de waveform ocasionalmente.
-    import os
-    os.replace(tmp_path, filepath)
 
 
 def frames_to_timecode(frame: int, fps: float = 24.0) -> str:
@@ -118,28 +112,32 @@ def linear_to_db(linear: float) -> float:
 
 def get_sequencer(context):
     """Retorna o sequencer do scene, se existir."""
-    if not context.scene.sequence_editor:
-        context.scene.sequence_editor_create()
-    return context.scene.sequence_editor
+    return get_sequencer_for_scene(context.scene)
 
 
-def get_strips_collection(context):
-    """Retorna a coleção de strips do sequencer (`.strips` ou `.sequences`)."""
-    seq = get_sequencer(context)
+def get_sequencer_for_scene(scene):
+    """Equivalente a `get_sequencer(context)`, mas recebendo `scene`
+    diretamente -- usado pela gravação ao vivo (RecordingSession), que
+    roda dentro de `bpy.app.handlers.frame_change_post` e só recebe
+    `scene`, sem `context` completo."""
+    if not scene.sequence_editor:
+        scene.sequence_editor_create()
+    return scene.sequence_editor
+
+
+def get_strips_collection(seq):
+    """A partir do Blender 4.4, `SequenceEditor.sequences` foi renomeado
+    para `SequenceEditor.strips`. Este helper centraliza o fallback
+    entre as duas APIs, usado em todo o módulo recorder."""
     return getattr(seq, 'strips', None) or seq.sequences
 
 
-def create_sound_strip(context, filepath: str, channel: int, frame_start: int, name: str | None = None):
-    """Cria uma strip de áudio no sequencer.
-
-    A partir do Blender 4.4, `SequenceEditor.sequences` foi renomeado
-    para `SequenceEditor.strips` (breaking change do VSE). Tentamos o
-    nome novo primeiro e caímos para o antigo para manter compatibilidade
-    com versões anteriores.
-    """
-    strips = get_strips_collection(context)
+def create_sound_strip(context, filepath: str, channel: int, frame_start: int):
+    """Cria uma strip de áudio no sequencer."""
+    seq = get_sequencer(context)
+    strips = get_strips_collection(seq)
     strip = strips.new_sound(
-        name=name or f"Rec_{frame_start}",
+        name=f"Rec_{frame_start}",
         filepath=filepath,
         channel=channel,
         frame_start=frame_start,
@@ -147,37 +145,24 @@ def create_sound_strip(context, filepath: str, channel: int, frame_start: int, n
     return strip
 
 
-def remove_strip_by_name(context, name: str) -> bool:
-    """Remove uma strip pelo nome, se ela existir. Retorna True se removeu."""
-    strips = get_strips_collection(context)
-    strip = strips.get(name)
-    if strip is None:
-        return False
-    old_sound = getattr(strip, 'sound', None)
-    try:
-        strips.remove(strip)
-    finally:
-        # Também remove o datablock de som órfão (a strip antiga é
-        # recriada a cada refresh da gravação ao vivo -- ver
-        # recording.py::create_or_update_live_strip -- então sem isso o
-        # .blend acumularia um Sound não utilizado por refresh).
-        if old_sound is not None and old_sound.users == 0:
-            try:
-                bpy.data.sounds.remove(old_sound)
-            except Exception:
-                pass
-    return True
+def ensure_recording_dir_for_scene(scene) -> str:
+    """Equivalente a `ensure_recording_dir(context)`, mas recebendo
+    `scene` diretamente -- usado por RecordingSession.start(), que
+    roda a partir de um operator que já tem `scene` isolado, e
+    precisa criar os arquivos ao vivo antes mesmo do primeiro frame
+    capturado."""
+    import os
+    from pathlib import Path
+
+    settings = scene.daw_recorder_settings
+    path = bpy.path.abspath(settings.export_path)
+    Path(path).mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def ensure_recording_dir(context) -> str:
     """Garante que o diretório de gravação exista."""
-    import os
-    from pathlib import Path
-
-    settings = context.scene.daw_recorder_settings
-    path = bpy.path.abspath(settings.export_path)
-    Path(path).mkdir(parents=True, exist_ok=True)
-    return path
+    return ensure_recording_dir_for_scene(context.scene)
 
 
 def get_armed_track_indices(context) -> list[int]:
