@@ -14,6 +14,7 @@ from .properties import (
 )
 from .operators import classes as operator_classes
 from .ui import classes as ui_classes
+from .icons import clear_color_icon_cache
 
 
 _all_classes = [
@@ -109,6 +110,8 @@ def register():
 
 def unregister():
     _meter_timer_registered[0] = False  # próximo tick do timer se auto-cancela
+
+    clear_color_icon_cache()
 
     if hasattr(bpy.types.Scene, "daw_channel_rack"):
         del bpy.types.Scene.daw_channel_rack
