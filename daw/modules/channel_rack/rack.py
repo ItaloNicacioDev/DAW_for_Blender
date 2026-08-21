@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from .channels import Channel, DEFAULT_STEP_COUNT, MAX_STEPS
+from .channels import Channel, DEFAULT_STEP_COUNT
 from .colors import get_color_by_index
 from .groups import ChannelGroup
 
@@ -115,7 +115,7 @@ class ChannelRack:
 
     def set_step_count(self, count: int) -> None:
         """Altera a quantidade de steps ativos do rack (compartilhada por todos os canais)."""
-        count = max(1, min(count, MAX_STEPS))
+        count = max(1, min(count, 64))
         self.step_count = count
         for c in self.channels:
             c.step_count = count
