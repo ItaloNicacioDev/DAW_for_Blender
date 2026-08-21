@@ -53,8 +53,6 @@ class DAW_PT_recorder_panel(Panel):
             row.label(text=timecode, icon='TIME')
             if settings.is_paused:
                 row.label(text="PAUSADO", icon='PAUSE')
-            elif settings.live_waveform_preview:
-                row.label(text="Waveform ao vivo", icon='SEQ_SEQUENCER')
         else:
             row = layout.row()
             row.scale_y = 1.4
@@ -138,13 +136,6 @@ class DAW_PT_recorder_format(Panel):
         layout.prop(settings, "bit_depth")
         layout.prop(settings, "sample_rate")
         layout.prop(settings, "export_path")
-
-        layout.separator()
-        col = layout.column(align=True)
-        col.prop(settings, "live_waveform_preview", icon='REC')
-        sub = col.column(align=True)
-        sub.enabled = settings.live_waveform_preview
-        sub.prop(settings, "live_waveform_interval")
 
 
 class DAW_PT_recorder_timing(Panel):
