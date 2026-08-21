@@ -30,6 +30,8 @@ from .icons import (
     icon_for_solo,
     icon_for_step,
     get_color_icon_value,
+    get_meter_led_icon,
+    METER_SEGMENTS,
     ICON_ADD,
     ICON_REMOVE,
     ICON_DUPLICATE,
@@ -138,47 +140,95 @@ class DAW_PT_ChannelRack(Panel):
 
         layout.separator(factor=1.5)
 
-        # --- Grade com TODOS os tracks + steps visíveis ao mesmo tempo ---
-        # (visual de "channel rack" clássico -- cada linha é um track
-        # inteiro, com nome/mute/solo/steps visíveis simultaneamente, em
-        # vez de só o canal selecionado acima. É a seção que mais se
-        # aproxima do layout da imagem de referência).
+        # --- Tiras verticais lado a lado, uma por track (estilo mixer
+        # de referência: número/nome no topo, indicador de ativo,
+        # medidor LED empilhado (o que dá o efeito "vertical" -- o
+        # Blender não tem um fader vertical nativo de verdade, então o
+        # medidor LED é o que preenche esse papel visualmente), o
+        # controle de volume logo abaixo, preview/mute/solo, e o canal
+        # VSE no rodapé da tira -- mesma ordem geral da imagem de
+        # referência, adaptada aos widgets que o Blender realmente tem.
+        #
+        # Nota de layout: o N-sidebar é uma região estreita -- com
+        # muitos tracks as tiras ficam apertadas. Arraste a borda
+        # esquerda desta região pra alargá-la se tiver mais de ~5-6
+        # tracks.
         if len(rack.channels) > 0:
             box = layout.box()
-            header = box.row()
-            header.label(text="Tracks", icon='SEQUENCE')
+            box.label(text="Mixer", icon='SEQUENCE')
 
-            col = box.column(align=True)
+            strip_row = box.row(align=True)
             for i, ch in enumerate(rack.channels):
-                row = col.row(align=True)
-                row.scale_y = 1.15  # linhas mais "encorpadas", parecido com o mockup
+                is_active = (i == rack.active_channel_index)
+                strip = strip_row.column(align=True)
 
-                sel = row.operator(
-                    "daw.select_channel", text="",
+                # Cabeçalho: canal VSE (número) + nome. Clicar seleciona
+                # o track (fica com o chip de cor em destaque = "depress").
+                header = strip.row(align=True)
+                sel = header.operator(
+                    "daw.select_channel", text=f"{ch.vse_channel}",
                     icon_value=get_color_icon_value(ch.color),
-                    depress=(i == rack.active_channel_index),
+                    depress=is_active,
                 )
                 sel.index = i
+                strip.label(text=ch.name)
 
-                name_col = row.column()
-                name_col.scale_x = 1.3
-                name_col.label(text=ch.name)
+                # Indicador de ativo (ponto verde = não mutado, apagado
+                # = mutado) -- mesmo princípio visual do ponto verde da
+                # imagem de referência abaixo do número do canal.
+                dot_row = strip.row()
+                dot_row.alignment = 'CENTER'
+                dot_row.label(
+                    text="",
+                    icon_value=get_color_icon_value((0.25, 0.85, 0.3) if not ch.mute else (0.2, 0.2, 0.2)),
+                )
 
-                row.prop(ch, "mute", text="M", toggle=True)
-                solo_cell = row.row(align=True)
+                strip.separator(factor=0.3)
+
+                # Pan -- slider compacto (o Blender não tem um widget de
+                # dial genérico pra um valor -1..1 sem reinterpretar
+                # como ângulo/graus, o que mostraria a unidade errada;
+                # um slider curto e rotulado é o correto sem enganar
+                # sobre a unidade).
+                strip.prop(ch, "pan", text="", slider=True)
+
+                strip.separator(factor=0.3)
+
+                # Medidor LED (verde/amarelo/vermelho) -- empilhado de
+                # baixo pra cima, vermelho no topo, igual medidor de
+                # hardware de verdade. É o elemento que dá a sensação
+                # "vertical" da tira, já que o Blender não tem fader
+                # vertical nativo.
+                meter_col = strip.column(align=True)
+                for seg in reversed(range(METER_SEGMENTS)):
+                    meter_col.label(text="", icon_value=get_meter_led_icon(seg, METER_SEGMENTS, ch.meter_level))
+
+                strip.separator(factor=0.3)
+
+                # Volume (o "fader" de verdade, controlável -- o
+                # medidor acima é só leitura).
+                strip.prop(ch, "volume", text="", slider=True)
+
+                strip.separator(factor=0.3)
+
+                # Preview / Mute / Solo
+                prev_row = strip.row(align=True)
+                prev_row.enabled = (ch.instrument_type == "SAMPLER" and bool(ch.sample_path))
+                prev = prev_row.operator("daw.preview_channel", text="", icon='PLAY')
+                prev.channel_index = i
+
+                ms_row = strip.row(align=True)
+                ms_row.prop(ch, "mute", text="M", toggle=True)
+                solo_cell = ms_row.row(align=True)
                 solo_cell.alert = ch.solo
                 solo_cell.prop(ch, "solo", text="S", toggle=True)
 
-                grid = row.row(align=True)
-                for s in range(min(rack.step_count, 16)):
-                    op = grid.operator(
-                        "daw.toggle_step",
-                        text="",
-                        icon=icon_for_step(ch.steps[s]),
-                        depress=ch.steps[s],
-                    )
-                    op.channel_index = i
-                    op.step_index = s
+                strip.separator(factor=0.3)
+
+                # Canal do VSE que este track controla -- no rodapé da
+                # tira, mesma posição geral dos controles secundários na
+                # imagem de referência.
+                strip.prop(ch, "vse_channel", text="")
 
         layout.separator(factor=1.5)
 
@@ -227,14 +277,6 @@ class DAW_PT_ChannelRack(Panel):
         box.label(text="Opções do Rack", icon='SETTINGS')
         box.prop(rack, "step_count")
         box.prop(rack, "master_volume")
-
-        row = box.row(align=True)
-        row.prop(rack, "show_corner_overlay", text="Overlay no canto", icon='OVERLAY', toggle=True)
-        # Botão manual pro caso do overlay ainda não ter conseguido
-        # iniciar sozinho (ex.: addon foi ativado antes do workspace
-        # da DAW existir) -- ensure_started() já tenta de novo
-        # sozinho, mas isto dá um jeito imediato de forçar.
-        reopen = row.operator("daw.channel_rack_overlay", text="", icon='FILE_REFRESH')
 
 
 class DAW_PT_ChannelGroups(Panel):
