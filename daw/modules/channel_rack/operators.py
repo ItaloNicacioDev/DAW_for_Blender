@@ -53,6 +53,44 @@ class DAW_OT_AddChannel(Operator):
         return {'FINISHED'}
 
 
+class DAW_OT_PreviewChannel(Operator):
+    """
+    Toca a amostra deste canal (só faz sentido pra SAMPLER com
+    `sample_path` preenchido) e liga o medidor desse canal ao nível REAL
+    do áudio tocando, janela a janela -- ver preview.py. Não é uma
+    animação decorativa: é o mesmo dado que o dispositivo de saída está
+    reproduzindo.
+    """
+    bl_idname = "daw.preview_channel"
+    bl_label = "Tocar Preview"
+    bl_description = "Toca a amostra deste canal e mostra o nível real no medidor"
+    bl_options = {'REGISTER'}
+
+    channel_index: IntProperty(default=0)
+
+    def execute(self, context):
+        rack = _rack(context)
+        if not (0 <= self.channel_index < len(rack.channels)):
+            return {'CANCELLED'}
+        channel = rack.channels[self.channel_index]
+
+        if channel.instrument_type != "SAMPLER" or not channel.sample_path:
+            self.report({'WARNING'}, "Este canal não tem uma amostra (.wav) configurada")
+            return {'CANCELLED'}
+
+        from .preview import get_preview_player
+        import bpy as _bpy
+        path = _bpy.path.abspath(channel.sample_path)
+
+        player = get_preview_player()
+        error = player.play(channel.name, path, gain=channel.volume)
+        if error:
+            self.report({'ERROR'}, error)
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+
 class DAW_OT_SelectChannel(Operator):
     bl_idname = "daw.select_channel"
     bl_label = "Selecionar Track"
@@ -318,6 +356,7 @@ class DAW_OT_AssignChannelToGroup(Operator):
 
 classes = [
     DAW_OT_AddChannel,
+    DAW_OT_PreviewChannel,
     DAW_OT_SelectChannel,
     DAW_OT_RemoveChannel,
     DAW_OT_DuplicateChannel,
