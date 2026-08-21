@@ -116,7 +116,52 @@ def get_color_icon_value(color) -> int:
     return icon_value
 
 
-def clear_color_icon_cache() -> None:
+# ═══════════════════════════════════════════════════════════════
+#  MEDIDOR LED (verde/amarelo/vermelho)
+# ═══════════════════════════════════════════════════════════════
+# Limiares em fração do medidor (0.0 = mínimo, 1.0 = estourando).
+# Segue a convenção universal de VU/peak meter: verde = baixo/normal,
+# amarelo = moderado (chegando perto do teto), vermelho = muito
+# alto/clipping.
+METER_THRESHOLD_YELLOW = 0.70
+METER_THRESHOLD_RED = 0.90
+
+METER_COLOR_GREEN = (0.20, 0.85, 0.25)
+METER_COLOR_YELLOW = (0.95, 0.85, 0.15)
+METER_COLOR_RED = (0.95, 0.20, 0.15)
+METER_COLOR_OFF = (0.16, 0.16, 0.18)  # segmento apagado -- cinza escuro discreto
+
+METER_SEGMENTS = 8  # quantidade de "LEDs" empilhados no medidor
+
+
+def meter_segment_color(segment_index: int, total_segments: int, level: float) -> tuple:
+    """
+    Cor do segmento `segment_index` (0 = mais embaixo, cresce pra cima)
+    de um medidor de `total_segments` segmentos no total, dado o nível
+    atual `level` (0.0-1.0).
+
+    O segmento acende com a cor do LIMIAR DA SUA POSIÇÃO (não do nível
+    atual) quando `level` o alcança -- é assim que todo medidor de LED
+    de verdade funciona: os segmentos de cima já nascem "vermelhos" (é
+    a posição deles no medidor que é vermelha), só ficam apagados até o
+    nível alcançá-los.
+    """
+    segment_threshold = segment_index / total_segments  # nível mínimo pra este segmento acender
+    if level <= segment_threshold:
+        return METER_COLOR_OFF
+
+    segment_top = (segment_index + 1) / total_segments
+    if segment_top >= METER_THRESHOLD_RED:
+        return METER_COLOR_RED
+    if segment_top >= METER_THRESHOLD_YELLOW:
+        return METER_COLOR_YELLOW
+    return METER_COLOR_GREEN
+
+
+def get_meter_led_icon(segment_index: int, total_segments: int, level: float) -> int:
+    """Ícone (icon_value) do LED nesta posição, já na cor certa (aceso ou apagado)."""
+    color = meter_segment_color(segment_index, total_segments, level)
+    return get_color_icon_value(color)
     """Libera os ícones gerados -- chamado no unregister() do módulo."""
     global _preview_collection
     _color_icon_cache.clear()
