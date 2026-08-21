@@ -250,15 +250,6 @@ class ChannelRackProperties(PropertyGroup):
         subtype='FACTOR',
     )
 
-    show_corner_overlay: BoolProperty(
-        name="Overlay no Canto",
-        description="Mostra o Channel Rack desenhado fixo no canto "
-                     "inferior direito do Sequencer (ver "
-                     "modules/channel_rack/overlay.py), seguindo o "
-                     "visual da imagem de referência",
-        default=True,
-    )
-
 
 def register() -> None:
     bpy.utils.register_class(ChannelProperties)
