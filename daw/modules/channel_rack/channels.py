@@ -15,7 +15,13 @@ from typing import List, Optional
 
 from .colors import Color, get_color_by_index
 
-MAX_STEPS = 64
+# [FIX] Blender's BoolVectorProperty aceita no máximo 32 elementos
+# ("TypeError: (size=64) must be between 1 and 32") -- MAX_STEPS
+# precisava ser <= 32 pra `steps: BoolVectorProperty(size=MAX_STEPS, ...)`
+# em properties.py conseguir registrar. Estava em 64, o que quebrava o
+# registro do módulo inteiro. 32 steps ainda é bastante (2 compassos de
+# 16 a 4/4, ou 1 compasso de 32).
+MAX_STEPS = 32
 DEFAULT_STEP_COUNT = 16
 
 INSTRUMENT_TYPES = ("SAMPLER", "SYNTH", "AUDIO", "MIDI", "DRUM")
