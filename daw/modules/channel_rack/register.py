@@ -14,8 +14,6 @@ from .properties import (
 )
 from .operators import classes as operator_classes
 from .ui import classes as ui_classes
-from .overlay import classes as overlay_classes
-from . import overlay
 from .icons import clear_color_icon_cache
 
 
@@ -25,7 +23,6 @@ _all_classes = [
     ChannelRackProperties,
     *operator_classes,
     *ui_classes,
-    *overlay_classes,
 ]
 
 METER_TICK_INTERVAL = 0.1  # ~10x/seg -- suave o bastante pro olho, barato o bastante pra não pesar
@@ -36,25 +33,23 @@ def _meter_update_tick():
     """
     Roda a cada METER_TICK_INTERVAL segundos (bpy.app.timers) enquanto o
     addon está ativo, atualizando `channel.meter_level` de cada track do
-    Channel Rack:
+    Channel Rack. Duas fontes de dado REAL, nessa ordem de prioridade:
 
-      - `monitor_source == 'INPUT'`: lê o peak atual do dispositivo de
-        entrada configurado globalmente (mesmo `InputDeviceManager` que
-        o módulo recorder usa -- ver modules/recorder/input.py). Vários
-        tracks com monitor_source=INPUT ao mesmo tempo todos leem o
-        MESMO dispositivo (só existe um stream de entrada compartilhado
-        no momento) -- é uma limitação honesta: não dá pra monitorar
-        entradas físicas DIFERENTES por track sem múltiplos streams de
-        captura simultâneos, que não estão implementados.
-      - `monitor_source == 'NONE'` (tracks de instrumento/sample sem
-        fonte de entrada ao vivo): o medidor não tem de onde ler um
-        nível de verdade (Blender não expõe o áudio por-canal/por-strip
-        do VSE durante o playback via API pública), então só decai
-        suavemente até 0 em vez de ficar travado num valor antigo.
+      1. Preview manual (ver preview.py / DAW_OT_PreviewChannel): se o
+         usuário clicou ▶ neste canal, `ChannelPreviewPlayer.poll_level()`
+         devolve o RMS real da amostra tocando, janela a janela.
+      2. `monitor_source == 'INPUT'`: lê o peak do dispositivo de entrada
+         configurado globalmente (mesmo `InputDeviceManager` do módulo
+         recorder). Vários tracks com INPUT ao mesmo tempo leem o MESMO
+         dispositivo -- só existe um stream de captura compartilhado.
 
-    Retorna METER_TICK_INTERVAL pra bpy.app.timers reagendar; nunca
-    retorna None (o que cancelaria o timer) a menos que o addon tenha
-    sido desregistrado (ver `_meter_timer_registered`).
+    Se nenhuma das duas fontes tiver dado novo pra este canal, o
+    medidor decai suavemente até 0 -- IMPORTANTE: hoje não existe
+    nenhum scheduler ligando o Channel Rack à reprodução automática da
+    timeline (ver rack.py -- `core/engine.py` não referencia o Channel
+    Rack), então fora do preview manual e do monitor de entrada, o
+    medidor não tem de onde tirar um nível real. Não fabricamos uma
+    animação falsa pra disfarçar isso.
     """
     if not _meter_timer_registered[0]:
         return None  # addon foi desregistrado -- para o timer
@@ -78,8 +73,14 @@ def _meter_update_tick():
         except Exception:
             input_peak = 0.0
 
+    from .preview import get_preview_player
+    player = get_preview_player()
+
     for ch in rack.channels:
-        if ch.monitor_source == 'INPUT':
+        preview_level = player.poll_level(ch.name)
+        if preview_level is not None:
+            ch.meter_level = max(0.0, min(1.0, preview_level))
+        elif ch.monitor_source == 'INPUT':
             ch.meter_level = max(0.0, min(1.0, float(input_peak)))
         else:
             ch.meter_level = ch.meter_level * METER_DECAY_PER_TICK
@@ -108,19 +109,11 @@ def register():
         _meter_timer_registered[0] = True
         bpy.app.timers.register(_meter_update_tick, first_interval=METER_TICK_INTERVAL)
 
-    # Liga o overlay fixo do canto inferior direito automaticamente --
-    # não depende do usuário clicar em nada pra ele aparecer (ver
-    # overlay.py::ensure_started, que reagenda sozinho até achar um
-    # Sequencer aberto onde desenhar).
-    overlay.ensure_started()
-
     print("[DAW] Módulo channel_rack registrado")
 
 
 def unregister():
     _meter_timer_registered[0] = False  # próximo tick do timer se auto-cancela
-
-    overlay.force_stop()
 
     clear_color_icon_cache()
 
