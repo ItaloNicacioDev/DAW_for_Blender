@@ -277,6 +277,7 @@ class DAW_PT_ChannelRack(Panel):
         box.label(text="Opções do Rack", icon='SETTINGS')
         box.prop(rack, "step_count")
         box.prop(rack, "master_volume")
+        box.prop(rack, "show_mixer_strip_overlay")
 
 
 class DAW_PT_ChannelGroups(Panel):
