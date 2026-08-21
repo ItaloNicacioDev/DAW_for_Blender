@@ -250,6 +250,14 @@ class ChannelRackProperties(PropertyGroup):
         subtype='FACTOR',
     )
 
+    show_mixer_strip_overlay: BoolProperty(
+        name="Mostrar Mixer (overlay)",
+        description="Mostra o card do mixer (channel strips com fader, "
+                     "knob de pan e medidor de nível) ancorado no canto "
+                     "inferior esquerdo do Sequencer",
+        default=True,
+    )
+
 
 def register() -> None:
     bpy.utils.register_class(ChannelProperties)
