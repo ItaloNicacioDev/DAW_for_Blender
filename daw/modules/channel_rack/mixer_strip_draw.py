@@ -20,7 +20,7 @@ from gpu_extras.batch import batch_for_shader
 from .colors import darken, lighten
 from .mixer_strip_theme import PALETTE, meter_color
 from .mixer_strip_geometry import (
-    panel_geometry, STRIP_W, HEADER_H, CORNER_R,
+    panel_geometry, STRIP_W, HEADER_H, CORNER_R, DOT_R,
 )
 
 _shader = None
@@ -135,7 +135,7 @@ def _draw_knob(strip, pan_value: float, accent):
     _txt(label, cx - STRIP_W / 2, cy - r - 13, 9.5, PALETTE["knob_txt"], center_w=STRIP_W)
 
 
-def _draw_fader(strip, volume: float, selected: bool):
+def _draw_fader(strip, volume: float, selected: bool, playing: bool):
     tx, ty = strip.fader_track_x, strip.fader_track_y
     tw, th = strip.fader_track_w, strip.fader_track_h
     _round_rect(tx, ty, tw, th, PALETTE["fader_track"], radius=3)
@@ -144,16 +144,34 @@ def _draw_fader(strip, volume: float, selected: bool):
     _round_rect(tx, ty, tw, fill_h, PALETTE["fader_fill"], radius=3)
 
     cap_y = ty + fill_h - 7
-    cap_x = strip.fader_track_x + tw / 2 - (strip.fader_track_w if False else 0)
     cap_w = STRIP_W - 24
     cap_x0 = strip.knob_cx - cap_w / 2
     cap_col = PALETTE["fader_cap_selected"] if selected else PALETTE["fader_cap"]
+
+    # linha caindo do cap até a base do trilho -- só quando a strip
+    # selecionada está de fato emitindo áudio (pedido original: "mostrar
+    # o audio quando a strip selecionada esta sendo tocada").
+    if selected and playing:
+        _line(strip.knob_cx, cap_y, strip.knob_cx, ty, PALETTE["fader_cap_selected"], thickness=1.4)
+
     _round_rect(cap_x0, cap_y, cap_w, 14, cap_col, radius=4)
     _rect(cap_x0 + 4, cap_y + 6, cap_w - 8, 1.4, darken(cap_col[:3], 0.25) + (1.0,))
 
     db = (volume - 1.0) * 60.0 if volume < 1.0 else 0.0
     label = "0.0" if volume >= 0.999 else f"{db:.1f}"
     _txt(label, cap_x0, cap_y + 17, 8.5, PALETTE["header_txt_dim"], center_w=cap_w)
+
+
+def _draw_insert_area(strip, top_y: float, bottom_y: float):
+    """Área vazia entre o knob e o fader, como o 'rack de inserts' vazio
+    da referência -- puramente decorativa (linhas finas de slot)."""
+    x0 = strip.knob_cx - (STRIP_W - 24) / 2
+    x1 = strip.knob_cx + (STRIP_W - 24) / 2
+    slot_h = 15
+    y = top_y - 6
+    while y - slot_h > bottom_y:
+        _rect(x0, y - slot_h, x1 - x0, 1.0, (1.0, 1.0, 1.0, 0.035))
+        y -= slot_h
 
 
 def _draw_meter(strip, level_l: float, level_r: float, clipping: bool):
@@ -196,8 +214,8 @@ def _draw_strip(strip, ch, index: int, active_index: int, is_playing_selected: b
                      (body_top - body_bottom) + 2 * pad, glow, radius=7)
         _round_rect(x0, body_bottom, x1 - x0, body_top - body_bottom, bg, radius=6)
 
-    # header: chip de cor + número + nome
-    header_col = PALETTE["header_bg"]
+    # header: chip de cor + número + nome -- fundo mais claro quando selecionado
+    header_col = lighten(PALETTE["header_bg"][:3], 0.10) + (1.0,) if selected else PALETTE["header_bg"]
     _round_rect(x0, strip.header_y, x1 - x0, HEADER_H, header_col, radius=6)
     chip_col = tuple(ch.color) + (1.0,)
     _round_rect(x0 + 6, strip.header_y + HEADER_H / 2 - 4, 8, 8, chip_col, radius=2)
@@ -206,9 +224,14 @@ def _draw_strip(strip, ch, index: int, active_index: int, is_playing_selected: b
     name = ch.name if len(ch.name) <= 9 else ch.name[:8] + "…"
     _txt(name, x0, strip.header_y - 12, 9, PALETTE["header_txt_dim"], center_w=(x1 - x0))
 
+    # ponto indicador (verde = audível, apagado = mudo) logo abaixo do header
+    dot_col = (0.30, 0.85, 0.35, 1.0) if not ch.mute else (0.30, 0.31, 0.36, 1.0)
+    _circle_fill(strip.dot_cx, strip.dot_cy, DOT_R, dot_col)
+
     accent = chip_col if not ch.mute else darken(tuple(ch.color), 0.4) + (1.0,)
     _draw_knob(strip, getattr(ch, "pan", 0.0), accent)
-    _draw_fader(strip, getattr(ch, "volume", 0.78), selected)
+    _draw_insert_area(strip, strip.knob_cy - strip.knob_r - 13, strip.fader_track_y + strip.fader_track_h)
+    _draw_fader(strip, getattr(ch, "volume", 0.78), selected, is_playing_selected)
 
     level = max(0.0, min(1.0, getattr(ch, "meter_level", 0.0))) if not ch.mute else 0.0
     pan = getattr(ch, "pan", 0.0)
