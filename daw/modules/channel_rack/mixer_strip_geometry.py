@@ -21,9 +21,11 @@ STRIP_GAP = 3
 MAX_VISIBLE_STRIPS = 10
 
 HEADER_H = 30
+DOT_R = 3.0
+DOT_GAP = 9
 KNOB_D = 34
-KNOB_MARGIN_TOP = 8
-FADER_TOP_GAP = 6
+KNOB_MARGIN_TOP = 10
+FADER_TOP_GAP = 70          # espaço "rack de inserts" vazio acima do fader, como na referência
 FADER_TRACK_H = 190
 FADER_TRACK_W = 8
 FADER_CAP_H = 14
@@ -41,6 +43,8 @@ class StripRect(NamedTuple):
     index: int
     x: float
     header_y: float
+    dot_cx: float
+    dot_cy: float
     knob_cx: float
     knob_cy: float
     knob_r: float
@@ -64,7 +68,7 @@ def panel_geometry(region, channels: Sequence) -> dict:
     visible = list(channels)[:MAX_VISIBLE_STRIPS]
     n = max(len(visible), 1)
 
-    body_h = HEADER_H + KNOB_MARGIN_TOP + KNOB_D + FADER_TOP_GAP + FADER_TRACK_H + FOOTER_GAP + FOOTER_H
+    body_h = HEADER_H + DOT_GAP + KNOB_MARGIN_TOP + KNOB_D + FADER_TOP_GAP + FADER_TRACK_H + FOOTER_GAP + FOOTER_H
     panel_w = n * STRIP_W + (n - 1) * STRIP_GAP + 16 if visible else 220
     panel_h = body_h + 16
 
@@ -76,7 +80,9 @@ def panel_geometry(region, channels: Sequence) -> dict:
     body_bottom = py + 8
     for i in range(len(visible)):
         header_y = py + panel_h - 8 - HEADER_H
-        knob_cy = header_y - KNOB_MARGIN_TOP - KNOB_D / 2
+        dot_cy = header_y - DOT_GAP
+        dot_cx = sx + STRIP_W / 2
+        knob_cy = dot_cy - KNOB_MARGIN_TOP - KNOB_D / 2
         knob_cx = sx + STRIP_W / 2
 
         fader_track_y = knob_cy - KNOB_D / 2 - FADER_TOP_GAP - FADER_TRACK_H
@@ -93,6 +99,7 @@ def panel_geometry(region, channels: Sequence) -> dict:
 
         strips.append(StripRect(
             index=i, x=sx, header_y=header_y,
+            dot_cx=dot_cx, dot_cy=dot_cy,
             knob_cx=knob_cx, knob_cy=knob_cy, knob_r=KNOB_D / 2,
             fader_track_x=fader_track_x, fader_track_y=fader_track_y,
             fader_track_w=FADER_TRACK_W, fader_track_h=FADER_TRACK_H,
