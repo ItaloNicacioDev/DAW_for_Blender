@@ -19,9 +19,7 @@ from gpu_extras.batch import batch_for_shader
 
 from .colors import darken, lighten
 from .mixer_strip_theme import PALETTE, meter_color
-from .mixer_strip_geometry import (
-    panel_geometry, STRIP_W, HEADER_H, CORNER_R, DOT_R,
-)
+from .mixer_strip_geometry import panel_geometry, CORNER_R
 
 _shader = None
 
@@ -119,32 +117,34 @@ def _txt(text, x, y, size, col, font_id=0, center_w=None):
 # ------------------------------------------------------------------ #
 #  Sub-desenhos de cada elemento da strip
 # ------------------------------------------------------------------ #
-def _draw_knob(strip, pan_value: float, accent):
+def _draw_knob(strip, pan_value: float, accent, s: float):
     cx, cy, r = strip.knob_cx, strip.knob_cy, strip.knob_r
     _circle_fill(cx, cy, r, PALETTE["knob_fill"])
     _circle_outline(cx, cy, r, PALETTE["knob_ring"])
 
     # ponteiro: -1..1 mapeado para -135°..+135° (0 = topo = "12 horas")
     angle = math.radians(90 - pan_value * 135)
-    ix = cx + math.cos(angle) * (r - 6)
-    iy = cy + math.sin(angle) * (r - 6)
-    _line(cx, cy, ix, iy, accent, thickness=2.2)
-    _circle_fill(cx, cy, 2.2, accent)
+    ix = cx + math.cos(angle) * (r - 6 * s)
+    iy = cy + math.sin(angle) * (r - 6 * s)
+    _line(cx, cy, ix, iy, accent, thickness=2.2 * s)
+    _circle_fill(cx, cy, 2.2 * s, accent)
 
     label = f"{pan_value * 100:+.0f}" if abs(pan_value) > 0.005 else "C"
-    _txt(label, cx - STRIP_W / 2, cy - r - 13, 9.5, PALETTE["knob_txt"], center_w=STRIP_W)
+    _txt(label, cx - strip.strip_w / 2, cy - r - 13 * s, max(7.0, 9.5 * s),
+         PALETTE["knob_txt"], center_w=strip.strip_w)
 
 
-def _draw_fader(strip, volume: float, selected: bool, playing: bool):
+def _draw_fader(strip, volume: float, selected: bool, playing: bool, s: float):
     tx, ty = strip.fader_track_x, strip.fader_track_y
     tw, th = strip.fader_track_w, strip.fader_track_h
-    _round_rect(tx, ty, tw, th, PALETTE["fader_track"], radius=3)
+    _round_rect(tx, ty, tw, th, PALETTE["fader_track"], radius=3 * s)
 
     fill_h = th * max(0.0, min(1.0, volume))
-    _round_rect(tx, ty, tw, fill_h, PALETTE["fader_fill"], radius=3)
+    _round_rect(tx, ty, tw, fill_h, PALETTE["fader_fill"], radius=3 * s)
 
-    cap_y = ty + fill_h - 7
-    cap_w = STRIP_W - 24
+    cap_h = strip.fader_cap_h
+    cap_y = ty + fill_h - cap_h / 2
+    cap_w = strip.strip_w - 24 * s
     cap_x0 = strip.knob_cx - cap_w / 2
     cap_col = PALETTE["fader_cap_selected"] if selected else PALETTE["fader_cap"]
 
@@ -152,23 +152,23 @@ def _draw_fader(strip, volume: float, selected: bool, playing: bool):
     # selecionada está de fato emitindo áudio (pedido original: "mostrar
     # o audio quando a strip selecionada esta sendo tocada").
     if selected and playing:
-        _line(strip.knob_cx, cap_y, strip.knob_cx, ty, PALETTE["fader_cap_selected"], thickness=1.4)
+        _line(strip.knob_cx, cap_y, strip.knob_cx, ty, PALETTE["fader_cap_selected"], thickness=1.4 * s)
 
-    _round_rect(cap_x0, cap_y, cap_w, 14, cap_col, radius=4)
-    _rect(cap_x0 + 4, cap_y + 6, cap_w - 8, 1.4, darken(cap_col[:3], 0.25) + (1.0,))
+    _round_rect(cap_x0, cap_y, cap_w, cap_h, cap_col, radius=4 * s)
+    _rect(cap_x0 + 4 * s, cap_y + cap_h / 2 - 1, cap_w - 8 * s, 1.4 * s, darken(cap_col[:3], 0.25) + (1.0,))
 
     db = (volume - 1.0) * 60.0 if volume < 1.0 else 0.0
     label = "0.0" if volume >= 0.999 else f"{db:.1f}"
-    _txt(label, cap_x0, cap_y + 17, 8.5, PALETTE["header_txt_dim"], center_w=cap_w)
+    _txt(label, cap_x0, cap_y + cap_h + 3 * s, max(7.0, 8.5 * s), PALETTE["header_txt_dim"], center_w=cap_w)
 
 
-def _draw_insert_area(strip, top_y: float, bottom_y: float):
+def _draw_insert_area(strip, top_y: float, bottom_y: float, s: float):
     """Área vazia entre o knob e o fader, como o 'rack de inserts' vazio
     da referência -- puramente decorativa (linhas finas de slot)."""
-    x0 = strip.knob_cx - (STRIP_W - 24) / 2
-    x1 = strip.knob_cx + (STRIP_W - 24) / 2
-    slot_h = 15
-    y = top_y - 6
+    x0 = strip.knob_cx - (strip.strip_w - 24 * s) / 2
+    x1 = strip.knob_cx + (strip.strip_w - 24 * s) / 2
+    slot_h = 15 * s
+    y = top_y - 6 * s
     while y - slot_h > bottom_y:
         _rect(x0, y - slot_h, x1 - x0, 1.0, (1.0, 1.0, 1.0, 0.035))
         y -= slot_h
@@ -196,42 +196,42 @@ def _draw_meter(strip, level_l: float, level_r: float, clipping: bool):
         _rect(mx, my + mh - 3, mw, 3, PALETTE["meter_clip"])
 
 
-def _draw_strip(strip, ch, index: int, active_index: int, is_playing_selected: bool):
+def _draw_strip(strip, ch, index: int, active_index: int, is_playing_selected: bool, s: float):
     selected = index == active_index
     alt = index % 2 == 1
-    x0, x1 = strip.x, strip.x + STRIP_W - 8
+    x0, x1 = strip.x, strip.x + strip.strip_w - 8 * s
 
     from .mixer_strip_theme import strip_bg_for
     bg = strip_bg_for(ch.mute, alt)
-    body_top = strip.header_y + HEADER_H
-    body_bottom = strip.footer_y - 6
-    _round_rect(x0, body_bottom, x1 - x0, body_top - body_bottom, bg, radius=6)
+    body_top = strip.header_y + strip.header_h
+    body_bottom = strip.footer_y - 6 * s
+    _round_rect(x0, body_bottom, x1 - x0, body_top - body_bottom, bg, radius=6 * s)
 
     if selected and is_playing_selected:
         glow = PALETTE["strip_selected_glow"]
-        pad = 2
+        pad = 2 * s
         _round_rect(x0 - pad, body_bottom - pad, (x1 - x0) + 2 * pad,
-                     (body_top - body_bottom) + 2 * pad, glow, radius=7)
-        _round_rect(x0, body_bottom, x1 - x0, body_top - body_bottom, bg, radius=6)
+                     (body_top - body_bottom) + 2 * pad, glow, radius=7 * s)
+        _round_rect(x0, body_bottom, x1 - x0, body_top - body_bottom, bg, radius=6 * s)
 
     # header: chip de cor + número + nome -- fundo mais claro quando selecionado
     header_col = lighten(PALETTE["header_bg"][:3], 0.10) + (1.0,) if selected else PALETTE["header_bg"]
-    _round_rect(x0, strip.header_y, x1 - x0, HEADER_H, header_col, radius=6)
+    _round_rect(x0, strip.header_y, x1 - x0, strip.header_h, header_col, radius=6 * s)
     chip_col = tuple(ch.color) + (1.0,)
-    _round_rect(x0 + 6, strip.header_y + HEADER_H / 2 - 4, 8, 8, chip_col, radius=2)
+    _round_rect(x0 + 6 * s, strip.header_y + strip.header_h / 2 - 4 * s, 8 * s, 8 * s, chip_col, radius=2 * s)
     number = str(getattr(ch, "vse_channel", index + 1))
-    _txt(number, x0 + 18, strip.header_y + HEADER_H / 2 - 4, 10, PALETTE["header_txt"])
+    _txt(number, x0 + 18 * s, strip.header_y + strip.header_h / 2 - 4 * s, max(7.0, 10 * s), PALETTE["header_txt"])
     name = ch.name if len(ch.name) <= 9 else ch.name[:8] + "…"
-    _txt(name, x0, strip.header_y - 12, 9, PALETTE["header_txt_dim"], center_w=(x1 - x0))
+    _txt(name, x0, strip.header_y - 12 * s, max(6.0, 9 * s), PALETTE["header_txt_dim"], center_w=(x1 - x0))
 
     # ponto indicador (verde = audível, apagado = mudo) logo abaixo do header
     dot_col = (0.30, 0.85, 0.35, 1.0) if not ch.mute else (0.30, 0.31, 0.36, 1.0)
-    _circle_fill(strip.dot_cx, strip.dot_cy, DOT_R, dot_col)
+    _circle_fill(strip.dot_cx, strip.dot_cy, strip.dot_r, dot_col)
 
     accent = chip_col if not ch.mute else darken(tuple(ch.color), 0.4) + (1.0,)
-    _draw_knob(strip, getattr(ch, "pan", 0.0), accent)
-    _draw_insert_area(strip, strip.knob_cy - strip.knob_r - 13, strip.fader_track_y + strip.fader_track_h)
-    _draw_fader(strip, getattr(ch, "volume", 0.78), selected, is_playing_selected)
+    _draw_knob(strip, getattr(ch, "pan", 0.0), accent, s)
+    _draw_insert_area(strip, strip.knob_cy - strip.knob_r - 13 * s, strip.fader_track_y + strip.fader_track_h, s)
+    _draw_fader(strip, getattr(ch, "volume", 0.78), selected, is_playing_selected, s)
 
     level = max(0.0, min(1.0, getattr(ch, "meter_level", 0.0))) if not ch.mute else 0.0
     pan = getattr(ch, "pan", 0.0)
@@ -243,11 +243,13 @@ def _draw_strip(strip, ch, index: int, active_index: int, is_playing_selected: b
     # rodapé M/S
     mute_col = PALETTE["mute_on"] if ch.mute else PALETTE["mute_off"]
     solo_col = PALETTE["solo_on"] if ch.solo else PALETTE["solo_off"]
-    _round_rect(strip.mute_x, strip.footer_y, strip.btn_w, strip.btn_h, mute_col, radius=4)
-    _txt("M", strip.mute_x, strip.footer_y + strip.btn_h / 2 - 4, 9.5, PALETTE["btn_txt"], center_w=strip.btn_w)
-    _round_rect(strip.solo_x, strip.footer_y, strip.btn_w, strip.btn_h, solo_col, radius=4)
+    _round_rect(strip.mute_x, strip.footer_y, strip.btn_w, strip.btn_h, mute_col, radius=4 * s)
+    _txt("M", strip.mute_x, strip.footer_y + strip.btn_h / 2 - 4 * s, max(7.0, 9.5 * s),
+         PALETTE["btn_txt"], center_w=strip.btn_w)
+    _round_rect(strip.solo_x, strip.footer_y, strip.btn_w, strip.btn_h, solo_col, radius=4 * s)
     txt_col = PALETTE["btn_txt_on_dark"] if ch.solo else PALETTE["btn_txt"]
-    _txt("S", strip.solo_x, strip.footer_y + strip.btn_h / 2 - 4, 9.5, txt_col, center_w=strip.btn_w)
+    _txt("S", strip.solo_x, strip.footer_y + strip.btn_h / 2 - 4 * s, max(7.0, 9.5 * s),
+         txt_col, center_w=strip.btn_w)
 
 
 # ------------------------------------------------------------------ #
@@ -265,23 +267,38 @@ def draw_mixer_strips():
         return
 
     region = context.region
-    geo = panel_geometry(region, rack.channels)
+    pos_x = getattr(rack, "overlay_pos_x", 16)
+    pos_y = getattr(rack, "overlay_pos_y", 16)
+    scale = getattr(rack, "overlay_scale", 1.0)
+    geo = panel_geometry(region, rack.channels, pos_x, pos_y, scale)
     px, py, panel_w, panel_h = geo["px"], geo["py"], geo["panel_w"], geo["panel_h"]
     channels = geo["channels"]
+    s = geo["scale"]
 
     gpu.state.blend_set('ALPHA')
 
     _round_rect(px - 1, py - 1, panel_w + 2, panel_h + 2, PALETTE["border"])
     _round_rect(px, py, panel_w, panel_h, PALETTE["panel_bg"])
-    _txt("Mixer", px + 8, py + panel_h - 8 - 10, 10.5, PALETTE["header_txt"])
+
+    # barra de título -- arrastável (clique+arraste move o painel inteiro)
+    title_y = geo["title_y"]
+    _round_rect(px, title_y, panel_w, geo["title_h"], PALETTE["header_bg"], radius=6 * s)
+    _txt("Mixer  ·  arraste para mover", px + 8 * s, title_y + geo["title_h"] / 2 - 4 * s,
+         max(7.0, 9.5 * s), PALETTE["header_txt_dim"])
+
+    # alça de redimensionar, canto inferior direito
+    gx, gy, gs = geo["grip_x"], geo["grip_y"], geo["grip_size"]
+    for i in range(3):
+        off = i * gs / 3.2
+        _line(gx + off, gy, gx + gs, gy + gs - off, PALETTE["header_txt_dim"], thickness=1.2 * s)
 
     if not channels:
-        _txt("Nenhum canal", px + 8, py + panel_h / 2, 10.5, PALETTE["empty_txt"])
+        _txt("Nenhum canal", px + 8 * s, py + panel_h / 2, max(7.0, 10.5 * s), PALETTE["empty_txt"])
         gpu.state.blend_set('NONE')
         return
 
     for strip, ch in zip(geo["strips"], channels):
         is_selected_playing = getattr(ch, "meter_level", 0.0) > 0.02 and not ch.mute
-        _draw_strip(strip, ch, strip.index, rack.active_channel_index, is_selected_playing)
+        _draw_strip(strip, ch, strip.index, rack.active_channel_index, is_selected_playing, s)
 
     gpu.state.blend_set('NONE')
