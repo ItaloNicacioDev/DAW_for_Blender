@@ -15,15 +15,7 @@ from typing import List, Optional
 
 from .colors import Color, get_color_by_index
 
-# O Blender limita BoolVectorProperty a no máximo 32 elementos (ver
-# properties.py::ChannelProperties.steps) -- por isso o teto aqui é 32,
-# não um número maior "redondo". Se um dia for preciso mais steps que
-# isso, a solução é trocar `steps` por duas BoolVectorProperty de 32
-# concatenadas (ou uma CollectionProperty), não só subir este valor --
-# subir sozinho quebra o registro do módulo inteiro de novo (foi
-# exatamente esse o bug: MAX_STEPS=64 aqui derrubava o channel_rack
-# todo silenciosamente no console, sem nada aparecer na UI).
-MAX_STEPS = 32
+MAX_STEPS = 64
 DEFAULT_STEP_COUNT = 16
 
 INSTRUMENT_TYPES = ("SAMPLER", "SYNTH", "AUDIO", "MIDI", "DRUM")
