@@ -162,6 +162,9 @@ def get_meter_led_icon(segment_index: int, total_segments: int, level: float) ->
     """Ícone (icon_value) do LED nesta posição, já na cor certa (aceso ou apagado)."""
     color = meter_segment_color(segment_index, total_segments, level)
     return get_color_icon_value(color)
+
+
+def clear_color_icon_cache() -> None:
     """Libera os ícones gerados -- chamado no unregister() do módulo."""
     global _preview_collection
     _color_icon_cache.clear()
