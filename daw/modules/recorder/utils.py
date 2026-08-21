@@ -128,8 +128,19 @@ def get_sequencer_for_scene(scene):
 def get_strips_collection(seq):
     """A partir do Blender 4.4, `SequenceEditor.sequences` foi renomeado
     para `SequenceEditor.strips`. Este helper centraliza o fallback
-    entre as duas APIs, usado em todo o módulo recorder."""
-    return getattr(seq, 'strips', None) or seq.sequences
+    entre as duas APIs, usado em todo o módulo recorder.
+
+    BUG CORRIGIDO: a versão anterior fazia
+    `getattr(seq, 'strips', None) or seq.sequences` -- isso quebra
+    justamente no caso mais comum (timeline vazia, gravando a
+    PRIMEIRA strip): uma `bpy_prop_collection` vazia é "falsy" em
+    Python, então o `or` caía pro `seq.sequences`, que não existe mais
+    no Blender 5.2 (`AttributeError: 'SequenceEditor' object has no
+    attribute 'sequences'`). `hasattr()` testa a existência do
+    atributo, não se a coleção está vazia -- é a checagem certa aqui."""
+    if hasattr(seq, 'strips'):
+        return seq.strips
+    return seq.sequences
 
 
 def create_sound_strip(context, filepath: str, channel: int, frame_start: int):
