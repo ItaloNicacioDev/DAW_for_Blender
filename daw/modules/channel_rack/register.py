@@ -15,6 +15,8 @@ from .properties import (
 from .operators import classes as operator_classes
 from .ui import classes as ui_classes
 from .icons import clear_color_icon_cache
+from . import mixer_strip_operator
+from .mixer_strip_operator import classes as mixer_strip_classes
 
 
 _all_classes = [
@@ -23,6 +25,7 @@ _all_classes = [
     ChannelRackProperties,
     *operator_classes,
     *ui_classes,
+    *mixer_strip_classes,
 ]
 
 METER_TICK_INTERVAL = 0.1  # ~10x/seg -- suave o bastante pro olho, barato o bastante pra não pesar
@@ -109,11 +112,15 @@ def register():
         _meter_timer_registered[0] = True
         bpy.app.timers.register(_meter_update_tick, first_interval=METER_TICK_INTERVAL)
 
+    mixer_strip_operator.ensure_started()
+
     print("[DAW] Módulo channel_rack registrado")
 
 
 def unregister():
     _meter_timer_registered[0] = False  # próximo tick do timer se auto-cancela
+
+    mixer_strip_operator.force_stop()
 
     clear_color_icon_cache()
 
