@@ -34,6 +34,7 @@ PALETTE = {
     "strip_bg_alt":    (0.102, 0.106, 0.131, 1.0),
     "strip_bg_muted":  (0.075, 0.078, 0.096, 1.0),
     "strip_selected_glow": (0.35, 0.95, 0.40, 0.9),
+    "selection_outline": (0.62, 0.66, 0.98, 0.85),
 
     "header_bg":       (0.145, 0.150, 0.184, 1.0),
     "header_txt":      (0.88, 0.885, 0.92, 1.0),
