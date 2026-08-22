@@ -57,6 +57,9 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
     # 'FADER' | 'KNOB' | 'MOVE' | 'RESIZE' | None
     _drag_kind = None
     _drag_index = -1
+    _drag_attr = None            # 'volume' | 'pan'
+    _drag_group = ()             # índices dos canais que se movem juntos
+    _drag_start_values = {}      # {índice: valor inicial}
     _drag_start_mouse = (0, 0)
     _drag_start_value = 0.0
     _drag_start_pos = (0, 0)
@@ -72,6 +75,31 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
         context.window_manager.modal_handler_add(self)
         _tag_redraw_sequencers()
         return {'RUNNING_MODAL'}
+
+    @staticmethod
+    def _select_only(channels, idx):
+        for c in channels:
+            c.selected = False
+        channels[idx].selected = True
+
+    def _prepare_drag_group(self, rack, channels, idx, attr):
+        """Decide quais canais se movem juntos: se o canal clicado já faz
+        parte da seleção atual, arrasta o grupo inteiro (comportamento
+        clássico de DAW); senão, vira uma seleção nova só dele."""
+        ch = channels[idx]
+        if not getattr(ch, "selected", False):
+            self._select_only(channels, idx)
+        rack.active_channel_index = idx
+
+        group = [i for i, c in enumerate(channels) if getattr(c, "selected", False)]
+        if idx not in group:
+            group.append(idx)
+
+        self._drag_kind = 'FADER' if attr == 'volume' else 'KNOB'
+        self._drag_attr = attr
+        self._drag_group = tuple(group)
+        self._drag_start_values = {i: getattr(channels[i], attr) for i in group}
+        self._drag_index = idx
 
     def modal(self, context, event):
         if not _running[0]:
@@ -119,23 +147,24 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
                 ch = channels[idx]
 
                 if kind == 'HEADER':
+                    # clique normal = seleciona só essa; Shift+clique =
+                    # soma/remove da seleção (multi-seleção, como em
+                    # outras DAWs)
+                    if event.shift:
+                        ch.selected = not ch.selected
+                    else:
+                        self._select_only(channels, idx)
                     rack.active_channel_index = idx
                 elif kind == 'MUTE':
                     ch.mute = not ch.mute
                 elif kind == 'SOLO':
                     ch.solo = not ch.solo
                 elif kind == 'FADER':
-                    rack.active_channel_index = idx
-                    self._drag_kind = 'FADER'
-                    self._drag_index = idx
+                    self._prepare_drag_group(rack, channels, idx, 'volume')
                     self._drag_start_mouse = (mx, my)
-                    self._drag_start_value = ch.volume
                 elif kind == 'KNOB':
-                    rack.active_channel_index = idx
-                    self._drag_kind = 'KNOB'
-                    self._drag_index = idx
+                    self._prepare_drag_group(rack, channels, idx, 'pan')
                     self._drag_start_mouse = (mx, my)
-                    self._drag_start_value = ch.pan
 
                 context.area.tag_redraw()
                 return {'RUNNING_MODAL'}
@@ -143,6 +172,9 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
             elif event.value == 'RELEASE':
                 dragging = self._drag_kind is not None
                 self._drag_kind = None
+                self._drag_attr = None
+                self._drag_group = ()
+                self._drag_start_values = {}
                 self._drag_index = -1
                 if dragging:
                     context.area.tag_redraw()
@@ -165,19 +197,27 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
                 rack.overlay_scale = clamp_scale(self._drag_start_value + delta)
                 context.area.tag_redraw()
 
-            elif 0 <= self._drag_index < len(channels):
-                ch = channels[self._drag_index]
-
+            elif self._drag_kind in ('FADER', 'KNOB') and self._drag_group:
                 if self._drag_kind == 'FADER':
                     from .mixer_strip_geometry import FADER_TRACK_H
-                    track_h = FADER_TRACK_H * scale
-                    delta = (my - sy) / track_h
-                    ch.volume = max(0.0, min(1.0, self._drag_start_value + delta))
-                elif self._drag_kind == 'KNOB':
+                    delta = (my - sy) / (FADER_TRACK_H * scale)
+                    lo, hi = 0.0, 1.0
+                else:
                     # arraste horizontal: curso proporcional à escala
                     # atual, convenção comum de knob em DAWs.
                     delta = (mx - sx) / (140.0 * scale)
-                    ch.pan = max(-1.0, min(1.0, self._drag_start_value + delta))
+                    lo, hi = -1.0, 1.0
+
+                # mesmo delta pra todo mundo selecionado -- é assim que
+                # DAWs normais movem faders/knobs em grupo (cada um
+                # clampado no seu próprio limite, sem "esticar" a
+                # proporção dos outros)
+                for i in self._drag_group:
+                    if i >= len(channels):
+                        continue
+                    start = self._drag_start_values.get(i, 0.0)
+                    value = max(lo, min(hi, start + delta))
+                    setattr(channels[i], self._drag_attr, value)
 
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
