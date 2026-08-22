@@ -1,28 +1,44 @@
 # modules/channel_rack/mixer_strip_operator.py
 """
-Operador modal que mantém vivo o overlay das channel strips do mixer
-(`mixer_strip_draw.draw_mixer_strips`) e trata os cliques/arrastes:
+Interação (clique/arraste) das channel strips do mixer.
 
-  - clique no header        -> seleciona o canal (active_channel_index)
-  - arrastar o fader         -> ajusta `channel.volume` (0.0-1.0)
-  - arrastar o knob (eixo X) -> ajusta `channel.pan` (-1.0-1.0)
-  - clique em M / S          -> alterna mute / solo
-  - arrastar a barra de título -> move o painel inteiro (`rack.overlay_pos_x/y`)
-  - arrastar a alça (canto inferior direito) -> redimensiona (`rack.overlay_scale`)
+IMPORTANTE -- histórico da correção: a primeira versão deste arquivo
+tentava manter um único operador modal "eterno", iniciado sozinho via
+`bpy.app.timers` + `bpy.context.temp_override(...)` logo no register()
+do addon. Isso desenhava a tela certinho (o draw_handler não depende
+de operador nenhum), mas os cliques/arrastes nunca funcionavam: um
+operador invocado a partir de um timer, com o contexto "forjado" por
+temp_override, não fica de fato "dono" do event loop da janela da
+forma como o Blender espera -- é o mesmo tipo de contexto restrito que
+já aparecia no log do seu addon para o VST ("_RestrictData' object has
+no attribute 'scenes'").
 
-Mesma arquitetura de `overlay.py` (draw_handler_add em
-SpaceSequenceEditor/'WINDOW', hit-test compartilhado via
-`mixer_strip_geometry`, `ensure_started()`/`force_stop()` chamados por
-`register.py`) -- projetado para conviver com o overlay do step grid
-sem conflito (paineis em cantos diferentes, cada um com seu próprio
-operador/handler).
+A forma robusta e padrão do Blender pra isso é: registrar um atalho de
+teclado/mouse (keymap item) pro LEFTMOUSE no editor do Sequencer. O
+Blender então invoca o operador com um evento e um contexto DE
+VERDADE a cada clique. No `invoke()`:
+  - fizemos o hit-test primeiro;
+  - se o clique foi fora do card -> devolvemos {'PASS_THROUGH'}
+    IMEDIATAMENTE, sem nem registrar handler modal -- o clique cai
+    pro comportamento normal do Sequencer (selecionar strip, etc.);
+  - se acertou um botão de ação única (header/M/S) -> aplicamos e
+    terminamos ({'FINISHED'}), sem precisar de modal;
+  - se acertou algo arrastável (fader/knob/título/alça) -> aí sim
+    chamamos `modal_handler_add` e seguimos em {'RUNNING_MODAL'} só
+    até o LEFTMOUSE ser solto.
+
+Isso é o mesmo padrão do operador de exemplo "Simple Modal Operator"
+da própria documentação do Blender (invoke registra o handler modal e
+o keymap dispara o invoke), então funciona de forma confiável.
 """
 from __future__ import annotations
+
+import math
 
 import bpy
 
 from .mixer_strip_draw import draw_mixer_strips
-from .mixer_strip_geometry import hit_test, clamp_scale
+from .mixer_strip_geometry import hit_test, clamp_scale, FADER_TRACK_H
 
 
 def _tag_redraw_sequencers():
@@ -35,6 +51,13 @@ def _tag_redraw_sequencers():
         pass
 
 
+def _get_rack(context):
+    scene = context.scene
+    if scene is None or not hasattr(scene, "daw_channel_rack"):
+        return None
+    return scene.daw_channel_rack
+
+
 def _get_overlay_pos_scale(rack):
     return (
         getattr(rack, "overlay_pos_x", 16),
@@ -43,38 +66,23 @@ def _get_overlay_pos_scale(rack):
     )
 
 
-_handle = None
-_running = [False]
-
-
 class DAW_OT_MixerStripOverlay(bpy.types.Operator):
-    """Liga o overlay das channel strips do mixer e escuta
-    clique/arraste sobre ele (fader, knob, M/S, mover, redimensionar)."""
+    """Clique/arraste sobre o card do mixer (channel strips): fader,
+    knob de pan, M/S, mover o card (barra de título) e redimensionar
+    (alça no canto inferior direito)."""
     bl_idname = "daw.mixer_strip_overlay"
     bl_label = "Mixer (channel strips)"
     bl_options = {'REGISTER', 'INTERNAL'}
 
     # 'FADER' | 'KNOB' | 'MOVE' | 'RESIZE' | None
     _drag_kind = None
-    _drag_index = -1
     _drag_attr = None            # 'volume' | 'pan'
     _drag_group = ()             # índices dos canais que se movem juntos
     _drag_start_values = {}      # {índice: valor inicial}
     _drag_start_mouse = (0, 0)
     _drag_start_value = 0.0
     _drag_start_pos = (0, 0)
-
-    def invoke(self, context, event):
-        global _handle
-        if _running[0]:
-            return {'CANCELLED'}
-
-        _handle = bpy.types.SpaceSequenceEditor.draw_handler_add(
-            draw_mixer_strips, (), 'WINDOW', 'POST_PIXEL')
-        _running[0] = True
-        context.window_manager.modal_handler_add(self)
-        _tag_redraw_sequencers()
-        return {'RUNNING_MODAL'}
+    _drag_anchor = (0, 0)        # canto (px,py) do painel, p/ redimensionar
 
     @staticmethod
     def _select_only(channels, idx):
@@ -99,21 +107,12 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
         self._drag_attr = attr
         self._drag_group = tuple(group)
         self._drag_start_values = {i: getattr(channels[i], attr) for i in group}
-        self._drag_index = idx
 
-    def modal(self, context, event):
-        if not _running[0]:
-            self._cleanup()
-            return {'FINISHED'}
-
+    def invoke(self, context, event):
         if context.area is None or context.area.type != 'SEQUENCE_EDITOR':
             return {'PASS_THROUGH'}
-
-        scene = context.scene
-        if scene is None or not hasattr(scene, "daw_channel_rack"):
-            return {'PASS_THROUGH'}
-        rack = scene.daw_channel_rack
-        if not getattr(rack, "show_mixer_strip_overlay", True):
+        rack = _get_rack(context)
+        if rack is None or not getattr(rack, "show_mixer_strip_overlay", True):
             return {'PASS_THROUGH'}
 
         region = context.region
@@ -121,85 +120,98 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
         channels = list(rack.channels)
         pos_x, pos_y, scale = _get_overlay_pos_scale(rack)
 
-        if event.type == 'LEFTMOUSE':
-            if event.value == 'PRESS':
-                hit = hit_test(mx, my, region, channels, pos_x, pos_y, scale)
-                if hit is None:
-                    return {'PASS_THROUGH'}
+        hit = hit_test(mx, my, region, channels, pos_x, pos_y, scale)
+        if hit is None:
+            return {'PASS_THROUGH'}
 
-                kind, idx = hit[0], hit[1]
+        kind, idx = hit[0], hit[1]
 
-                if kind == 'TITLEBAR':
-                    self._drag_kind = 'MOVE'
-                    self._drag_start_mouse = (mx, my)
-                    self._drag_start_pos = (pos_x, pos_y)
-                    return {'RUNNING_MODAL'}
+        if kind == 'TITLEBAR':
+            self._drag_kind = 'MOVE'
+            self._drag_start_mouse = (mx, my)
+            self._drag_start_pos = (pos_x, pos_y)
+            context.window_manager.modal_handler_add(self)
+            return {'RUNNING_MODAL'}
 
-                if kind == 'GRIP':
-                    self._drag_kind = 'RESIZE'
-                    self._drag_start_mouse = (mx, my)
-                    self._drag_start_value = scale
-                    return {'RUNNING_MODAL'}
+        if kind == 'GRIP':
+            self._drag_kind = 'RESIZE'
+            self._drag_start_mouse = (mx, my)
+            self._drag_start_value = scale
+            self._drag_anchor = (pos_x, pos_y)
+            context.window_manager.modal_handler_add(self)
+            return {'RUNNING_MODAL'}
 
-                if idx < 0 or idx >= len(channels):
-                    return {'RUNNING_MODAL'} if kind != 'PANEL' else {'PASS_THROUGH'}
+        if idx < 0 or idx >= len(channels):
+            # dentro do card mas em área vazia (kind == 'PANEL', idx == -1):
+            # engole o clique pra não cair na seleção de strips do VSE.
+            return {'FINISHED'}
 
-                ch = channels[idx]
+        ch = channels[idx]
 
-                if kind == 'HEADER':
-                    # clique normal = seleciona só essa; Shift+clique =
-                    # soma/remove da seleção (multi-seleção, como em
-                    # outras DAWs)
-                    if event.shift:
-                        ch.selected = not ch.selected
-                    else:
-                        self._select_only(channels, idx)
-                    rack.active_channel_index = idx
-                elif kind == 'MUTE':
-                    ch.mute = not ch.mute
-                elif kind == 'SOLO':
-                    ch.solo = not ch.solo
-                elif kind == 'FADER':
-                    self._prepare_drag_group(rack, channels, idx, 'volume')
-                    self._drag_start_mouse = (mx, my)
-                elif kind == 'KNOB':
-                    self._prepare_drag_group(rack, channels, idx, 'pan')
-                    self._drag_start_mouse = (mx, my)
+        if kind == 'HEADER':
+            # clique normal = seleciona só essa; Shift+clique = soma/
+            # remove da seleção (multi-seleção, como em outras DAWs)
+            if event.shift:
+                ch.selected = not ch.selected
+            else:
+                self._select_only(channels, idx)
+            rack.active_channel_index = idx
+            context.area.tag_redraw()
+            return {'FINISHED'}
 
-                context.area.tag_redraw()
-                return {'RUNNING_MODAL'}
+        if kind == 'MUTE':
+            ch.mute = not ch.mute
+            context.area.tag_redraw()
+            return {'FINISHED'}
 
-            elif event.value == 'RELEASE':
-                dragging = self._drag_kind is not None
-                self._drag_kind = None
-                self._drag_attr = None
-                self._drag_group = ()
-                self._drag_start_values = {}
-                self._drag_index = -1
-                if dragging:
-                    context.area.tag_redraw()
-                    return {'RUNNING_MODAL'}
-                return {'PASS_THROUGH'}
+        if kind == 'SOLO':
+            ch.solo = not ch.solo
+            context.area.tag_redraw()
+            return {'FINISHED'}
 
-        if event.type == 'MOUSEMOVE' and self._drag_kind is not None:
+        if kind == 'FADER':
+            self._prepare_drag_group(rack, channels, idx, 'volume')
+            self._drag_start_mouse = (mx, my)
+            context.window_manager.modal_handler_add(self)
+            return {'RUNNING_MODAL'}
+
+        if kind == 'KNOB':
+            self._prepare_drag_group(rack, channels, idx, 'pan')
+            self._drag_start_mouse = (mx, my)
+            context.window_manager.modal_handler_add(self)
+            return {'RUNNING_MODAL'}
+
+        return {'PASS_THROUGH'}
+
+    def modal(self, context, event):
+        rack = _get_rack(context)
+        if rack is None:
+            return {'CANCELLED'}
+
+        if event.type == 'MOUSEMOVE':
+            mx, my = event.mouse_region_x, event.mouse_region_y
             sx, sy = self._drag_start_mouse
+            channels = list(rack.channels)
+            _, _, scale = _get_overlay_pos_scale(rack)
 
             if self._drag_kind == 'MOVE':
                 start_px, start_py = self._drag_start_pos
                 rack.overlay_pos_x = max(0, start_px + (mx - sx))
                 rack.overlay_pos_y = max(0, start_py + (my - sy))
-                context.area.tag_redraw()
 
             elif self._drag_kind == 'RESIZE':
-                # arraste na diagonal (canto inferior direito): mover
-                # pra direita/baixo aumenta, pra esquerda/cima diminui.
-                delta = ((mx - sx) - (my - sy)) / 220.0
-                rack.overlay_scale = clamp_scale(self._drag_start_value + delta)
-                context.area.tag_redraw()
+                # redimensiona por distância ao canto fixo do painel
+                # (bottom-left) -- arrastar a alça pra "longe" do
+                # painel aumenta, pra "perto" diminui, em qualquer
+                # direção (mais intuitivo que só dx ou só dy).
+                ax, ay = self._drag_anchor
+                start_dist = math.hypot(sx - ax, sy - ay) or 1.0
+                cur_dist = math.hypot(mx - ax, my - ay)
+                ratio = cur_dist / start_dist
+                rack.overlay_scale = clamp_scale(self._drag_start_value * ratio)
 
             elif self._drag_kind in ('FADER', 'KNOB') and self._drag_group:
                 if self._drag_kind == 'FADER':
-                    from .mixer_strip_geometry import FADER_TRACK_H
                     delta = (my - sy) / (FADER_TRACK_H * scale)
                     lo, hi = 0.0, 1.0
                 else:
@@ -219,20 +231,27 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
                     value = max(lo, min(hi, start + delta))
                     setattr(channels[i], self._drag_attr, value)
 
+            if context.area:
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
 
-        return {'PASS_THROUGH'}
+        if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
+            self._drag_kind = None
+            self._drag_attr = None
+            self._drag_group = ()
+            self._drag_start_values = {}
+            if context.area:
+                context.area.tag_redraw()
+            return {'FINISHED'}
 
-    def _cleanup(self):
-        global _handle
-        if _handle is not None:
-            try:
-                bpy.types.SpaceSequenceEditor.draw_handler_remove(_handle, 'WINDOW')
-            except Exception:
-                pass
-            _handle = None
-        _tag_redraw_sequencers()
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
+            self._drag_kind = None
+            self._drag_attr = None
+            self._drag_group = ()
+            self._drag_start_values = {}
+            return {'CANCELLED'}
+
+        return {'RUNNING_MODAL'}
 
 
 class DAW_OT_ResetMixerOverlayTransform(bpy.types.Operator):
@@ -250,52 +269,71 @@ class DAW_OT_ResetMixerOverlayTransform(bpy.types.Operator):
         return {'FINISHED'}
 
 
+# ------------------------------------------------------------------ #
+#  Registro: draw handler (sempre ligado) + keymap (dispara o
+#  operador acima a cada LEFTMOUSE no Sequencer) + timer leve pro
+#  medidor/glow animarem sozinhos.
+# ------------------------------------------------------------------ #
+_draw_handle = None
+_keymaps: list = []
+_redraw_timer_running = [False]
+
+
 def _redraw_tick():
-    """Timer leve (~15fps) só para o medidor/glow acompanharem o
-    `meter_level` sendo atualizado por register.py::_meter_update_tick
-    mesmo quando nada mais na tela está mudando."""
-    if not _running[0]:
+    if not _redraw_timer_running[0]:
         return None
     _tag_redraw_sequencers()
     return 1.0 / 15.0
 
 
-def ensure_started() -> None:
-    """Liga o overlay automaticamente ao registrar o addon (mesmo
-    padrão de `overlay.ensure_started`)."""
-    if _running[0]:
-        return
+def register() -> None:
+    global _draw_handle
+    if _draw_handle is None:
+        _draw_handle = bpy.types.SpaceSequenceEditor.draw_handler_add(
+            draw_mixer_strips, (), 'WINDOW', 'POST_PIXEL')
 
-    def _start():
+    wm = bpy.context.window_manager
+    kc = wm.keyconfigs.addon
+    if kc:
+        # 'Sequencer' cobre a timeline; 'SequencerPreview' cobre a
+        # janela de preview -- registramos nos dois pra funcionar
+        # independente de qual modo de visualização o usuário estiver
+        # usando na área do Sequencer.
+        for km_name in ("Sequencer", "SequencerPreview"):
+            km = kc.keymaps.new(name=km_name, space_type='SEQUENCE_EDITOR')
+            kmi = km.keymap_items.new(DAW_OT_MixerStripOverlay.bl_idname, 'LEFTMOUSE', 'PRESS')
+            _keymaps.append((km, kmi))
+
+    if not _redraw_timer_running[0]:
+        _redraw_timer_running[0] = True
+        bpy.app.timers.register(_redraw_tick, first_interval=0.2)
+
+
+def unregister() -> None:
+    global _draw_handle
+    _redraw_timer_running[0] = False
+
+    for km, kmi in _keymaps:
         try:
-            wm = bpy.context.window_manager
-            for window in wm.windows:
-                for area in window.screen.areas:
-                    if area.type == 'SEQUENCE_EDITOR':
-                        region = next((r for r in area.regions if r.type == 'WINDOW'), None)
-                        if region is None:
-                            continue
-                        with bpy.context.temp_override(window=window, area=area, region=region):
-                            bpy.ops.daw.mixer_strip_overlay('INVOKE_DEFAULT')
-                        bpy.app.timers.register(_redraw_tick, first_interval=0.1)
-                        return None
-        except Exception as e:
-            print(f"[ChannelRack] Mixer overlay não pôde iniciar ainda: {e}")
-        return 0.5
-
-    bpy.app.timers.register(_start, first_interval=0.3)
-
-
-def force_stop() -> None:
-    _running[0] = False
-    global _handle
-    if _handle is not None:
-        try:
-            bpy.types.SpaceSequenceEditor.draw_handler_remove(_handle, 'WINDOW')
+            km.keymap_items.remove(kmi)
         except Exception:
             pass
-        _handle = None
+    _keymaps.clear()
+
+    if _draw_handle is not None:
+        try:
+            bpy.types.SpaceSequenceEditor.draw_handler_remove(_draw_handle, 'WINDOW')
+        except Exception:
+            pass
+        _draw_handle = None
+
     _tag_redraw_sequencers()
+
+
+# Compatibilidade com o nome antigo usado em register.py de versões
+# anteriores deste módulo.
+ensure_started = register
+force_stop = unregister
 
 
 classes = [
