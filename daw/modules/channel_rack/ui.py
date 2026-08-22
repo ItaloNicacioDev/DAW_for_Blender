@@ -278,6 +278,12 @@ class DAW_PT_ChannelRack(Panel):
         box.prop(rack, "step_count")
         box.prop(rack, "master_volume")
         box.prop(rack, "show_mixer_strip_overlay")
+        if rack.show_mixer_strip_overlay:
+            row = box.row(align=True)
+            row.prop(rack, "overlay_pos_x", text="X")
+            row.prop(rack, "overlay_pos_y", text="Y")
+            box.prop(rack, "overlay_scale")
+            box.operator("daw.reset_mixer_overlay_transform", icon='LOOP_BACK')
 
 
 class DAW_PT_ChannelGroups(Panel):
