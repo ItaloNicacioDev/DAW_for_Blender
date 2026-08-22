@@ -197,7 +197,7 @@ def _draw_meter(strip, level_l: float, level_r: float, clipping: bool):
 
 
 def _draw_strip(strip, ch, index: int, active_index: int, is_playing_selected: bool, s: float):
-    selected = index == active_index
+    is_selected = getattr(ch, "selected", False)
     alt = index % 2 == 1
     x0, x1 = strip.x, strip.x + strip.strip_w - 8 * s
 
@@ -207,7 +207,16 @@ def _draw_strip(strip, ch, index: int, active_index: int, is_playing_selected: b
     body_bottom = strip.footer_y - 6 * s
     _round_rect(x0, body_bottom, x1 - x0, body_top - body_bottom, bg, radius=6 * s)
 
-    if selected and is_playing_selected:
+    # contorno fino em todas as strips selecionadas (multi-seleção estilo
+    # DAW) -- distinto do brilho verde, que só aparece quando está tocando
+    if is_selected:
+        outline = PALETTE["selection_outline"]
+        pad = 1.5 * s
+        _round_rect(x0 - pad, body_bottom - pad, (x1 - x0) + 2 * pad,
+                     (body_top - body_bottom) + 2 * pad, outline, radius=7 * s)
+        _round_rect(x0, body_bottom, x1 - x0, body_top - body_bottom, bg, radius=6 * s)
+
+    if is_selected and is_playing_selected:
         glow = PALETTE["strip_selected_glow"]
         pad = 2 * s
         _round_rect(x0 - pad, body_bottom - pad, (x1 - x0) + 2 * pad,
@@ -215,7 +224,7 @@ def _draw_strip(strip, ch, index: int, active_index: int, is_playing_selected: b
         _round_rect(x0, body_bottom, x1 - x0, body_top - body_bottom, bg, radius=6 * s)
 
     # header: chip de cor + número + nome -- fundo mais claro quando selecionado
-    header_col = lighten(PALETTE["header_bg"][:3], 0.10) + (1.0,) if selected else PALETTE["header_bg"]
+    header_col = lighten(PALETTE["header_bg"][:3], 0.10) + (1.0,) if is_selected else PALETTE["header_bg"]
     _round_rect(x0, strip.header_y, x1 - x0, strip.header_h, header_col, radius=6 * s)
     chip_col = tuple(ch.color) + (1.0,)
     _round_rect(x0 + 6 * s, strip.header_y + strip.header_h / 2 - 4 * s, 8 * s, 8 * s, chip_col, radius=2 * s)
@@ -231,7 +240,7 @@ def _draw_strip(strip, ch, index: int, active_index: int, is_playing_selected: b
     accent = chip_col if not ch.mute else darken(tuple(ch.color), 0.4) + (1.0,)
     _draw_knob(strip, getattr(ch, "pan", 0.0), accent, s)
     _draw_insert_area(strip, strip.knob_cy - strip.knob_r - 13 * s, strip.fader_track_y + strip.fader_track_h, s)
-    _draw_fader(strip, getattr(ch, "volume", 0.78), selected, is_playing_selected, s)
+    _draw_fader(strip, getattr(ch, "volume", 0.78), is_selected, is_playing_selected, s)
 
     level = max(0.0, min(1.0, getattr(ch, "meter_level", 0.0))) if not ch.mute else 0.0
     pan = getattr(ch, "pan", 0.0)
