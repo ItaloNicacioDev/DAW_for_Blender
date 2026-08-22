@@ -253,9 +253,36 @@ class ChannelRackProperties(PropertyGroup):
     show_mixer_strip_overlay: BoolProperty(
         name="Mostrar Mixer (overlay)",
         description="Mostra o card do mixer (channel strips com fader, "
-                     "knob de pan e medidor de nível) ancorado no canto "
-                     "inferior esquerdo do Sequencer",
+                     "knob de pan e medidor de nível) no Sequencer",
         default=True,
+    )
+
+    overlay_pos_x: IntProperty(
+        name="Posição X do Mixer",
+        description="Posição horizontal (em pixels) do card do mixer na "
+                     "área do Sequencer -- arraste a barra de título do "
+                     "card ou ajuste aqui",
+        default=16,
+        min=0,
+    )
+
+    overlay_pos_y: IntProperty(
+        name="Posição Y do Mixer",
+        description="Posição vertical (em pixels) do card do mixer na "
+                     "área do Sequencer -- arraste a barra de título do "
+                     "card ou ajuste aqui",
+        default=16,
+        min=0,
+    )
+
+    overlay_scale: FloatProperty(
+        name="Tamanho do Mixer",
+        description="Escala do card do mixer -- arraste a alça no canto "
+                     "inferior direito do card ou ajuste aqui",
+        default=1.0,
+        min=0.6,
+        max=2.0,
+        subtype='FACTOR',
     )
 
 
