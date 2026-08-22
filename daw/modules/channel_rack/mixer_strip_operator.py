@@ -3,10 +3,12 @@
 Operador modal que mantém vivo o overlay das channel strips do mixer
 (`mixer_strip_draw.draw_mixer_strips`) e trata os cliques/arrastes:
 
-  - clique no header       -> seleciona o canal (active_channel_index)
-  - arrastar o fader        -> ajusta `channel.volume` (0.0-1.0)
-  - arrastar o knob (eixo X)-> ajusta `channel.pan` (-1.0-1.0)
-  - clique em M / S         -> alterna mute / solo
+  - clique no header        -> seleciona o canal (active_channel_index)
+  - arrastar o fader         -> ajusta `channel.volume` (0.0-1.0)
+  - arrastar o knob (eixo X) -> ajusta `channel.pan` (-1.0-1.0)
+  - clique em M / S          -> alterna mute / solo
+  - arrastar a barra de título -> move o painel inteiro (`rack.overlay_pos_x/y`)
+  - arrastar a alça (canto inferior direito) -> redimensiona (`rack.overlay_scale`)
 
 Mesma arquitetura de `overlay.py` (draw_handler_add em
 SpaceSequenceEditor/'WINDOW', hit-test compartilhado via
@@ -20,7 +22,7 @@ from __future__ import annotations
 import bpy
 
 from .mixer_strip_draw import draw_mixer_strips
-from .mixer_strip_geometry import hit_test
+from .mixer_strip_geometry import hit_test, clamp_scale
 
 
 def _tag_redraw_sequencers():
@@ -33,21 +35,31 @@ def _tag_redraw_sequencers():
         pass
 
 
+def _get_overlay_pos_scale(rack):
+    return (
+        getattr(rack, "overlay_pos_x", 16),
+        getattr(rack, "overlay_pos_y", 16),
+        getattr(rack, "overlay_scale", 1.0),
+    )
+
+
 _handle = None
 _running = [False]
 
 
 class DAW_OT_MixerStripOverlay(bpy.types.Operator):
-    """Liga o overlay das channel strips do mixer (canto inferior
-    esquerdo do Sequencer) e escuta clique/arraste sobre ele."""
+    """Liga o overlay das channel strips do mixer e escuta
+    clique/arraste sobre ele (fader, knob, M/S, mover, redimensionar)."""
     bl_idname = "daw.mixer_strip_overlay"
     bl_label = "Mixer (channel strips)"
     bl_options = {'REGISTER', 'INTERNAL'}
 
-    _drag_kind = None    # 'FADER' | 'KNOB' | None
+    # 'FADER' | 'KNOB' | 'MOVE' | 'RESIZE' | None
+    _drag_kind = None
     _drag_index = -1
     _drag_start_mouse = (0, 0)
     _drag_start_value = 0.0
+    _drag_start_pos = (0, 0)
 
     def invoke(self, context, event):
         global _handle
@@ -79,14 +91,28 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
         region = context.region
         mx, my = event.mouse_region_x, event.mouse_region_y
         channels = list(rack.channels)
+        pos_x, pos_y, scale = _get_overlay_pos_scale(rack)
 
         if event.type == 'LEFTMOUSE':
             if event.value == 'PRESS':
-                hit = hit_test(mx, my, region, channels)
+                hit = hit_test(mx, my, region, channels, pos_x, pos_y, scale)
                 if hit is None:
                     return {'PASS_THROUGH'}
 
                 kind, idx = hit[0], hit[1]
+
+                if kind == 'TITLEBAR':
+                    self._drag_kind = 'MOVE'
+                    self._drag_start_mouse = (mx, my)
+                    self._drag_start_pos = (pos_x, pos_y)
+                    return {'RUNNING_MODAL'}
+
+                if kind == 'GRIP':
+                    self._drag_kind = 'RESIZE'
+                    self._drag_start_mouse = (mx, my)
+                    self._drag_start_value = scale
+                    return {'RUNNING_MODAL'}
+
                 if idx < 0 or idx >= len(channels):
                     return {'RUNNING_MODAL'} if kind != 'PANEL' else {'PASS_THROUGH'}
 
@@ -124,19 +150,33 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
                 return {'PASS_THROUGH'}
 
         if event.type == 'MOUSEMOVE' and self._drag_kind is not None:
-            if 0 <= self._drag_index < len(channels):
+            sx, sy = self._drag_start_mouse
+
+            if self._drag_kind == 'MOVE':
+                start_px, start_py = self._drag_start_pos
+                rack.overlay_pos_x = max(0, start_px + (mx - sx))
+                rack.overlay_pos_y = max(0, start_py + (my - sy))
+                context.area.tag_redraw()
+
+            elif self._drag_kind == 'RESIZE':
+                # arraste na diagonal (canto inferior direito): mover
+                # pra direita/baixo aumenta, pra esquerda/cima diminui.
+                delta = ((mx - sx) - (my - sy)) / 220.0
+                rack.overlay_scale = clamp_scale(self._drag_start_value + delta)
+                context.area.tag_redraw()
+
+            elif 0 <= self._drag_index < len(channels):
                 ch = channels[self._drag_index]
-                sx, sy = self._drag_start_mouse
 
                 if self._drag_kind == 'FADER':
                     from .mixer_strip_geometry import FADER_TRACK_H
-                    delta = (my - sy) / FADER_TRACK_H
+                    track_h = FADER_TRACK_H * scale
+                    delta = (my - sy) / track_h
                     ch.volume = max(0.0, min(1.0, self._drag_start_value + delta))
                 elif self._drag_kind == 'KNOB':
-                    # arraste horizontal: ~140px de curso para -1..1,
-                    # convenção comum de knob em DAWs (sem precisar
-                    # girar o mouse em círculo).
-                    delta = (mx - sx) / 140.0
+                    # arraste horizontal: curso proporcional à escala
+                    # atual, convenção comum de knob em DAWs.
+                    delta = (mx - sx) / (140.0 * scale)
                     ch.pan = max(-1.0, min(1.0, self._drag_start_value + delta))
 
                 context.area.tag_redraw()
@@ -153,6 +193,21 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
                 pass
             _handle = None
         _tag_redraw_sequencers()
+
+
+class DAW_OT_ResetMixerOverlayTransform(bpy.types.Operator):
+    """Restaura a posição e o tamanho padrão do card do mixer."""
+    bl_idname = "daw.reset_mixer_overlay_transform"
+    bl_label = "Redefinir Posição/Tamanho do Mixer"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        rack = context.scene.daw_channel_rack
+        rack.overlay_pos_x = 16
+        rack.overlay_pos_y = 16
+        rack.overlay_scale = 1.0
+        _tag_redraw_sequencers()
+        return {'FINISHED'}
 
 
 def _redraw_tick():
@@ -205,4 +260,5 @@ def force_stop() -> None:
 
 classes = [
     DAW_OT_MixerStripOverlay,
+    DAW_OT_ResetMixerOverlayTransform,
 ]
