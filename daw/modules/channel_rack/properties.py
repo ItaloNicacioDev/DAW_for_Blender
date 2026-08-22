@@ -135,6 +135,16 @@ class ChannelProperties(PropertyGroup):
         max=128,
     )
 
+    selected: BoolProperty(
+        name="Selecionado (mixer)",
+        description="Selecionado no card do mixer -- arrastar o fader ou "
+                     "o knob de QUALQUER canal selecionado move todos os "
+                     "canais selecionados juntos, igual em outras DAWs. "
+                     "Clique no header de uma strip para selecionar só "
+                     "ela; Shift+clique para adicionar/remover da seleção",
+        default=False,
+    )
+
     monitor_source: EnumProperty(
         name="Fonte do Monitor",
         description="De onde o medidor de nível (VU) deste track lê o "
