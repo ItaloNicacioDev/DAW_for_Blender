@@ -319,8 +319,10 @@ def draw_mixer_strips():
     region = context.region
     pos_x = getattr(rack, "overlay_pos_x", 16)
     pos_y = getattr(rack, "overlay_pos_y", 16)
-    scale = getattr(rack, "overlay_scale", 1.0)
-    geo = panel_geometry(region, rack.channels, pos_x, pos_y, scale)
+    scale_x = getattr(rack, "overlay_scale_x", 1.0)
+    scale_y = getattr(rack, "overlay_scale_y", 1.0)
+    collapsed = getattr(rack, "overlay_collapsed", False)
+    geo = panel_geometry(region, rack.channels, pos_x, pos_y, scale_x, scale_y, collapsed)
     px, py, panel_w, panel_h = geo["px"], geo["py"], geo["panel_w"], geo["panel_h"]
     channels = geo["channels"]
     s = geo["scale"]
@@ -333,8 +335,21 @@ def draw_mixer_strips():
     # barra de título -- arrastável (clique+arraste move o painel inteiro)
     title_y = geo["title_y"]
     _round_rect(px, title_y, panel_w, geo["title_h"], PALETTE["header_bg"], radius=6 * s)
-    _txt("Mixer  ·  arraste para mover", px + 8 * s, title_y + geo["title_h"] / 2 - 4 * s,
+    label = "Mixer" if collapsed else "Mixer  ·  arraste para mover"
+    _txt(label, px + 8 * s, title_y + geo["title_h"] / 2 - 4 * s,
          max(7.0, 9.5 * s), PALETTE["header_txt_dim"])
+
+    # botão de minimizar/restaurar, canto direito da barra de título
+    cx0, cw = geo["collapse_x"], geo["collapse_btn_w"]
+    cy0 = title_y + 3 * s
+    ch_ = geo["title_h"] - 6 * s
+    _round_rect(cx0, cy0, cw, ch_, PALETTE["knob_fill"], radius=3 * s)
+    glyph = "+" if collapsed else "–"
+    _txt(glyph, cx0, cy0 + ch_ / 2 - 5 * s, max(8.0, 11 * s), PALETTE["header_txt"], center_w=cw)
+
+    if collapsed:
+        gpu.state.blend_set('NONE')
+        return
 
     # alça de redimensionar, canto inferior direito
     gx, gy, gs = geo["grip_x"], geo["grip_y"], geo["grip_size"]
