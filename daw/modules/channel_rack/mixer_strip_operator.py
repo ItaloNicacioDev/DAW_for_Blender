@@ -33,8 +33,6 @@ o keymap dispara o invoke), então funciona de forma confiável.
 """
 from __future__ import annotations
 
-import math
-
 import bpy
 
 from .mixer_strip_draw import draw_mixer_strips
@@ -58,11 +56,13 @@ def _get_rack(context):
     return scene.daw_channel_rack
 
 
-def _get_overlay_pos_scale(rack):
+def _get_overlay_transform(rack):
     return (
         getattr(rack, "overlay_pos_x", 16),
         getattr(rack, "overlay_pos_y", 16),
-        getattr(rack, "overlay_scale", 1.0),
+        getattr(rack, "overlay_scale_x", 1.0),
+        getattr(rack, "overlay_scale_y", 1.0),
+        getattr(rack, "overlay_collapsed", False),
     )
 
 
@@ -80,7 +80,9 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
     _drag_group = ()             # índices dos canais que se movem juntos
     _drag_start_values = {}      # {índice: valor inicial}
     _drag_start_mouse = (0, 0)
-    _drag_start_value = 0.0
+    _drag_start_value = 0.0      # usado por FADER/KNOB antigos (não mais) -- mantido por segurança
+    _drag_start_scale_x = 1.0
+    _drag_start_scale_y = 1.0
     _drag_start_pos = (0, 0)
     _drag_anchor = (0, 0)        # canto (px,py) do painel, p/ redimensionar
 
@@ -118,13 +120,18 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
         region = context.region
         mx, my = event.mouse_region_x, event.mouse_region_y
         channels = list(rack.channels)
-        pos_x, pos_y, scale = _get_overlay_pos_scale(rack)
+        pos_x, pos_y, scale_x, scale_y, collapsed = _get_overlay_transform(rack)
 
-        hit = hit_test(mx, my, region, channels, pos_x, pos_y, scale)
+        hit = hit_test(mx, my, region, channels, pos_x, pos_y, scale_x, scale_y, collapsed)
         if hit is None:
             return {'PASS_THROUGH'}
 
         kind, idx = hit[0], hit[1]
+
+        if kind == 'COLLAPSE':
+            rack.overlay_collapsed = not collapsed
+            context.area.tag_redraw()
+            return {'FINISHED'}
 
         if kind == 'TITLEBAR':
             self._drag_kind = 'MOVE'
@@ -136,7 +143,8 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
         if kind == 'GRIP':
             self._drag_kind = 'RESIZE'
             self._drag_start_mouse = (mx, my)
-            self._drag_start_value = scale
+            self._drag_start_scale_x = scale_x
+            self._drag_start_scale_y = scale_y
             self._drag_anchor = (pos_x, pos_y)
             context.window_manager.modal_handler_add(self)
             return {'RUNNING_MODAL'}
@@ -192,7 +200,7 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
             mx, my = event.mouse_region_x, event.mouse_region_y
             sx, sy = self._drag_start_mouse
             channels = list(rack.channels)
-            _, _, scale = _get_overlay_pos_scale(rack)
+            _, _, scale_x, scale_y, _ = _get_overlay_transform(rack)
 
             if self._drag_kind == 'MOVE':
                 start_px, start_py = self._drag_start_pos
@@ -200,24 +208,27 @@ class DAW_OT_MixerStripOverlay(bpy.types.Operator):
                 rack.overlay_pos_y = max(0, start_py + (my - sy))
 
             elif self._drag_kind == 'RESIZE':
-                # redimensiona por distância ao canto fixo do painel
-                # (bottom-left) -- arrastar a alça pra "longe" do
-                # painel aumenta, pra "perto" diminui, em qualquer
-                # direção (mais intuitivo que só dx ou só dy).
-                ax, ay = self._drag_anchor
-                start_dist = math.hypot(sx - ax, sy - ay) or 1.0
-                cur_dist = math.hypot(mx - ax, my - ay)
-                ratio = cur_dist / start_dist
-                rack.overlay_scale = clamp_scale(self._drag_start_value * ratio)
+                # redimensiona LARGURA e ALTURA de forma independente:
+                # arraste horizontal (mx) só muda a largura, arraste
+                # vertical (my) só muda a altura -- exatamente como
+                # puxar o canto de uma janela normal. Antes as duas
+                # escalas eram uma coisa só e, como a altura do card é
+                # bem maior que a largura em pixels, mexer só na
+                # horizontal quase não parecia fazer nada.
+                REACH = 240.0  # pixels de arraste pra ir de 1.0x a 2.0x
+                dx = (mx - sx) / REACH
+                dy = (my - sy) / REACH
+                rack.overlay_scale_x = clamp_scale(self._drag_start_scale_x + dx)
+                rack.overlay_scale_y = clamp_scale(self._drag_start_scale_y + dy)
 
             elif self._drag_kind in ('FADER', 'KNOB') and self._drag_group:
                 if self._drag_kind == 'FADER':
-                    delta = (my - sy) / (FADER_TRACK_H * scale)
+                    delta = (my - sy) / (FADER_TRACK_H * scale_y)
                     lo, hi = 0.0, 1.0
                 else:
                     # arraste horizontal: curso proporcional à escala
                     # atual, convenção comum de knob em DAWs.
-                    delta = (mx - sx) / (140.0 * scale)
+                    delta = (mx - sx) / (140.0 * scale_x)
                     lo, hi = -1.0, 1.0
 
                 # mesmo delta pra todo mundo selecionado -- é assim que
@@ -264,7 +275,9 @@ class DAW_OT_ResetMixerOverlayTransform(bpy.types.Operator):
         rack = context.scene.daw_channel_rack
         rack.overlay_pos_x = 16
         rack.overlay_pos_y = 16
-        rack.overlay_scale = 1.0
+        rack.overlay_scale_x = 1.0
+        rack.overlay_scale_y = 1.0
+        rack.overlay_collapsed = False
         _tag_redraw_sequencers()
         return {'FINISHED'}
 
