@@ -20,6 +20,8 @@ Progressões de acordes pré-carregadas:
 
 import math
 import struct
+from typing import Optional
+
 import aud
 
 # ═══════════════════════════════════════════════════════════════
@@ -515,3 +517,201 @@ def preview_chord_by_name(name: str):
         first_chord = prog["chords"][0]
         play_chord(first_chord["notes"], _current_instrument,
                    duration=2.0, velocity=85)
+
+# ═══════════════════════════════════════════════════════════════
+#  API DE STREAMING (por bloco) -- usada por modules/mixer/mixer.py
+#
+#  Tudo acima (play_note, generate_note_pcm, preview_note, etc.) é
+#  "fire-and-forget": gera o áudio inteiro de uma nota de uma vez e
+#  manda direto pro dispositivo via aud.Device -- ótimo pra preview
+#  ao clicar numa tecla do Piano Roll, mas não serve pro Mixer, que
+#  precisa puxar blocos de N frames por vez (`process(frames)`) e ir
+#  avançando a fase/envelope de cada nota tocando ao longo de vários
+#  blocos (é assim que qualquer motor de áudio em tempo real funciona
+#  -- não dá pra "gerar a nota inteira" quando você não sabe quanto
+#  tempo ela vai durar, porque a nota só termina quando o note_off()
+#  chegar).
+#
+#  As classes abaixo reaproveitam as MESMAS definições de instrumento
+#  (INSTRUMENTS, harmônicos, ADSR) só que organizadas pra streaming
+#  polifônico -- é o que faltava e causava o
+#  `ImportError: cannot import name 'Synth'` que derrubava o módulo
+#  'mixer' inteiro (e, em cascata, o motor de áudio do addon).
+# ═══════════════════════════════════════════════════════════════
+
+class SynthPreset:
+    """Qual instrumento GM este Synth toca (ver INSTRUMENTS acima)."""
+    __slots__ = ("instrument_id", "name")
+
+    def __init__(self, instrument_id: int = 0, name: Optional[str] = None):
+        inst = INSTRUMENTS.get(instrument_id, INSTRUMENTS[0])
+        self.instrument_id = instrument_id if instrument_id in INSTRUMENTS else 0
+        self.name = name or inst["name"]
+
+    @classmethod
+    def by_name(cls, name: str) -> "SynthPreset":
+        for iid, inst in INSTRUMENTS.items():
+            if inst["name"] == name:
+                return cls(iid)
+        return cls(0)
+
+    def __repr__(self) -> str:
+        return f"SynthPreset({self.name!r}, id={self.instrument_id})"
+
+
+class _Voice:
+    """Uma nota tocando dentro de um Synth -- guarda a fase de cada
+    harmônico e o progresso do envelope ADSR *entre* chamadas de
+    `process()`, já que o Mixer só pede alguns frames por vez."""
+    __slots__ = ("note", "velocity", "freq", "inst", "phases",
+                 "sample_index", "released", "release_sample_index",
+                 "release_start_level", "finished")
+
+    def __init__(self, note: int, velocity: int, inst: dict):
+        self.note = note
+        self.velocity = velocity
+        self.freq = midi_to_freq(note)
+        self.inst = inst
+        self.phases = [0.0 for _ in inst["harmonics"]]
+        self.sample_index = 0
+        self.released = False
+        self.release_sample_index = 0
+        self.release_start_level = inst["sustain"]
+        self.finished = False
+
+    def note_off(self) -> None:
+        if not self.released:
+            self.released = True
+            self.release_sample_index = self.sample_index
+            # nível de onde o release começa a cair -- se a nota foi
+            # solta ainda dentro do attack/decay, cai a partir do
+            # nível atual do envelope, não do sustain (evita um "salto"
+            # audível pra quem soltou a tecla rápido)
+            inst = self.inst
+            a_smp = max(1, int(inst["attack"] * 44100))
+            d_smp = max(1, int(inst["decay"] * 44100))
+            si = self.sample_index
+            if si < a_smp:
+                self.release_start_level = si / a_smp
+            elif si < a_smp + d_smp:
+                p = (si - a_smp) / d_smp
+                self.release_start_level = 1.0 - p * (1.0 - inst["sustain"])
+            else:
+                self.release_start_level = inst["sustain"]
+
+    def render(self, frames: int, sample_rate: int):
+        """Gera `frames` amostras MONO (float32) desta voz, avançando
+        fase e envelope. Marca `self.finished = True` quando o release
+        terminar (o Synth então descarta a voz)."""
+        import numpy as np
+
+        inst = self.inst
+        attack, decay, sustain, release = (
+            inst["attack"], inst["decay"], inst["sustain"], inst["release"],
+        )
+        a_smp = max(1, int(attack * sample_rate))
+        d_smp = max(1, int(decay * sample_rate))
+        r_smp = max(1, int(release * sample_rate))
+
+        vol = (self.velocity / 127.0) ** 0.8
+        n_harm = max(1, len(inst["harmonics"]))
+
+        out = np.zeros(frames, dtype=np.float32)
+        idx = np.arange(frames, dtype=np.float64)
+        for h_i, (harm, amp, detune) in enumerate(inst["harmonics"]):
+            f = self.freq * harm * _cents_to_ratio(detune)
+            phase = self.phases[h_i]
+            phase_inc = 2.0 * math.pi * f / sample_rate
+            wave = np.sin(phase + phase_inc * idx)
+            out += (amp / n_harm) * wave.astype(np.float32)
+            self.phases[h_i] = (phase + phase_inc * frames) % (2.0 * math.pi)
+
+        # Envelope ADSR, sample a sample -- não é o jeito mais rápido
+        # (dava pra vetorizar com np.piecewise), mas é o mais fácil de
+        # ler/manter, e blocos de áudio são pequenos (tipicamente
+        # 256-2048 frames), então o custo é desprezível.
+        env = np.empty(frames, dtype=np.float32)
+        for i in range(frames):
+            si = self.sample_index + i
+            if not self.released:
+                if si < a_smp:
+                    e = si / a_smp
+                elif si < a_smp + d_smp:
+                    p = (si - a_smp) / d_smp
+                    e = 1.0 - p * (1.0 - sustain)
+                else:
+                    e = sustain
+            else:
+                rel_i = si - self.release_sample_index
+                p = rel_i / r_smp
+                e = max(0.0, self.release_start_level * (1.0 - p))
+                if p >= 1.0:
+                    self.finished = True
+            env[i] = e
+
+        self.sample_index += frames
+        return out * env * vol * 0.7
+
+
+class Synth:
+    """
+    Sintetizador polifônico "por bloco", usado por `mixer.Channel`.
+
+    Reaproveita as definições de instrumento de INSTRUMENTS (a mesma
+    síntese aditiva usada por `generate_note_pcm`/`play_note` acima)
+    só que organizada pra ir gerando frame a frame conforme o Mixer
+    pede (`process(frames)`), em vez de gerar a nota inteira de uma
+    vez só -- é essa a diferença entre "preview de nota" e "voz de um
+    motor de áudio em tempo real".
+    """
+
+    MAX_VOICES = 16  # roubo de voz simples (descarta a mais antiga) acima disso
+
+    def __init__(self, sample_rate: int = 48000, preset: Optional[SynthPreset] = None):
+        self.sample_rate = sample_rate
+        self.preset = preset or SynthPreset(0)
+        self._voices: dict = {}   # note (int) -> _Voice
+
+    def set_preset(self, preset: SynthPreset) -> None:
+        self.preset = preset
+
+    def note_on(self, note: int, velocity: int = 100) -> None:
+        inst = INSTRUMENTS.get(self.preset.instrument_id, INSTRUMENTS[0])
+        if len(self._voices) >= self.MAX_VOICES and note not in self._voices:
+            oldest_note = next(iter(self._voices))
+            del self._voices[oldest_note]
+        self._voices[note] = _Voice(note, velocity, inst)
+
+    def note_off(self, note: int) -> None:
+        voice = self._voices.get(note)
+        if voice is not None:
+            voice.note_off()
+
+    def all_notes_off(self) -> None:
+        self._voices.clear()
+
+    def process(self, frames: int):
+        """Gera `frames` amostras ESTÉREO (float32), somando todas as
+        vozes ativas. Shape (frames, 2) -- é o formato que
+        `mixer.Channel.process()` espera. NUNCA retorna None."""
+        import numpy as np
+
+        out = np.zeros((frames, 2), dtype=np.float32)
+        if not self._voices:
+            return out
+
+        finished_notes = []
+        for note, voice in self._voices.items():
+            mono = voice.render(frames, self.sample_rate)
+            out[:, 0] += mono
+            out[:, 1] += mono
+            if voice.finished:
+                finished_notes.append(note)
+
+        for note in finished_notes:
+            del self._voices[note]
+
+        return out
+
+    def __repr__(self) -> str:
+        return f"Synth(preset={self.preset.name!r}, voices={len(self._voices)})"
