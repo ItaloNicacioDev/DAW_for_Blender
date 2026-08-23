@@ -53,7 +53,14 @@ class ProjectProperties(PropertyGroup):
             ("empty", "Vazio", "Projeto vazio"),
             ("basic", "Básico", "Projeto com faixas básicas"),
         ] + [(n, n.title(), f"Template '{n}'") for n in get_builtin_template_names() if n not in ("empty", "basic")],
-        default="empty",
+        default=0,  # índice, não string -- quando `items` é uma função (dinâmica),
+                    # o Blender só aceita 'default' inteiro, nunca o identificador
+                    # como string (era isso que causava
+                    # "TypeError: EnumProperty(...): 'default' can only be an
+                    # integer when 'items' is a function" e derrubava o registro
+                    # de ProjectProperties inteiro). Índice 0 = "empty", que é
+                    # sempre o primeiro item da lista, então o comportamento é
+                    # o mesmo que default="empty" pretendia.
     )
 
     settings: PointerProperty(type=ProjectSettingsProperties)
