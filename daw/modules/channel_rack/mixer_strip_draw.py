@@ -94,6 +94,25 @@ def _circle_fill(cx, cy, r, col, segments=24):
     _tris(tris, col)
 
 
+def _arc_band(cx, cy, r_out, r_in, a0_deg, a1_deg, col, segments=18):
+    """Faixa de anel entre dois raios, de a0_deg a a1_deg (graus, sentido
+    matemático padrão) -- usada pro anel/trilho do knob."""
+    if segments < 2:
+        segments = 2
+    a0 = math.radians(a0_deg)
+    a1 = math.radians(a1_deg)
+    coords = []
+    for i in range(segments):
+        t0 = a0 + (a1 - a0) * i / segments
+        t1 = a0 + (a1 - a0) * (i + 1) / segments
+        p0o = (cx + math.cos(t0) * r_out, cy + math.sin(t0) * r_out)
+        p1o = (cx + math.cos(t1) * r_out, cy + math.sin(t1) * r_out)
+        p0i = (cx + math.cos(t0) * r_in, cy + math.sin(t0) * r_in)
+        p1i = (cx + math.cos(t1) * r_in, cy + math.sin(t1) * r_in)
+        coords.extend([p0o, p1o, p1i, p0o, p1i, p0i])
+    _tris(coords, col)
+
+
 def _line(x1, y1, x2, y2, col, thickness=2.0):
     dx, dy = x2 - x1, y2 - y1
     length = math.hypot(dx, dy) or 1.0
@@ -119,15 +138,30 @@ def _txt(text, x, y, size, col, font_id=0, center_w=None):
 # ------------------------------------------------------------------ #
 def _draw_knob(strip, pan_value: float, accent, s: float):
     cx, cy, r = strip.knob_cx, strip.knob_cy, strip.knob_r
-    _circle_fill(cx, cy, r, PALETTE["knob_fill"])
-    _circle_outline(cx, cy, r, PALETTE["knob_ring"])
+    _circle_fill(cx, cy, r * 0.62, PALETTE["knob_fill"])
 
-    # ponteiro: -1..1 mapeado para -135°..+135° (0 = topo = "12 horas")
-    angle = math.radians(90 - pan_value * 135)
-    ix = cx + math.cos(angle) * (r - 6 * s)
-    iy = cy + math.sin(angle) * (r - 6 * s)
-    _line(cx, cy, ix, iy, accent, thickness=2.2 * s)
-    _circle_fill(cx, cy, 2.2 * s, accent)
+    # trilho do knob: anel de 270° (mesmo intervalo -45..225 usado no
+    # ponteiro abaixo), sempre visível como referência de fundo
+    ring_out, ring_in = r, r * 0.72
+    TRACK_A0, TRACK_A1 = -45.0, 225.0
+    _arc_band(cx, cy, ring_out, ring_in, TRACK_A0, TRACK_A1, PALETTE["knob_ring"])
+
+    # arco de valor: preenche do centro (12h = pan 0) até a posição
+    # atual, igual ao indicador de ganho de qualquer DAW -- evita o
+    # "ponteiro grosso" que parecia um ícone de alerta.
+    center_angle = 90.0
+    value_angle = 90.0 - max(-1.0, min(1.0, pan_value)) * 135.0
+    if abs(pan_value) > 0.01:
+        a0, a1 = (value_angle, center_angle) if pan_value >= 0 else (center_angle, value_angle)
+        _arc_band(cx, cy, ring_out, ring_in, a0, a1, accent)
+
+    # ponteirinho fino na ponta do arco, só pra marcar a posição exata
+    angle = math.radians(value_angle)
+    tip_r = ring_in - 1.0 * s
+    ix = cx + math.cos(angle) * tip_r
+    iy = cy + math.sin(angle) * tip_r
+    _line(cx, cy, ix, iy, accent, thickness=1.4 * s)
+    _circle_fill(cx, cy, 1.6 * s, accent)
 
     label = f"{pan_value * 100:+.0f}" if abs(pan_value) > 0.005 else "C"
     _txt(label, cx - strip.strip_w / 2, cy - r - 13 * s, max(7.0, 9.5 * s),
@@ -164,18 +198,25 @@ def _draw_fader(strip, volume: float, selected: bool, playing: bool, s: float):
 
 def _draw_insert_area(strip, top_y: float, bottom_y: float, s: float):
     """Área vazia entre o knob e o fader, como o 'rack de inserts' vazio
-    da referência -- puramente decorativa (linhas finas de slot)."""
+    da referência -- puramente decorativa. Número fixo de linhas
+    igualmente espaçadas (antes usava um loop que dependia do espaço
+    disponível e ficava com espaçamento inconsistente/torto)."""
     x0 = strip.knob_cx - (strip.strip_w - 24 * s) / 2
     x1 = strip.knob_cx + (strip.strip_w - 24 * s) / 2
-    slot_h = 15 * s
-    y = top_y - 6 * s
-    while y - slot_h > bottom_y:
-        _rect(x0, y - slot_h, x1 - x0, 1.0, (1.0, 1.0, 1.0, 0.035))
-        y -= slot_h
+    gap = top_y - bottom_y
+    if gap <= 4 * s:
+        return
+    n = 4
+    for i in range(1, n + 1):
+        y = top_y - gap * i / (n + 1)
+        _rect(x0, y, x1 - x0, 1.0, (1.0, 1.0, 1.0, 0.05))
 
 
 def _draw_meter(strip, level_l: float, level_r: float, clipping: bool):
     mx, my, mw, mh = strip.meter_x, strip.meter_y, strip.meter_w, strip.meter_h
+    # moldura sutil pra coluna do medidor ficar visível mesmo sem sinal
+    # (antes, com level=0, ficava quase invisível contra o fundo da strip)
+    _rect(mx - 1, my - 1, mw + 2, mh + 2, PALETTE["border"])
     _rect(mx, my, mw, mh, PALETTE["meter_bg"])
 
     half = mw / 2 - 1
