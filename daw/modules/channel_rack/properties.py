@@ -285,14 +285,34 @@ class ChannelRackProperties(PropertyGroup):
         min=0,
     )
 
-    overlay_scale: FloatProperty(
-        name="Tamanho do Mixer",
-        description="Escala do card do mixer -- arraste a alça no canto "
-                     "inferior direito do card ou ajuste aqui",
+    overlay_scale_x: FloatProperty(
+        name="Largura do Mixer",
+        description="Escala horizontal do card do mixer -- arraste a "
+                     "alça no canto inferior direito do card na "
+                     "horizontal, ou ajuste aqui",
         default=1.0,
         min=0.6,
-        max=2.0,
+        max=2.5,
         subtype='FACTOR',
+    )
+
+    overlay_scale_y: FloatProperty(
+        name="Altura do Mixer",
+        description="Escala vertical do card do mixer -- arraste a "
+                     "alça no canto inferior direito do card na "
+                     "vertical, ou ajuste aqui",
+        default=1.0,
+        min=0.6,
+        max=2.5,
+        subtype='FACTOR',
+    )
+
+    overlay_collapsed: BoolProperty(
+        name="Mixer Minimizado",
+        description="Recolhe o card do mixer, deixando só a barra de "
+                     "título visível -- clique no botão '–' da barra "
+                     "de título (ou aqui) pra minimizar/restaurar",
+        default=False,
     )
 
 
