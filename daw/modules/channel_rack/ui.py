@@ -282,7 +282,10 @@ class DAW_PT_ChannelRack(Panel):
             row = box.row(align=True)
             row.prop(rack, "overlay_pos_x", text="X")
             row.prop(rack, "overlay_pos_y", text="Y")
-            box.prop(rack, "overlay_scale")
+            row = box.row(align=True)
+            row.prop(rack, "overlay_scale_x", text="Largura")
+            row.prop(rack, "overlay_scale_y", text="Altura")
+            box.prop(rack, "overlay_collapsed")
             box.operator("daw.reset_mixer_overlay_transform", icon='LOOP_BACK')
 
 
