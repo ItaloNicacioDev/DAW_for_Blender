@@ -33,6 +33,8 @@ Estratégia:
 """
 from __future__ import annotations
 
+import threading
+from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -301,6 +303,25 @@ class InputDeviceManager:
         self.has_sounddevice = False
         self._check_sounddevice()
 
+        # [FIX SYNC] Fila thread-safe pra gravação sem perda: o callback
+        # de áudio roda na taxa real do hardware (ex.: ~47x/seg pra
+        # blocos de 1024 amostras @48kHz), bem mais rápido do que
+        # `RecordingSession.process_frame` é chamado (só uma vez por
+        # `frame_change_post` do Blender, ~24x/seg num projeto a
+        # 24fps). Antes, cada callback SOBRESCREVIA `last_buffer` --
+        # ou seja, a maioria dos blocos era descartada antes de ser
+        # lida, e o WAV gravado ficava com MENOS amostras do que o
+        # tempo real decorrido. É isso que causava a dessincronia
+        # progressiva (a strip gravada ficando cada vez mais curta do
+        # que o playhead percorrido). Agora o callback só EMPILHA cada
+        # bloco numa fila (`deque`, sem alocar/copiar demais), e quem
+        # está gravando de verdade usa `read_all_pending()` (drena a
+        # fila inteira, sem perder nada) em vez de `read_buffer()`
+        # (que continua existindo só pro medidor de nível, que não
+        # precisa de histórico completo -- só do bloco mais recente).
+        self._pending_lock = threading.Lock()
+        self._pending_chunks: deque = deque()
+
     def _check_sounddevice(self):
         try:
             import sounddevice  # noqa: F401
@@ -314,10 +335,17 @@ class InputDeviceManager:
 
     def _audio_callback(self, indata, frames, time_info, status):
         if indata is not None and len(indata) > 0:
-            self.last_buffer = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
-            self.peak_level = float(np.max(np.abs(self.last_buffer)))
-            self.rms_level = float(np.sqrt(np.mean(self.last_buffer ** 2)))
+            chunk = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
+            self.last_buffer = chunk
+            self.peak_level = float(np.max(np.abs(chunk)))
+            self.rms_level = float(np.sqrt(np.mean(chunk ** 2)))
             self._callback_count += 1
+            # [FIX SYNC] Empilha na fila de gravação -- ver comentário
+            # em __init__. append() num deque é O(1) e thread-safe o
+            # bastante pra esse padrão produtor único/consumidor único
+            # (o GIL garante atomicidade de append/popleft em CPython).
+            with self._pending_lock:
+                self._pending_chunks.append(chunk)
 
     def get_devices(self):
         """
@@ -379,12 +407,39 @@ class InputDeviceManager:
                 print(f"[DAW Recorder] Erro ao parar entrada: {e}")
             finally:
                 self.stream = None
+        with self._pending_lock:
+            self._pending_chunks.clear()
 
     def get_levels(self):
         return self.peak_level, self.rms_level
 
     def read_buffer(self):
         return self.last_buffer.copy()
+
+    def read_all_pending(self) -> np.ndarray:
+        """[FIX SYNC] Drena TODOS os blocos acumulados desde a última
+        chamada e devolve concatenados num único array -- usado por
+        `RecordingSession.process_frame` (recorder/recording.py) em vez
+        de `read_buffer()`. Ao contrário de `read_buffer()` (que só
+        devolve o bloco mais recente e serve pro medidor de nível),
+        este método garante que NENHUMA amostra capturada pelo
+        hardware seja perdida entre uma chamada e outra, não importa
+        a frequência com que `process_frame` é chamado -- é isso que
+        mantém o total de amostras gravadas em sincronia exata com o
+        tempo real decorrido.
+        Se não houver nada pendente, devolve um array vazio (não None)."""
+        with self._pending_lock:
+            if not self._pending_chunks:
+                return np.zeros(0, dtype=self.dtype)
+            chunks = list(self._pending_chunks)
+            self._pending_chunks.clear()
+        return np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+
+    def pending_sample_count(self) -> int:
+        """Quantas amostras estão esperando pra serem drenadas -- útil
+        pra diagnóstico de quanto atraso o consumidor acumulou."""
+        with self._pending_lock:
+            return sum(len(c) for c in self._pending_chunks)
 
 
 def get_input_manager() -> InputDeviceManager:
