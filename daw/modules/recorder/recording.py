@@ -168,7 +168,21 @@ class RecordingSession:
 
         self._frame_count += 1
         mgr = get_input_manager()
-        buf = mgr.read_buffer()
+        # [FIX SYNC] Antes: `mgr.read_buffer()` só pegava o bloco mais
+        # recente do hardware, uma vez por `frame_change_post` -- e o
+        # callback de áudio roda bem mais rápido que isso (ver
+        # comentário em InputDeviceManager.__init__, input.py), então
+        # a maior parte do áudio capturado era descartada antes de
+        # chegar aqui, e o WAV gravado ficava cada vez mais curto que
+        # o tempo real (a dessincronia que crescia com a duração da
+        # gravação). `read_all_pending()` drena TUDO que foi capturado
+        # desde a última leitura, então nenhuma amostra é perdida --
+        # não importa a frequência com que o Blender chama esta
+        # função, o total de amostras escritas sempre bate com o
+        # tempo real decorrido.
+        buf = mgr.read_all_pending()
+        if buf.size == 0:
+            return
 
         settings = scene.daw_recorder_settings
         gain = 10 ** (settings.input_gain_db / 20.0)
