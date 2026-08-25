@@ -174,6 +174,14 @@ class Engine:
         self._is_running = False
         self._engine_state = EngineState.STOPPED
 
+        # [FIX PONTE ÁUDIO] Fecha os arquivos .wav abertos pelo cache
+        # de leitura de nível dos canais SAMPLER/AUDIO/DRUM.
+        try:
+            from .channel_rack_bridge import close_wav_cache as _close_wav_cache
+            _close_wav_cache()
+        except Exception:
+            pass
+
         # Remove o handler de frame com segurança
         try:
             if self._frame_handler in bpy.app.handlers.frame_change_post:
