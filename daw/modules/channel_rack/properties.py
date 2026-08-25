@@ -47,6 +47,28 @@ def _on_active_channel_index_change(self: "ChannelRackProperties", context: bpy.
         self.active_channel_index = len(self.channels) - 1
 
 
+def _vse_sync_channel(self: "ChannelProperties", context: bpy.types.Context) -> None:
+    """`update=` de volume/pan/mute -- escreve IMEDIATAMENTE nas
+    strips de som reais do VSE deste canal (ver vse_sync.py). Import
+    tardio (dentro da função) pra evitar import circular, já que
+    vse_sync.py não precisa ser carregado antes das properties."""
+    try:
+        from .vse_sync import sync_from_channel_update
+        sync_from_channel_update(self, context)
+    except Exception as e:
+        print(f"[ChannelRack] Falha ao sincronizar canal com o VSE: {e}")
+
+
+def _vse_sync_solo(self: "ChannelProperties", context: bpy.types.Context) -> None:
+    """`update=` de solo -- precisa ressincronizar TODOS os canais
+    (mudar o solo de um afeta o mute efetivo dos outros)."""
+    try:
+        from .vse_sync import sync_from_solo_update
+        sync_from_solo_update(self, context)
+    except Exception as e:
+        print(f"[ChannelRack] Falha ao sincronizar solo com o VSE: {e}")
+
+
 class ChannelProperties(PropertyGroup):
     """Um canal do Channel Rack (instrumento/sample/áudio + pattern de steps)."""
 
@@ -87,6 +109,7 @@ class ChannelProperties(PropertyGroup):
         min=0.0,
         max=1.0,
         subtype='FACTOR',
+        update=lambda self, context: _vse_sync_channel(self, context),
     )
 
     pan: FloatProperty(
@@ -96,18 +119,21 @@ class ChannelProperties(PropertyGroup):
         min=-1.0,
         max=1.0,
         subtype='FACTOR',
+        update=lambda self, context: _vse_sync_channel(self, context),
     )
 
     mute: BoolProperty(
         name="Mudo",
         description="Silencia o canal",
         default=False,
+        update=lambda self, context: _vse_sync_channel(self, context),
     )
 
     solo: BoolProperty(
         name="Solo",
         description="Isola o canal (silencia os demais que não estão em solo)",
         default=False,
+        update=lambda self, context: _vse_sync_solo(self, context),
     )
 
     locked: BoolProperty(
