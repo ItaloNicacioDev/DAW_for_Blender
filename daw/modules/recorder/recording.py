@@ -23,6 +23,7 @@ from bpy.app.handlers import persistent
 
 from .input import get_input_manager
 from .live_strip import LiveWavWriter, create_live_strip, refresh_live_strip, remove_live_strip
+from .monitoring import start_monitoring, stop_monitoring
 from .utils import ensure_recording_dir_for_scene, get_armed_track_indices
 
 # A cada quantos frames de `frame_change_post` a strip ao vivo é
@@ -95,6 +96,16 @@ class RecordingSession:
             # (ver modules/recorder/input.py).
             mgr.start(None, sr)
 
+        # [FIX MONITOR] Antes, `start_monitoring()` só era chamado pelo
+        # botão separado "Monitorar Entrada" -- se você desse play na
+        # gravação sem nunca ter clicado nele, o handler que copia
+        # `mgr.peak_level/rms_level` pra `settings.current_peak/rms`
+        # (ver monitoring.py::monitor_frame_handler) nunca era
+        # registrado, e o painel ficava mostrando -120 dB (piso/
+        # silêncio) o tempo todo, mesmo com áudio real chegando no
+        # dispositivo. Gravar sempre implica monitorar.
+        start_monitoring()
+
         if record_frame_handler not in bpy.app.handlers.frame_change_post:
             bpy.app.handlers.frame_change_post.append(record_frame_handler)
 
@@ -132,6 +143,7 @@ class RecordingSession:
 
         if not settings.monitor_input:
             get_input_manager().stop()
+            stop_monitoring()
 
         results = {}
         for idx, writer in self._live_writers.items():
