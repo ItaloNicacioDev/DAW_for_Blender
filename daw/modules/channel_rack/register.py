@@ -47,12 +47,22 @@ def _meter_update_tick():
          dispositivo -- só existe um stream de captura compartilhado.
 
     Se nenhuma das duas fontes tiver dado novo pra este canal, o
-    medidor decai suavemente até 0 -- IMPORTANTE: hoje não existe
-    nenhum scheduler ligando o Channel Rack à reprodução automática da
-    timeline (ver rack.py -- `core/engine.py` não referencia o Channel
-    Rack), então fora do preview manual e do monitor de entrada, o
-    medidor não tem de onde tirar um nível real. Não fabricamos uma
-    animação falsa pra disfarçar isso.
+    medidor decai suavemente até 0.
+
+    [FIX MONITORAMENTO SEMPRE ATIVO] Durante a reprodução de verdade
+    (`bpy.context.screen.is_animation_playing`), quem manda no
+    `meter_level` dos canais SYNTH/SAMPLER/AUDIO/DRUM é a ponte
+    daw_engine/core/channel_rack_bridge.py -- ela lê o nível REAL (do
+    Synth ou direto do arquivo de áudio) a cada frame, sem precisar
+    que o usuário marque nada. Antes, este timer (que roda sempre,
+    independente do play) ficava decaindo esses mesmos canais pra 0 a
+    cada 0.1s por trás -- os dois processos brigavam pela mesma
+    propriedade, e o medidor parecia "não funcionar" a não ser que o
+    canal estivesse manualmente marcado como preview/INPUT. Agora,
+    enquanto está tocando de verdade, este timer não mexe em canais
+    que não estão em preview/INPUT -- deixa a ponte ser a única dona
+    deles. Fora da reprodução (parado/pausado), o comportamento
+    antigo continua igual (decai suavemente até silêncio).
     """
     if not _meter_timer_registered[0]:
         return None  # addon foi desregistrado -- para o timer
@@ -66,6 +76,10 @@ def _meter_update_tick():
 
     rack = scene.daw_channel_rack
     has_input_monitor = any(ch.monitor_source == 'INPUT' for ch in rack.channels)
+
+    is_engine_playing = bool(
+        bpy.context.screen is not None and bpy.context.screen.is_animation_playing
+    )
 
     input_peak = 0.0
     if has_input_monitor:
@@ -85,8 +99,11 @@ def _meter_update_tick():
             ch.meter_level = max(0.0, min(1.0, preview_level))
         elif ch.monitor_source == 'INPUT':
             ch.meter_level = max(0.0, min(1.0, float(input_peak)))
-        else:
+        elif not is_engine_playing:
             ch.meter_level = ch.meter_level * METER_DECAY_PER_TICK
+        # else: tocando de verdade e sem preview/INPUT manual -- deixa
+        # quieto, a ponte do daw_engine já está atualizando (e decaindo)
+        # este canal com o nível real a cada frame.
 
     return METER_TICK_INTERVAL
 
