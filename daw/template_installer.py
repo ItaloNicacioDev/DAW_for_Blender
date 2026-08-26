@@ -18,58 +18,11 @@ def _get_template_src() -> Path:
     return Path(__file__).parent / "template" / "DAW"
 
 
-def _rects_adjacent(a, b, tol=2):
-    """Retorna ponto no meio da borda compartilhada entre duas áreas."""
-    if abs(a.x + a.width - b.x) <= tol or abs(b.x + b.width - a.x) <= tol:
-        y0, y1 = max(a.y, b.y), min(a.y + a.height, b.y + b.height)
-        if y1 > y0:
-            edge_x = a.x + a.width if a.x + a.width <= b.x + tol else a.x
-            return (edge_x, (y0 + y1) // 2)
-    if abs(a.y + a.height - b.y) <= tol or abs(b.y + b.height - a.y) <= tol:
-        x0, x1 = max(a.x, b.x), min(a.x + a.width, b.x + b.width)
-        if x1 > x0:
-            edge_y = a.y + a.height if a.y + a.height <= b.y + tol else a.y
-            return ((x0 + x1) // 2, edge_y)
-    return None
-
-
-def _collapse_screen_to_single_area(window, screen, max_iters=25):
-    """
-    [ROBUSTO] Funde TODAS as áreas numa só.
-    Estratégia: a área MAIOR sempre absorve a MENOR vizinha.
-    """
-    for _ in range(max_iters):
-        areas = list(screen.areas)
-        if len(areas) <= 1:
-            return True
-
-        # Ordena por tamanho (maior primeiro) — maior absorve menor
-        areas_sorted = sorted(areas, key=lambda a: a.width * a.height, reverse=True)
-        main = areas_sorted[0]
-
-        joined = False
-        for other in areas_sorted[1:]:
-            point = _rects_adjacent(main, other)
-            if point is None:
-                continue
-            try:
-                with bpy.context.temp_override(window=window, screen=screen, area=main):
-                    bpy.ops.screen.area_join(cursor=point)
-                joined = True
-                break
-            except Exception:
-                continue
-
-        if not joined:
-            print(f"[DAW] Colapso parou: {len(list(screen.areas))} área(s) restante(s)")
-            return False
-
-    return len(list(screen.areas)) == 1
-
-
 def _generate_startup_blend(dest: Path):
     """
-    Gera startup.blend limpo com 1 área DAW.
+    Gera startup.blend limpo com workspace DAW de 1 área.
+    [FIX] Usa workspaces.new() em vez de duplicar Layout — evita herdar
+    as 4 áreas do workspace padrão do Blender.
     """
     try:
         # Limpa cena
@@ -82,32 +35,14 @@ def _generate_startup_blend(dest: Path):
 
         window = bpy.context.window_manager.windows[0]
 
-        # Remove DAW antigo
-        old = bpy.data.workspaces.get("DAW")
-        if old:
-            if window.workspace == old:
-                fallback = next((w for w in bpy.data.workspaces if w.name != "DAW"), None)
-                if fallback:
-                    window.workspace = fallback
-            with bpy.context.temp_override(workspace=old):
-                bpy.ops.workspace.delete()
-
-        # Duplica Layout (geralmente 1 área)
-        layout = bpy.data.workspaces.get('Layout') or bpy.data.workspaces[0]
-        with bpy.context.temp_override(workspace=layout):
-            bpy.ops.workspace.duplicate()
-
-        ws = bpy.context.workspace
-        ws.name = "DAW"
+        # [FIX CRITICAL] Cria workspace NOVO do zero (1 área) em vez de duplicar Layout (4 áreas)
+        ws = bpy.data.workspaces.new(name="DAW")
         window.workspace = ws
 
         screen = ws.screens[0]
+        print(f"[DAW] Novo workspace criado: {len(screen.areas)} área(s)")
 
-        # Colapsa se Layout tinha >1 área
-        if len(screen.areas) > 1:
-            _collapse_screen_to_single_area(window, screen)
-
-        # Configura a área restante como Sequencer
+        # Configura a única área como Sequencer
         for area in screen.areas:
             area.type = 'SEQUENCE_EDITOR'
             for sp in area.spaces:
@@ -153,13 +88,12 @@ def install_template(force: bool = False) -> bool:
                 "def unregister(): pass\n"
             )
 
-        # [CRITICAL] SEMPRE deleta o startup.blend antigo antes de gerar novo
+        # Deleta startup.blend antigo (se existir) e gera novo
         startup = dest / "startup.blend"
         if startup.exists():
             startup.unlink()
             print("[DAW] startup.blend antigo removido")
 
-        # Gera novo startup.blend
         _generate_startup_blend(dest)
 
         print(f"[DAW] Template instalado em: {dest}")
