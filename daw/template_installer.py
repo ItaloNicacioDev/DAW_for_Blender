@@ -1,7 +1,6 @@
 """
 daw/template_installer.py
-
-Instalação automática do Application Template DAW na splash screen.
+Gera startup.blend com workspace DAW de 1 área VSE.
 """
 
 import bpy
@@ -19,11 +18,6 @@ def _get_template_src() -> Path:
 
 
 def _generate_startup_blend(dest: Path):
-    """
-    Gera startup.blend limpo com workspace DAW de 1 área.
-    [FIX] Usa workspaces.new() em vez de duplicar Layout — evita herdar
-    as 4 áreas do workspace padrão do Blender.
-    """
     try:
         # Limpa cena
         for text in list(bpy.data.texts):
@@ -35,21 +29,31 @@ def _generate_startup_blend(dest: Path):
 
         window = bpy.context.window_manager.windows[0]
 
-        # [FIX CRITICAL] Cria workspace NOVO do zero (1 área) em vez de duplicar Layout (4 áreas)
+        # Deleta DAW antigo se existir
+        old = bpy.data.workspaces.get("DAW")
+        if old:
+            if window.workspace == old:
+                fallback = next((w for w in bpy.data.workspaces if w.name != "DAW"), None)
+                if fallback:
+                    window.workspace = fallback
+            with bpy.context.temp_override(workspace=old):
+                bpy.ops.workspace.delete()
+
+        # [CRITICAL] Cria workspace NOVO do zero — 1 área limpa, sem herdar Layout
         ws = bpy.data.workspaces.new(name="DAW")
         window.workspace = ws
-
         screen = ws.screens[0]
-        print(f"[DAW] Novo workspace criado: {len(screen.areas)} área(s)")
 
-        # Configura a única área como Sequencer
+        print(f"[DAW] Workspace novo criado: {len(screen.areas)} área(s)")
+
+        # Troca a área única para Sequencer
         for area in screen.areas:
             area.type = 'SEQUENCE_EDITOR'
             for sp in area.spaces:
                 if sp.type == 'SEQUENCE_EDITOR':
                     sp.view_type = 'SEQUENCER'
 
-        # Remove workspaces extras
+        # Remove todos os outros workspaces
         for other_ws in list(bpy.data.workspaces):
             if other_ws.name != "DAW":
                 with bpy.context.temp_override(workspace=other_ws):
@@ -58,10 +62,13 @@ def _generate_startup_blend(dest: Path):
                     except Exception:
                         pass
 
+        # [CRITICAL] Força redraw para commitar a mudança de tipo da área antes de salvar
+        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+
         # Salva
         startup_path = str(dest / "startup.blend")
         bpy.ops.wm.save_as_mainfile(filepath=startup_path)
-        print(f"[DAW] startup.blend gerado: {startup_path} ({len(screen.areas)} área)")
+        print(f"[DAW] startup.blend gerado: {startup_path} ({len(screen.areas)} área, tipo={screen.areas[0].type})")
         return True
 
     except Exception as e:
@@ -71,12 +78,11 @@ def _generate_startup_blend(dest: Path):
 
 def install_template(force: bool = False) -> bool:
     dest = _get_template_dest()
-    src  = _get_template_src()
+    src = _get_template_src()
 
     try:
         dest.mkdir(parents=True, exist_ok=True)
 
-        # Copia __init__.py do template
         init_src = src / "__init__.py"
         init_dst = dest / "__init__.py"
         if init_src.exists():
@@ -88,14 +94,13 @@ def install_template(force: bool = False) -> bool:
                 "def unregister(): pass\n"
             )
 
-        # Deleta startup.blend antigo (se existir) e gera novo
+        # Sempre deleta startup.blend antigo antes de gerar novo
         startup = dest / "startup.blend"
         if startup.exists():
             startup.unlink()
             print("[DAW] startup.blend antigo removido")
 
         _generate_startup_blend(dest)
-
         print(f"[DAW] Template instalado em: {dest}")
         return True
 
