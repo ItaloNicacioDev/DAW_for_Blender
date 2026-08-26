@@ -8,39 +8,48 @@ Garante 1 área VSE e remove workspaces extras.
 import bpy
 
 
+def _has_full_edge(a, b, tol=3):
+    if abs(b.x + b.width - a.x) <= tol:
+        y0, y1 = max(a.y, b.y), min(a.y + a.height, b.y + b.height)
+        if (y1 - y0) >= min(a.height, b.height) - tol:
+            return (int(a.x), int((y0 + y1) // 2)), a
+    if abs(a.x + a.width - b.x) <= tol:
+        y0, y1 = max(a.y, b.y), min(a.y + a.height, b.y + b.height)
+        if (y1 - y0) >= min(a.height, b.height) - tol:
+            return (int(b.x), int((y0 + y1) // 2)), b
+    if abs(a.y - (b.y + b.height)) <= tol:
+        x0, x1 = max(a.x, b.x), min(a.x + a.width, b.x + b.width)
+        if (x1 - x0) >= min(a.width, b.width) - tol:
+            return (int((x0 + x1) // 2), int(a.y)), a
+    if abs(a.y + a.height - b.y) <= tol:
+        x0, x1 = max(a.x, b.x), min(a.x + a.width, b.x + b.width)
+        if (x1 - x0) >= min(a.width, b.width) - tol:
+            return (int((x0 + x1) // 2), int(b.y)), b
+    return None
+
+
 def _collapse_to_one_area(window, screen):
     for _ in range(20):
         areas = list(screen.areas)
         if len(areas) <= 1:
             return True
-
-        areas_sorted = sorted(areas, key=lambda a: a.width * a.height, reverse=True)
-        main = areas_sorted[0]
-
-        joined = False
-        for other in areas_sorted[1:]:
-            if abs(main.x + main.width - other.x) <= 2:
-                point = (main.x + main.width, (max(main.y, other.y) + min(main.y + main.height, other.y + other.height)) // 2)
-            elif abs(other.x + other.width - main.x) <= 2:
-                point = (other.x + other.width, (max(main.y, other.y) + min(main.y + main.height, other.y + other.height)) // 2)
-            elif abs(main.y + main.height - other.y) <= 2:
-                point = ((max(main.x, other.x) + min(main.x + main.width, other.x + other.width)) // 2, main.y + main.height)
-            elif abs(other.y + other.height - main.y) <= 2:
-                point = ((max(main.x, other.x) + min(main.x + main.width, other.x + other.width)) // 2, other.y + other.height)
-            else:
-                continue
-
-            try:
-                with bpy.context.temp_override(window=window, screen=screen, area=main):
-                    bpy.ops.screen.area_join(cursor=point)
-                joined = True
+        merged = False
+        for i, a in enumerate(areas):
+            for b in areas[i + 1:]:
+                result = _has_full_edge(a, b)
+                if result:
+                    point, target = result
+                    try:
+                        with bpy.context.temp_override(window=window, screen=screen, area=target):
+                            bpy.ops.screen.area_join(cursor=point)
+                        merged = True
+                        break
+                    except Exception:
+                        pass
+            if merged:
                 break
-            except Exception:
-                continue
-
-        if not joined:
+        if not merged:
             break
-
     return len(list(screen.areas)) == 1
 
 
@@ -52,12 +61,11 @@ def _fix_daw_layout():
         window = bpy.context.window_manager.windows[0]
         screen = window.workspace.screens[0]
 
-        # Se veio com >1 área, funde tudo numa só
+        # Colapsa se necessário
         if len(screen.areas) > 1:
-            ok = _collapse_to_one_area(window, screen)
-            print(f"[DAW] Template colapso: {'OK' if ok else 'parcial'} — {len(list(screen.areas))} área(s)")
+            _collapse_to_one_area(window, screen)
 
-        # Configura a área única como Sequencer
+        # Configura como Sequencer
         for area in screen.areas:
             area.type = 'SEQUENCE_EDITOR'
             for sp in area.spaces:
@@ -73,7 +81,7 @@ def _fix_daw_layout():
                 except Exception:
                     pass
 
-        print(f"[DAW] Template ativo: {len(screen.areas)} área(s) | {screen.areas[0].type if screen.areas else 'none'}")
+        print(f"[DAW] Template: {len(screen.areas)} área(s) | {screen.areas[0].type if screen.areas else 'none'}")
         return None
 
     except Exception as e:
