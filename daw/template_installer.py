@@ -13,7 +13,6 @@ from pathlib import Path
 
 def _get_template_dest() -> Path:
     """Retorna o caminho de destino do template no Blender do usuário."""
-    # Caminho padrão: scripts/startup/bl_app_templates_user/DAW/
     scripts = Path(bpy.utils.resource_path('USER')) / "scripts"
     return scripts / "startup" / "bl_app_templates_user" / "DAW"
 
@@ -24,11 +23,7 @@ def _get_template_src() -> Path:
 
 
 def _rects_adjacent(a, b):
-    """Verifica se duas áreas compartilham uma borda inteira (condição
-    pra `screen.area_join` conseguir fundir as duas em uma só). Retorna
-    o ponto (x, y) em coordenadas de tela bem no meio da borda
-    compartilhada -- é onde o operador precisa que o cursor esteja,
-    igual a clicar/arrastar sobre a borda na interface."""
+    """Verifica se duas áreas compartilham uma borda inteira."""
     if a.x + a.width == b.x or b.x + b.width == a.x:
         y0, y1 = max(a.y, b.y), min(a.y + a.height, b.y + b.height)
         if y1 > y0:
@@ -43,13 +38,7 @@ def _rects_adjacent(a, b):
 
 
 def _collapse_screen_to_single_area(window, screen, max_iters: int = 25) -> None:
-    """[FIX WORKSPACE QUÁDRUPLO] Funde TODAS as áreas da tela numa única
-    área, uma junção por vez, até sobrar só uma. Sem isso,
-    `_generate_startup_blend` estava convertendo cada área que o
-    Blender já tinha por padrão (viewport 3D, timeline, outliner,
-    propriedades -- normalmente 4) em Sequence Editor, mantendo as
-    divisões originais -- daí o layout "quádruplo" salvo no
-    startup.blend."""
+    """Funde TODAS as áreas da tela numa única área, uma junção por vez."""
     for _ in range(max_iters):
         areas = list(screen.areas)
         if len(areas) <= 1:
@@ -72,8 +61,6 @@ def _collapse_screen_to_single_area(window, screen, max_iters: int = 25) -> None
             if joined:
                 break
         if not joined:
-            # nenhuma fusão possível nesta rodada (layout não-retangular
-            # incomum) -- para aqui pra não ficar em loop infinito
             print(f"[DAW] Aviso: não consegui fundir todas as áreas "
                   f"({len(list(screen.areas))} restante(s))")
             return
@@ -82,8 +69,7 @@ def _collapse_screen_to_single_area(window, screen, max_iters: int = 25) -> None
 def _generate_startup_blend(dest: Path):
     """
     Gera o startup.blend do template diretamente via API do Blender.
-    Cria workspace DAW com Sequence Editor limpo (UMA área só,
-    ocupando a tela inteira).
+    Cria workspace DAW com Sequence Editor limpo (UMA área só).
     """
     try:
         # Remove textos/scripts abertos
@@ -102,13 +88,25 @@ def _generate_startup_blend(dest: Path):
         ws.name = "DAW"
         screen = ws.screens[0]
 
-        # [FIX WORKSPACE QUÁDRUPLO] Funde tudo numa área só ANTES de
-        # trocar o tipo -- antes, cada uma das áreas padrão do Blender
-        # (viewport, timeline, outliner, propriedades) virava um
-        # Sequence Editor separado, preservando a divisão em 4.
+        # [FIX] Funde tudo numa área só ANTES de trocar o tipo
         _collapse_screen_to_single_area(window, screen)
 
-        # Configura a área restante (idealmente só uma) como Sequence Editor
+        # Garante que sobrou exatamente 1 área
+        if len(screen.areas) != 1:
+            print(f"[DAW] Aviso: collapse deixou {len(screen.areas)} áreas, forçando 1")
+            # Fallback: deleta áreas extras (não é ideal mas evita layout quebrado)
+            while len(screen.areas) > 1:
+                # Tenta juntar a primeira com a segunda de qualquer jeito
+                try:
+                    a = screen.areas[0]
+                    b = screen.areas[1]
+                    point = ((a.x + a.width + b.x) // 2, (a.y + b.y) // 2)
+                    with bpy.context.temp_override(window=window, screen=screen, area=a):
+                        bpy.ops.screen.area_join(cursor=point)
+                except Exception:
+                    break
+
+        # Configura a área restante como Sequence Editor
         for area in screen.areas:
             area.type = 'SEQUENCE_EDITOR'
             for space in area.spaces:
@@ -138,20 +136,9 @@ def _generate_startup_blend(dest: Path):
 def install_template(force: bool = False) -> bool:
     """
     Instala o Application Template DAW.
-
-    Args:
-        force: Se True, reinstala mesmo que já exista.
-
-    Returns:
-        True se instalado com sucesso, False caso contrário.
     """
     dest = _get_template_dest()
     src  = _get_template_src()
-
-    # Já instalado?
-    if dest.exists() and not force:
-        print(f"[DAW] Template já instalado em: {dest}")
-        return True
 
     try:
         dest.mkdir(parents=True, exist_ok=True)
@@ -163,7 +150,6 @@ def install_template(force: bool = False) -> bool:
         if init_src.exists():
             shutil.copy2(str(init_src), str(init_dst))
         else:
-            # Cria __init__.py mínimo inline se não existir
             init_dst.write_text(
                 "# DAW Application Template\n"
                 "def register(): pass\n"
@@ -172,10 +158,8 @@ def install_template(force: bool = False) -> bool:
 
         print(f"[DAW] Template instalado em: {dest}")
 
-        # Gera startup.blend se não existir
-        startup = dest / "startup.blend"
-        if not startup.exists():
-            _generate_startup_blend(dest)
+        # [FIX] SEMPRE regenera o startup.blend para garantir layout limpo
+        _generate_startup_blend(dest)
 
         return True
 
@@ -185,7 +169,7 @@ def install_template(force: bool = False) -> bool:
 
 
 def uninstall_template():
-    """Remove o Application Template DAW (chamado no unregister do addon)."""
+    """Remove o Application Template DAW."""
     dest = _get_template_dest()
     if dest.exists():
         try:
