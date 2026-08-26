@@ -1,70 +1,88 @@
 """
-DAW Application Template __init__.py
+DAW Application Template
 
-Roda automaticamente quando o usuário seleciona "DAW" na splash screen.
-Garante que o layout tenha apenas 1 área, mesmo se o startup.blend
-estiver corrompido ou desatualizado.
+Roda quando o usuário seleciona "DAW" na splash screen.
+Garante 1 área Sequencer, mesmo se o startup.blend estiver com layout quebrado.
 """
 
 import bpy
 
 
-def _ensure_single_area():
-    """Garante que o workspace DAW tenha exatamente 1 área (SEQUENCE_EDITOR)."""
-    try:
-        window = bpy.context.window_manager.windows[0]
-        ws = window.workspace
-        if ws.name != "DAW":
-            return
+def _rects_adjacent(a, b, tol=2):
+    if abs(a.x + a.width - b.x) <= tol or abs(b.x + b.width - a.x) <= tol:
+        y0, y1 = max(a.y, b.y), min(a.y + a.height, b.y + b.height)
+        if y1 > y0:
+            edge_x = a.x + a.width if a.x + a.width <= b.x + tol else a.x
+            return (edge_x, (y0 + y1) // 2)
+    if abs(a.y + a.height - b.y) <= tol or abs(b.y + b.height - a.y) <= tol:
+        x0, x1 = max(a.x, b.x), min(a.x + a.width, b.x + b.width)
+        if x1 > x0:
+            edge_y = a.y + a.height if a.y + a.height <= b.y + tol else a.y
+            return ((x0 + x1) // 2, edge_y)
+    return None
 
-        screen = ws.screens[0]
 
-        # Funde áreas até sobrar 1
-        for _ in range(20):
-            areas = list(screen.areas)
-            if len(areas) <= 1:
+def _collapse_to_single_area(window, screen):
+    for _ in range(25):
+        areas = list(screen.areas)
+        if len(areas) <= 1:
+            return True
+
+        areas_sorted = sorted(areas, key=lambda a: a.width * a.height, reverse=True)
+        main = areas_sorted[0]
+
+        joined = False
+        for other in areas_sorted[1:]:
+            point = _rects_adjacent(main, other)
+            if point is None:
+                continue
+            try:
+                with bpy.context.temp_override(window=window, screen=screen, area=main):
+                    bpy.ops.screen.area_join(cursor=point)
+                joined = True
                 break
+            except Exception:
+                continue
 
-            # Tenta juntar a primeira área com qualquer vizinha
-            a = areas[0]
-            joined = False
-            for b in areas[1:]:
-                # Tenta juntar horizontalmente ou verticalmente
-                if a.x + a.width == b.x or b.x + b.width == a.x:
-                    point = (max(a.x, b.x), (max(a.y, b.y) + min(a.y + a.height, b.y + b.height)) // 2)
-                elif a.y + a.height == b.y or b.y + b.height == a.y:
-                    point = ((max(a.x, b.x) + min(a.x + a.width, b.x + b.width)) // 2, max(a.y, b.y))
-                else:
-                    continue
+        if not joined:
+            break
 
-                try:
-                    with bpy.context.temp_override(window=window, screen=screen, area=a):
-                        bpy.ops.screen.area_join(cursor=point)
-                    joined = True
-                    break
-                except Exception:
-                    continue
-
-            if not joined:
-                break
-
-        # Configura a área restante
-        if len(screen.areas) >= 1:
-            main = screen.areas[0]
-            main.type = 'SEQUENCE_EDITOR'
-            for sp in main.spaces:
-                if sp.type == 'SEQUENCE_EDITOR':
-                    sp.view_type = 'SEQUENCER'
-
-        print("[DAW] Template: layout garantido como 1 área")
-
-    except Exception as e:
-        print(f"[DAW] Template: erro ao ajustar layout: {e}")
+    return len(list(screen.areas)) == 1
 
 
 def register():
-    # Adia 0.1s para garantir que o Blender terminou de carregar o startup.blend
-    bpy.app.timers.register(_ensure_single_area, first_interval=0.1)
+    try:
+        window = bpy.context.window_manager.windows[0]
+        ws = window.workspace
+
+        # Renomeia para DAW
+        ws.name = "DAW"
+        screen = ws.screens[0]
+
+        # Colapsa para 1 área (maior absorve menor)
+        if len(screen.areas) > 1:
+            _collapse_to_single_area(window, screen)
+
+        # Configura como Sequencer
+        for area in screen.areas:
+            area.type = 'SEQUENCE_EDITOR'
+            for sp in area.spaces:
+                if sp.type == 'SEQUENCE_EDITOR':
+                    sp.view_type = 'SEQUENCER'
+
+        # Remove workspaces extras
+        for other in list(bpy.data.workspaces):
+            if other.name != "DAW":
+                try:
+                    with bpy.context.temp_override(workspace=other):
+                        bpy.ops.workspace.delete()
+                except Exception:
+                    pass
+
+        print(f"[DAW] Template ativo: {len(screen.areas)} área(s)")
+
+    except Exception as e:
+        print(f"[DAW] Erro no template: {e}")
 
 
 def unregister():
