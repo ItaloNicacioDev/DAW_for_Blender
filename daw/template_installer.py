@@ -29,7 +29,7 @@ def _generate_startup_blend(dest: Path):
 
         window = bpy.context.window_manager.windows[0]
 
-        # Deleta DAW antigo se existir
+        # Deleta DAW antigo
         old = bpy.data.workspaces.get("DAW")
         if old:
             if window.workspace == old:
@@ -39,12 +39,14 @@ def _generate_startup_blend(dest: Path):
             with bpy.context.temp_override(workspace=old):
                 bpy.ops.workspace.delete()
 
-        # [CRITICAL] Cria workspace NOVO do zero — 1 área limpa, sem herdar Layout
-        ws = bpy.data.workspaces.new(name="DAW")
+        # [FIX] Cria workspace NOVO via operador (1 área limpa, template General)
+        bpy.ops.workspace.add()
+        ws = bpy.context.workspace
+        ws.name = "DAW"
         window.workspace = ws
-        screen = ws.screens[0]
 
-        print(f"[DAW] Workspace novo criado: {len(screen.areas)} área(s)")
+        screen = ws.screens[0]
+        print(f"[DAW] Workspace novo: {len(screen.areas)} área(s)")
 
         # Troca a área única para Sequencer
         for area in screen.areas:
@@ -53,7 +55,7 @@ def _generate_startup_blend(dest: Path):
                 if sp.type == 'SEQUENCE_EDITOR':
                     sp.view_type = 'SEQUENCER'
 
-        # Remove todos os outros workspaces
+        # Remove workspaces extras
         for other_ws in list(bpy.data.workspaces):
             if other_ws.name != "DAW":
                 with bpy.context.temp_override(workspace=other_ws):
@@ -62,13 +64,10 @@ def _generate_startup_blend(dest: Path):
                     except Exception:
                         pass
 
-        # [CRITICAL] Força redraw para commitar a mudança de tipo da área antes de salvar
-        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-
         # Salva
         startup_path = str(dest / "startup.blend")
         bpy.ops.wm.save_as_mainfile(filepath=startup_path)
-        print(f"[DAW] startup.blend gerado: {startup_path} ({len(screen.areas)} área, tipo={screen.areas[0].type})")
+        print(f"[DAW] startup.blend: {startup_path} ({len(screen.areas)} área, {screen.areas[0].type})")
         return True
 
     except Exception as e:
@@ -94,7 +93,6 @@ def install_template(force: bool = False) -> bool:
                 "def unregister(): pass\n"
             )
 
-        # Sempre deleta startup.blend antigo antes de gerar novo
         startup = dest / "startup.blend"
         if startup.exists():
             startup.unlink()
