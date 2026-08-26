@@ -23,10 +23,67 @@ def _get_template_src() -> Path:
     return Path(__file__).parent / "template" / "DAW"
 
 
+def _rects_adjacent(a, b):
+    """Verifica se duas áreas compartilham uma borda inteira (condição
+    pra `screen.area_join` conseguir fundir as duas em uma só). Retorna
+    o ponto (x, y) em coordenadas de tela bem no meio da borda
+    compartilhada -- é onde o operador precisa que o cursor esteja,
+    igual a clicar/arrastar sobre a borda na interface."""
+    if a.x + a.width == b.x or b.x + b.width == a.x:
+        y0, y1 = max(a.y, b.y), min(a.y + a.height, b.y + b.height)
+        if y1 > y0:
+            edge_x = a.x + a.width if a.x + a.width == b.x else a.x
+            return (edge_x, (y0 + y1) // 2)
+    if a.y + a.height == b.y or b.y + b.height == a.y:
+        x0, x1 = max(a.x, b.x), min(a.x + a.width, b.x + b.width)
+        if x1 > x0:
+            edge_y = a.y + a.height if a.y + a.height == b.y else a.y
+            return ((x0 + x1) // 2, edge_y)
+    return None
+
+
+def _collapse_screen_to_single_area(window, screen, max_iters: int = 25) -> None:
+    """[FIX WORKSPACE QUÁDRUPLO] Funde TODAS as áreas da tela numa única
+    área, uma junção por vez, até sobrar só uma. Sem isso,
+    `_generate_startup_blend` estava convertendo cada área que o
+    Blender já tinha por padrão (viewport 3D, timeline, outliner,
+    propriedades -- normalmente 4) em Sequence Editor, mantendo as
+    divisões originais -- daí o layout "quádruplo" salvo no
+    startup.blend."""
+    for _ in range(max_iters):
+        areas = list(screen.areas)
+        if len(areas) <= 1:
+            return
+        joined = False
+        for a in areas:
+            for b in areas:
+                if a == b:
+                    continue
+                point = _rects_adjacent(a, b)
+                if point is None:
+                    continue
+                try:
+                    with bpy.context.temp_override(window=window, screen=screen, area=a):
+                        bpy.ops.screen.area_join(cursor=point)
+                    joined = True
+                except Exception:
+                    continue
+                break
+            if joined:
+                break
+        if not joined:
+            # nenhuma fusão possível nesta rodada (layout não-retangular
+            # incomum) -- para aqui pra não ficar em loop infinito
+            print(f"[DAW] Aviso: não consegui fundir todas as áreas "
+                  f"({len(list(screen.areas))} restante(s))")
+            return
+
+
 def _generate_startup_blend(dest: Path):
     """
     Gera o startup.blend do template diretamente via API do Blender.
-    Cria workspace DAW com Sequence Editor limpo.
+    Cria workspace DAW com Sequence Editor limpo (UMA área só,
+    ocupando a tela inteira).
     """
     try:
         # Remove textos/scripts abertos
@@ -43,9 +100,16 @@ def _generate_startup_blend(dest: Path):
         window = bpy.context.window_manager.windows[0]
         ws = window.workspace
         ws.name = "DAW"
+        screen = ws.screens[0]
 
-        # Configura todas as áreas como Sequence Editor
-        for area in ws.screens[0].areas:
+        # [FIX WORKSPACE QUÁDRUPLO] Funde tudo numa área só ANTES de
+        # trocar o tipo -- antes, cada uma das áreas padrão do Blender
+        # (viewport, timeline, outliner, propriedades) virava um
+        # Sequence Editor separado, preservando a divisão em 4.
+        _collapse_screen_to_single_area(window, screen)
+
+        # Configura a área restante (idealmente só uma) como Sequence Editor
+        for area in screen.areas:
             area.type = 'SEQUENCE_EDITOR'
             for space in area.spaces:
                 if space.type == 'SEQUENCE_EDITOR':
