@@ -15,23 +15,19 @@ def ensure_daw_workspace():
     return ws
 
 
-def _win_region(area):
-    return next((r for r in area.regions if r.type == 'WINDOW'), None)
-
-
 # ═══════════════════════════════════════════════════════════════
-#  CRIAÇÃO DO LAYOUT — sempre do zero
+#  CRIAÇÃO DO LAYOUT — apenas uma área central
 #
-#  ┌──────────────────────────┬──────────────┐
-#  │   SEQUENCE_EDITOR (70%)  │ FILE_BROWSER │
-#  │                          │    (30%)     │
-#  └──────────────────────────┴──────────────┘
+#  ┌──────────────────────────────┐
+#  │      SEQUENCE_EDITOR         │
+#  │         (100%)               │
+#  └──────────────────────────────┘
 # ═══════════════════════════════════════════════════════════════
 
 def _recreate_and_apply(window):
     """
     Deleta o workspace DAW existente, recria do zero a partir do Layout
-    (que sempre tem 1 área), e aplica o split correto.
+    (que sempre tem 1 área), e define como SEQUENCE_EDITOR único.
     """
     try:
         # 1. Garante que não estamos no workspace DAW antes de deletar
@@ -44,7 +40,7 @@ def _recreate_and_apply(window):
             if fallback:
                 window.workspace = fallback
 
-        # 2. Deleta workspace DAW antigo (com o layout errado)
+        # 2. Deleta workspace DAW antigo
         old = bpy.data.workspaces.get(DAW_WORKSPACE_NAME)
         if old:
             with bpy.context.temp_override(workspace=old):
@@ -62,47 +58,30 @@ def _recreate_and_apply(window):
         # 4. Troca para o novo workspace DAW
         window.workspace = ws
 
-        # 5. Aguarda e aplica o split
-        def _do_split():
+        # 5. Define a área única como SEQUENCE_EDITOR
+        def _do_setup():
             try:
                 ws2 = bpy.data.workspaces.get(DAW_WORKSPACE_NAME)
                 if not ws2:
                     return
+
                 screen = ws2.screens[0]
                 print(f"[DAW] Áreas disponíveis: {len(screen.areas)}")
 
                 main = screen.areas[0]
                 main.type = 'SEQUENCE_EDITOR'
+
                 for sp in main.spaces:
                     if sp.type == 'SEQUENCE_EDITOR':
                         sp.view_type = 'SEQUENCER'
 
-                win_reg = _win_region(main)
-                if not win_reg:
-                    print("[DAW] WINDOW region não encontrada")
-                    return
-
-                # Split vertical 70/30
-                with bpy.context.temp_override(
-                        window=window, screen=screen,
-                        area=main, region=win_reg):
-                    bpy.ops.screen.area_split(direction='VERTICAL', factor=0.70)
-
-                # Identifica esq/dir
-                areas = sorted(screen.areas, key=lambda a: a.x)
-                areas[0].type  = 'SEQUENCE_EDITOR'
-                areas[-1].type = 'FILE_BROWSER'
-                for sp in areas[0].spaces:
-                    if sp.type == 'SEQUENCE_EDITOR':
-                        sp.view_type = 'SEQUENCER'
-
-                print("[DAW] Layout aplicado: Sequencer 70% | File Browser 30% ✅")
+                print("[DAW] Layout aplicado: Sequencer 100% ✅")
 
             except Exception as e:
-                print(f"[DAW] Erro no split: {e}")
+                print(f"[DAW] Erro ao configurar área: {e}")
             return None
 
-        bpy.app.timers.register(_do_split, first_interval=0.25)
+        bpy.app.timers.register(_do_setup, first_interval=0.25)
 
     except Exception as e:
         print(f"[DAW] Erro ao recriar workspace: {e}")
@@ -140,7 +119,7 @@ def remove_daw_workspace():
 class DAW_OT_OpenWorkspace(bpy.types.Operator):
     bl_idname      = "daw.open_workspace"
     bl_label       = "Abrir DAW"
-    bl_description = "Abre o workspace DAW (Sequencer + File Browser)"
+    bl_description = "Abre o workspace DAW (Sequencer único)"
 
     def execute(self, context):
         window = context.window
