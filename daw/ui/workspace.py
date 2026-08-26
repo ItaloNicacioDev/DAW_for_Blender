@@ -4,18 +4,15 @@ DAW_WORKSPACE_NAME = "DAW"
 
 
 def ensure_daw_workspace():
-    """Cria workspace DAW se não existir."""
     ws = bpy.data.workspaces.get(DAW_WORKSPACE_NAME)
     if ws is None:
-        ws = bpy.data.workspaces.new(name=DAW_WORKSPACE_NAME)
+        bpy.ops.workspace.add()
+        ws = bpy.context.workspace
+        ws.name = DAW_WORKSPACE_NAME
     return ws
 
 
 def _recreate_and_apply(window):
-    """
-    Recria workspace DAW do zero com 1 área Sequencer.
-    [FIX] Usa workspaces.new() em vez de duplicar Layout.
-    """
     try:
         current_ws = window.workspace
         if current_ws.name == DAW_WORKSPACE_NAME:
@@ -32,10 +29,11 @@ def _recreate_and_apply(window):
                 bpy.ops.workspace.delete()
             print("[DAW] Workspace antigo removido")
 
-        # [CRITICAL] Cria workspace NOVO do zero (1 área limpa)
-        ws = bpy.data.workspaces.new(name=DAW_WORKSPACE_NAME)
+        # [FIX] Cria workspace novo (1 área limpa)
+        bpy.ops.workspace.add()
+        ws = bpy.context.workspace
+        ws.name = DAW_WORKSPACE_NAME
         window.workspace = ws
-        screen = ws.screens[0]
 
         def _do_setup():
             try:
@@ -48,9 +46,9 @@ def _recreate_and_apply(window):
                     for sp in area.spaces:
                         if sp.type == 'SEQUENCE_EDITOR':
                             sp.view_type = 'SEQUENCER'
-                print(f"[DAW] Layout aplicado: {len(scr.areas)} área(s) | tipo={scr.areas[0].type}")
+                print(f"[DAW] Layout: {len(scr.areas)} área(s) | {scr.areas[0].type}")
             except Exception as e:
-                print(f"[DAW] Erro no setup: {e}")
+                print(f"[DAW] Setup erro: {e}")
             return None
 
         bpy.app.timers.register(_do_setup, first_interval=0.25)
