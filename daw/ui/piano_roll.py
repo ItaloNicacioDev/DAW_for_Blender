@@ -1444,7 +1444,7 @@ class DAW_OT_LoadProgression(bpy.types.Operator):
     def execute(self, context):
         state = context.scene.piano_roll
         try:
-            from ..synth import progression_to_midi_notes
+            from ..modules.instruments.synth import progression_to_midi_notes
             midi_notes = progression_to_midi_notes(self.progression_name)
             notes = _get_active_notes(state)
             notes.clear()
