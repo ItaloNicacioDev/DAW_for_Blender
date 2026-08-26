@@ -109,7 +109,7 @@ class ChannelProperties(PropertyGroup):
         min=0.0,
         max=1.0,
         subtype='FACTOR',
-        update=lambda self, context: _vse_sync_channel(self, context),
+        update=_vse_sync_channel,
     )
 
     pan: FloatProperty(
@@ -119,21 +119,21 @@ class ChannelProperties(PropertyGroup):
         min=-1.0,
         max=1.0,
         subtype='FACTOR',
-        update=lambda self, context: _vse_sync_channel(self, context),
+        update=_vse_sync_channel,
     )
 
     mute: BoolProperty(
         name="Mudo",
         description="Silencia o canal",
         default=False,
-        update=lambda self, context: _vse_sync_channel(self, context),
+        update=_vse_sync_channel,
     )
 
     solo: BoolProperty(
         name="Solo",
         description="Isola o canal (silencia os demais que não estão em solo)",
         default=False,
-        update=lambda self, context: _vse_sync_solo(self, context),
+        update=_vse_sync_solo,
     )
 
     locked: BoolProperty(
