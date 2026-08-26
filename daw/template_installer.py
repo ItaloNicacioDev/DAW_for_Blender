@@ -17,6 +17,47 @@ def _get_template_src() -> Path:
     return Path(__file__).parent / "template" / "DAW"
 
 
+def _collapse_to_one_area(window, screen):
+    """Fallback: funde todas as áreas numa só (maior absorve menor)."""
+    for _ in range(20):
+        areas = list(screen.areas)
+        if len(areas) <= 1:
+            return True
+
+        # Ordena por tamanho decrescente
+        areas_sorted = sorted(areas, key=lambda a: a.width * a.height, reverse=True)
+        main = areas_sorted[0]
+
+        joined = False
+        for other in areas_sorted[1:]:
+            # Tenta juntar main com other
+            # Vertical: main à esquerda ou direita de other
+            if abs(main.x + main.width - other.x) <= 2:
+                point = (main.x + main.width, (max(main.y, other.y) + min(main.y + main.height, other.y + other.height)) // 2)
+            elif abs(other.x + other.width - main.x) <= 2:
+                point = (other.x + other.width, (max(main.y, other.y) + min(main.y + main.height, other.y + other.height)) // 2)
+            # Horizontal: main acima ou abaixo de other
+            elif abs(main.y + main.height - other.y) <= 2:
+                point = ((max(main.x, other.x) + min(main.x + main.width, other.x + other.width)) // 2, main.y + main.height)
+            elif abs(other.y + other.height - main.y) <= 2:
+                point = ((max(main.x, other.x) + min(main.x + main.width, other.x + other.width)) // 2, other.y + other.height)
+            else:
+                continue
+
+            try:
+                with bpy.context.temp_override(window=window, screen=screen, area=main):
+                    bpy.ops.screen.area_join(cursor=point)
+                joined = True
+                break
+            except Exception:
+                continue
+
+        if not joined:
+            break
+
+    return len(list(screen.areas)) == 1
+
+
 def _generate_startup_blend(dest: Path):
     try:
         # Limpa cena
@@ -39,16 +80,21 @@ def _generate_startup_blend(dest: Path):
             with bpy.context.temp_override(workspace=old):
                 bpy.ops.workspace.delete()
 
-        # [FIX] Cria workspace NOVO via operador (1 área limpa, template General)
+        # Cria workspace novo (template General = 1 área, mas pode variar)
         bpy.ops.workspace.add()
         ws = bpy.context.workspace
         ws.name = "DAW"
         window.workspace = ws
 
         screen = ws.screens[0]
-        print(f"[DAW] Workspace novo: {len(screen.areas)} área(s)")
+        print(f"[DAW] Workspace novo criado: {len(screen.areas)} área(s)")
 
-        # Troca a área única para Sequencer
+        # [CRITICAL] Se veio com >1 área, funde tudo
+        if len(screen.areas) > 1:
+            ok = _collapse_to_one_area(window, screen)
+            print(f"[DAW] Colapso: {'OK' if ok else 'parcial'} — {len(screen.areas)} área(s)")
+
+        # Configura a área única como Sequencer
         for area in screen.areas:
             area.type = 'SEQUENCE_EDITOR'
             for sp in area.spaces:
@@ -93,6 +139,7 @@ def install_template(force: bool = False) -> bool:
                 "def unregister(): pass\n"
             )
 
+        # [CRITICAL] Sempre deleta startup.blend antigo
         startup = dest / "startup.blend"
         if startup.exists():
             startup.unlink()
