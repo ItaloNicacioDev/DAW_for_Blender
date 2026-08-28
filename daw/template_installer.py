@@ -16,7 +16,7 @@ from pathlib import Path
 # `install_template()` compara com o que está salvo em
 # `.template_version` dentro da pasta do template e regenera sozinho
 # se estiver desatualizado -- sem precisar apagar nada manualmente.
-_TEMPLATE_VERSION = 2
+_TEMPLATE_VERSION = 3
 
 
 def _get_template_dest() -> Path:
@@ -31,60 +31,64 @@ def _get_template_src() -> Path:
     return Path(__file__).parent / "template" / "DAW"
 
 
-def _rects_adjacent(a, b):
-    """Verifica se duas áreas compartilham uma borda inteira (condição
-    pra `screen.area_join` conseguir fundir as duas em uma só). Retorna
-    o ponto (x, y) em coordenadas de tela bem no meio da borda
-    compartilhada -- é onde o operador precisa que o cursor esteja,
-    igual a clicar/arrastar sobre a borda na interface."""
-    if a.x + a.width == b.x or b.x + b.width == a.x:
-        y0, y1 = max(a.y, b.y), min(a.y + a.height, b.y + b.height)
-        if y1 > y0:
-            edge_x = a.x + a.width if a.x + a.width == b.x else a.x
-            return (edge_x, (y0 + y1) // 2)
-    if a.y + a.height == b.y or b.y + b.height == a.y:
-        x0, x1 = max(a.x, b.x), min(a.x + a.width, b.x + b.width)
-        if x1 > x0:
-            edge_y = a.y + a.height if a.y + a.height == b.y else a.y
-            return ((x0 + x1) // 2, edge_y)
-    return None
-
-
-def _collapse_screen_to_single_area(window, screen, max_iters: int = 25) -> None:
+def _collapse_screen_to_single_area(window, screen, max_iters: int = 60) -> bool:
     """[FIX WORKSPACE QUÁDRUPLO] Funde TODAS as áreas da tela numa única
-    área, uma junção por vez, até sobrar só uma. Sem isso,
-    `_generate_startup_blend` estava convertendo cada área que o
-    Blender já tinha por padrão (viewport 3D, timeline, outliner,
-    propriedades -- normalmente 4) em Sequence Editor, mantendo as
-    divisões originais -- daí o layout "quádruplo" salvo no
-    startup.blend."""
+    área. Sem isso, `_generate_startup_blend` estava convertendo cada
+    área que o Blender já tinha por padrão (viewport 3D, timeline,
+    outliner, propriedades -- normalmente 4) em Sequence Editor,
+    mantendo as divisões originais -- daí o layout "quádruplo" salvo
+    no startup.blend.
+
+    [FIX v2] A primeira versão calculava a borda compartilhada exata
+    entre duas áreas (`a.x + a.width == b.x`) e passava esse ponto pro
+    operador -- mas isso depende de coordenadas de área já finalizadas
+    e sem nenhum arredondamento, o que nem sempre é verdade no momento
+    em que o template está sendo gerado (a tela pode não ter passado
+    por um layout/redraw completo ainda). Resultado: nenhum par batia
+    a igualdade exata, e nada era fundido.
+
+    Esta versão é mais robusta: pra cada área, tenta o operador com o
+    cursor em cada uma das 4 bordas DA PRÓPRIA área (não precisa saber
+    qual é a vizinha) -- é o operador que decide com quem fundir a
+    partir de onde o cursor está, igual a arrastar a borda na
+    interface. Confirma sucesso comparando a contagem de áreas antes/
+    depois de cada tentativa, em vez de confiar em não ter dado
+    exceção."""
     for _ in range(max_iters):
         areas = list(screen.areas)
         if len(areas) <= 1:
-            return
-        joined = False
+            return True
+
+        before = len(areas)
+        progressed = False
+
         for a in areas:
-            for b in areas:
-                if a == b:
-                    continue
-                point = _rects_adjacent(a, b)
-                if point is None:
-                    continue
+            candidates = [
+                (a.x + 1,              a.y + a.height // 2),   # borda esquerda
+                (a.x + a.width - 1,    a.y + a.height // 2),   # borda direita
+                (a.x + a.width // 2,   a.y + 1),               # borda inferior
+                (a.x + a.width // 2,   a.y + a.height - 1),    # borda superior
+            ]
+            for cx, cy in candidates:
                 try:
                     with bpy.context.temp_override(window=window, screen=screen, area=a):
-                        bpy.ops.screen.area_join(cursor=point)
-                    joined = True
-                except Exception:
+                        bpy.ops.screen.area_join(cursor=(cx, cy))
+                except Exception as e:
+                    print(f"[DAW] area_join({cx},{cy}) falhou: {e}")
                     continue
+
+                if len(screen.areas) < before:
+                    progressed = True
+                    break
+            if progressed:
                 break
-            if joined:
-                break
-        if not joined:
-            # nenhuma fusão possível nesta rodada (layout não-retangular
-            # incomum) -- para aqui pra não ficar em loop infinito
+
+        if not progressed:
             print(f"[DAW] Aviso: não consegui fundir todas as áreas "
                   f"({len(list(screen.areas))} restante(s))")
-            return
+            return False
+
+    return len(list(screen.areas)) <= 1
 
 
 def _generate_startup_blend(dest: Path):
