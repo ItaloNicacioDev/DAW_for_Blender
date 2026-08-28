@@ -10,6 +10,14 @@ import os
 import shutil
 from pathlib import Path
 
+# [FIX AUTO-REGENERAÇÃO] Bump este número toda vez que
+# `_generate_startup_blend` mudar de um jeito que precise refletir num
+# `startup.blend` já instalado (ex.: o fix do workspace quádruplo).
+# `install_template()` compara com o que está salvo em
+# `.template_version` dentro da pasta do template e regenera sozinho
+# se estiver desatualizado -- sem precisar apagar nada manualmente.
+_TEMPLATE_VERSION = 2
+
 
 def _get_template_dest() -> Path:
     """Retorna o caminho de destino do template no Blender do usuário."""
@@ -144,13 +152,33 @@ def install_template(force: bool = False) -> bool:
 
     Returns:
         True se instalado com sucesso, False caso contrário.
+
+    [FIX AUTO-REGENERAÇÃO] Antes, se `dest` já existisse, a função
+    parava ali (`return True`) sem nunca checar se o `startup.blend`
+    salvo era de uma versão ANTIGA e quebrada do gerador (ex.: o bug do
+    workspace quádruplo -- ver `_generate_startup_blend`). Corrigir o
+    código do gerador não bastava: era preciso apagar manualmente o
+    `startup.blend` velho pra alguma vez ele ser regenerado. Agora um
+    arquivo marcador (`.template_version`) guarda com qual versão do
+    gerador o `startup.blend` atual foi criado -- se não bater com
+    `_TEMPLATE_VERSION` (a versão deste arquivo), ele é regenerado
+    sozinho, sem precisar apagar nada na mão.
     """
     dest = _get_template_dest()
     src  = _get_template_src()
+    version_marker = dest / ".template_version"
 
-    # Já instalado?
-    if dest.exists() and not force:
-        print(f"[DAW] Template já instalado em: {dest}")
+    def _stored_version() -> int:
+        try:
+            return int(version_marker.read_text().strip())
+        except Exception:
+            return 0
+
+    needs_regen = force or not dest.exists() or _stored_version() != _TEMPLATE_VERSION
+
+    # Já instalado E na versão atual? Não faz nada.
+    if dest.exists() and not needs_regen:
+        print(f"[DAW] Template já instalado em: {dest} (v{_TEMPLATE_VERSION})")
         return True
 
     try:
@@ -172,10 +200,14 @@ def install_template(force: bool = False) -> bool:
 
         print(f"[DAW] Template instalado em: {dest}")
 
-        # Gera startup.blend se não existir
+        # Gera (ou regenera, se a versão do gerador mudou) o startup.blend
         startup = dest / "startup.blend"
-        if not startup.exists():
-            _generate_startup_blend(dest)
+        if not startup.exists() or _stored_version() != _TEMPLATE_VERSION:
+            if startup.exists():
+                print(f"[DAW] startup.blend desatualizado (v{_stored_version()} "
+                      f"-> v{_TEMPLATE_VERSION}) -- regenerando...")
+            if _generate_startup_blend(dest):
+                version_marker.write_text(str(_TEMPLATE_VERSION))
 
         return True
 
