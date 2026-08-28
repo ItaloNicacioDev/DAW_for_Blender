@@ -16,7 +16,7 @@ from pathlib import Path
 # `install_template()` compara com o que está salvo em
 # `.template_version` dentro da pasta do template e regenera sozinho
 # se estiver desatualizado -- sem precisar apagar nada manualmente.
-_TEMPLATE_VERSION = 3
+_TEMPLATE_VERSION = 4
 
 
 def _get_template_dest() -> Path:
@@ -31,71 +31,37 @@ def _get_template_src() -> Path:
     return Path(__file__).parent / "template" / "DAW"
 
 
-def _collapse_screen_to_single_area(window, screen, max_iters: int = 60) -> bool:
-    """[FIX WORKSPACE QUÁDRUPLO] Funde TODAS as áreas da tela numa única
-    área. Sem isso, `_generate_startup_blend` estava convertendo cada
-    área que o Blender já tinha por padrão (viewport 3D, timeline,
-    outliner, propriedades -- normalmente 4) em Sequence Editor,
-    mantendo as divisões originais -- daí o layout "quádruplo" salvo
-    no startup.blend.
-
-    [FIX v2] A primeira versão calculava a borda compartilhada exata
-    entre duas áreas (`a.x + a.width == b.x`) e passava esse ponto pro
-    operador -- mas isso depende de coordenadas de área já finalizadas
-    e sem nenhum arredondamento, o que nem sempre é verdade no momento
-    em que o template está sendo gerado (a tela pode não ter passado
-    por um layout/redraw completo ainda). Resultado: nenhum par batia
-    a igualdade exata, e nada era fundido.
-
-    Esta versão é mais robusta: pra cada área, tenta o operador com o
-    cursor em cada uma das 4 bordas DA PRÓPRIA área (não precisa saber
-    qual é a vizinha) -- é o operador que decide com quem fundir a
-    partir de onde o cursor está, igual a arrastar a borda na
-    interface. Confirma sucesso comparando a contagem de áreas antes/
-    depois de cada tentativa, em vez de confiar em não ter dado
-    exceção."""
-    for _ in range(max_iters):
-        areas = list(screen.areas)
-        if len(areas) <= 1:
-            return True
-
-        before = len(areas)
-        progressed = False
-
-        for a in areas:
-            candidates = [
-                (a.x + 1,              a.y + a.height // 2),   # borda esquerda
-                (a.x + a.width - 1,    a.y + a.height // 2),   # borda direita
-                (a.x + a.width // 2,   a.y + 1),               # borda inferior
-                (a.x + a.width // 2,   a.y + a.height - 1),    # borda superior
-            ]
-            for cx, cy in candidates:
-                try:
-                    with bpy.context.temp_override(window=window, screen=screen, area=a):
-                        bpy.ops.screen.area_join(cursor=(cx, cy))
-                except Exception as e:
-                    print(f"[DAW] area_join({cx},{cy}) falhou: {e}")
-                    continue
-
-                if len(screen.areas) < before:
-                    progressed = True
-                    break
-            if progressed:
-                break
-
-        if not progressed:
-            print(f"[DAW] Aviso: não consegui fundir todas as áreas "
-                  f"({len(list(screen.areas))} restante(s))")
-            return False
-
-    return len(list(screen.areas)) <= 1
+def _maximize_one_area(window, screen, area) -> bool:
+    """[FIX SIMPLIFICADO] Em vez de tentar fundir/destruir fisicamente
+    as outras áreas (frágil -- depende de geometria de tela já
+    finalizada, que nem sempre está disponível no momento em que o
+    template é gerado, ver histórico da versão anterior desta função),
+    usa o recurso nativo do Blender de MAXIMIZAR área (o mesmo do
+    atalho Ctrl+Espaço / 'Toggle Maximize Area'): a área escolhida
+    passa a ocupar a janela inteira, escondendo as outras -- sem
+    precisar reestruturar nada. Esse estado (`screen.show_fullscreen`)
+    é salvo normalmente junto com o .blend, então ao abrir o template
+    o usuário já vê só a área maximizada."""
+    region = next((r for r in area.regions if r.type == 'WINDOW'), None)
+    if region is None:
+        return False
+    try:
+        with bpy.context.temp_override(window=window, screen=screen, area=area, region=region):
+            if not screen.show_fullscreen:
+                bpy.ops.screen.screen_full_area(use_hide_panels=False)
+        return bool(screen.show_fullscreen)
+    except Exception as e:
+        print(f"[DAW] Não consegui maximizar a área: {e}")
+        return False
 
 
 def _generate_startup_blend(dest: Path):
     """
     Gera o startup.blend do template diretamente via API do Blender.
-    Cria workspace DAW com Sequence Editor limpo (UMA área só,
-    ocupando a tela inteira).
+    Cria workspace DAW com Sequence Editor -- visualmente só ele
+    aparece (as outras áreas padrão do Blender continuam existindo na
+    tela por baixo, só que escondidas via 'maximizar área', igual
+    Ctrl+Espaço na interface).
     """
     try:
         # Remove textos/scripts abertos
@@ -114,18 +80,21 @@ def _generate_startup_blend(dest: Path):
         ws.name = "DAW"
         screen = ws.screens[0]
 
-        # [FIX WORKSPACE QUÁDRUPLO] Funde tudo numa área só ANTES de
-        # trocar o tipo -- antes, cada uma das áreas padrão do Blender
-        # (viewport, timeline, outliner, propriedades) virava um
-        # Sequence Editor separado, preservando a divisão em 4.
-        _collapse_screen_to_single_area(window, screen)
-
-        # Configura a área restante (idealmente só uma) como Sequence Editor
+        # Configura TODAS as áreas como Sequence Editor -- mesmo as que
+        # vão ficar escondidas atrás da maximizada, pra não sobrar
+        # nenhuma "aba estranha" caso o usuário algum dia desmaximize
+        # (Ctrl+Espaço de novo).
         for area in screen.areas:
             area.type = 'SEQUENCE_EDITOR'
             for space in area.spaces:
                 if space.type == 'SEQUENCE_EDITOR':
                     space.view_type = 'SEQUENCER'
+
+        # [FIX WORKSPACE QUÁDRUPLO] Maximiza a primeira área -- visualmente
+        # fica só o Sequencer ocupando a tela inteira, sem depender de
+        # geometria exata de área pra fundir/destruir nada.
+        if screen.areas:
+            _maximize_one_area(window, screen, screen.areas[0])
 
         # Remove workspaces extras (Layout, Modeling, etc.)
         for other_ws in list(bpy.data.workspaces):
