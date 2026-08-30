@@ -1,16 +1,25 @@
 # daw_engine/core/channel_rack_bridge.py
 """
-Ponte entre o Channel Rack (scene.daw_channel_rack, módulo de UI em
-daw/modules/channel_rack/) e o motor de áudio de verdade (Engine.mixer,
-daw_engine/mixer/). Antes desta ponte, nenhuma das duas pontas sabia
-que a outra existia:
+Ponte entre o Channel Rack + Patterns (módulos de UI em
+daw/modules/channel_rack/ e daw/modules/patterns/) e o motor de áudio
+de verdade (Engine.mixer, daw_engine/mixer/). Sem esta ponte, nenhuma
+das pontas sabe que a outra existe:
 
   - `channel_rack.ChannelProperties.steps` (BoolVectorProperty) guarda
-    quais passos do step sequencer estão ligados por canal -- mas
-    nada tocava esses passos de verdade durante a reprodução.
-  - `Engine.mixer` (ver engine.py) agora existe e sabe gerar áudio real
-    via Synth, mas não tinha ideia de quando disparar uma nota nem de
-    qual canal do Channel Rack ela deveria vir.
+    quais passos do step sequencer estão ligados por canal -- grid
+    simples de liga/desliga, sem pitch/velocity/duração por nota.
+  - `scene.daw_patterns` (PatternsProperties) guarda patterns de
+    verdade -- notas com pitch, velocity, posição e duração em beats,
+    organizadas em clips posicionados na timeline (`PatternClipProperties.
+    track_index` mapeia pro índice do canal do Channel Rack, mesma
+    convenção 1:1 usada pro grid de steps) -- só que nada tocava esses
+    patterns de verdade durante a reprodução, só o grid simples.
+  - `channel_rack.vse_sync.py` já liga volume/pan/mute/solo às strips
+    de som reais do VSE (canais SAMPLER/AUDIO/DRUM) -- esta ponte cobre
+    o outro lado: canais SYNTH/MIDI tocando via Synth interno, e o
+    medidor de nível de TODOS os tipos de canal.
+  - `Engine.mixer` sabe gerar áudio real via Synth, mas não tinha ideia
+    de quando disparar uma nota nem de qual canal ela deveria vir.
   - `ChannelProperties.meter_level` só era escrito por preview manual
     de amostra ou monitor de entrada (ver channel_rack/register.py) --
     nunca pelo que estava realmente tocando.
@@ -18,10 +27,14 @@ que a outra existia:
 Chamado por `Engine._update()` a cada `frame_change_post`, só enquanto
 `bpy.context.screen.is_animation_playing` é True.
 
-Convenção adotada (documentada aqui por não haver um campo explícito
-"steps por beat" no modelo de dados): 4 steps = 1 beat (semínima
-dividida em 4 = fusa/16th note), que é o padrão de facto usado por
-step sequencers no estilo FL Studio (16 steps = 1 compasso de 4/4).
+Convenções adotadas (documentadas aqui por não haver campos explícitos
+no modelo de dados):
+  - Grid de steps: 4 steps = 1 beat (fusa/16th note), padrão de facto
+    de step sequencers estilo FL Studio (16 steps = 1 compasso de 4/4).
+  - Patterns: `steps_per_beat = pattern.length_steps / time_signature_num`
+    (assume que `length_steps` cobre exatamente um compasso).
+  - `PatternClipProperties.track_index` mapeia 1:1 pro índice de
+    `rack.channels` -- mesma convenção do grid de steps.
 """
 from __future__ import annotations
 
@@ -32,55 +45,45 @@ import bpy
 
 STEPS_PER_BEAT = 4
 
-# Nota fixa usada pro "trigger" de step (percussivo/one-shot) -- ainda
-# não existe no modelo de dados um campo de pitch por canal/step (isso
-# é responsabilidade de um trabalho futuro: mapear
-# `ChannelProperties.instrument_type`/sample pra uma nota ou sample
-# real). C4 é um valor neutro que soa em qualquer preset do Synth.
+# Nota fixa usada pro "trigger" do grid de steps (percussivo/one-shot,
+# sem pitch próprio) -- os Patterns (abaixo) já usam o pitch real de
+# cada nota.
 DEFAULT_TRIGGER_NOTE = 60
 DEFAULT_VELOCITY = 100
 NOTE_OFF_DELAY = 0.12  # segundos -- dá um "tap" percussivo padrão
 
-# Tipos de canal cujo som vem do Synth interno via steps (ver
-# mixer/mixer.py) -- os outros tipos (SAMPLER/AUDIO/DRUM) tocam pela
-# engine nativa de áudio do VSE do Blender (strips de som), não pelo
-# Synth, então não fazem sentido receber note_on/note_off daqui.
+MAX_PATTERN_REPS_PER_TICK = 64  # trava de segurança contra loop infinito
+
+# Tipos de canal cujo som vem do Synth interno (grid de steps OU
+# patterns) -- os outros tipos (SAMPLER/AUDIO/DRUM) tocam pela engine
+# nativa de áudio do VSE do Blender, controlados por vse_sync.py.
 SYNTH_DRIVEN_TYPES = {"SYNTH", "MIDI"}
 SAMPLE_DRIVEN_TYPES = {"SAMPLER", "AUDIO", "DRUM"}
 
-# Estado de reprodução por cena (não por Engine, que é singleton único
-# mas pode conviver com múltiplas cenas abertas)
 _state_by_scene: Dict[str, dict] = {}
 
-# Decaimento do medidor quando não há pico novo neste tick (mesma ideia
-# de METER_DECAY_PER_TICK em channel_rack/register.py, só que agora
-# aplicado ao nível REAL vindo do Mixer/dos arquivos de áudio)
 METER_DECAY = 0.75
 
-# Cache de leitores de WAV abertos, por filepath -- evita reabrir o
-# arquivo a cada tick (frame_change_post pode disparar 24-60x/seg)
 _wav_cache: Dict[str, "wave.Wave_read"] = {}
 READ_WINDOW_FRAMES = 512  # ~10ms @ 48kHz -- suficiente pra um pico "instantâneo"
 
 
 def _get_state(scene) -> dict:
-    return _state_by_scene.setdefault(scene.name, {"last_abs_step": None})
+    return _state_by_scene.setdefault(scene.name, {"last_abs_step": None, "last_beat": None})
 
 
 def _sync_mixer_channels(engine, rack) -> None:
     """Garante que `engine.mixer` tem exatamente um Channel por canal
     do Channel Rack, na mesma ordem, e copia volume/pan/mute/solo pra
-    lá -- assim o que você mexe no card do mixer (ver
-    modules/channel_rack/mixer_strip_*.py) afeta o áudio de verdade."""
+    lá -- assim o que você mexe no card do mixer afeta o áudio de verdade."""
     mixer = engine.mixer
     wanted = len(rack.channels)
 
-    # Canal 0 do Mixer é reservado (ver mixer/mixer.py) -- os canais do
-    # Channel Rack ocupam os índices 1..N. Adiciona os que faltarem.
+    # Canal 0 do Mixer é reservado -- os canais do Channel Rack ocupam
+    # os índices 1..N.
     while mixer.channel_count - 1 < wanted:
         mixer.add_channel(name=f"Channel Rack {mixer.channel_count}")
 
-    # Remove os que sobrarem (canal do Rack foi apagado na UI)
     while mixer.channel_count - 1 > wanted:
         mixer.remove_channel(mixer.channel_count - 1)
 
@@ -94,9 +97,7 @@ def _sync_mixer_channels(engine, rack) -> None:
 
 def _update_synth_meters(engine, rack) -> None:
     """Escreve o nível real (pós-fader) de cada canal SYNTH/MIDI do
-    Mixer de volta em `ChannelProperties.meter_level`, com decaimento
-    suave quando não há pico novo (mesma sensação de um VU meter de
-    verdade)."""
+    Mixer de volta em `ChannelProperties.meter_level`."""
     for i, ch in enumerate(rack.channels):
         if ch.instrument_type not in SYNTH_DRIVEN_TYPES:
             continue
@@ -111,20 +112,9 @@ def _update_synth_meters(engine, rack) -> None:
 
 
 # ------------------------------------------------------------------ #
-#  Medidor pra canais SAMPLER/AUDIO/DRUM -- esses tocam pela engine de
-#  áudio nativa do VSE (strips de som), não pelo Synth, então não tem
-#  nenhum "Channel" do Mixer gerando o som. O jeito de mostrar um nível
-#  REAL (não inventado) pra esse caso é ler a amostra de áudio no
-#  próprio arquivo, exatamente na posição em que o playhead está --
-#  é literalmente o mesmo trecho de PCM que está audível naquele
-#  instante, só lido do arquivo em vez de interceptado do stream do
-#  Blender (que não expõe uma torneira de análise em tempo real pra
-#  strips de som do VSE).
-#
-#  LIMITAÇÃO CONHECIDA: só lê .wav (via módulo `wave` da stdlib, sem
-#  dependência extra). Amostras em outros formatos (mp3/ogg/flac)
-#  tocam normalmente pelo VSE, mas o medidor fica em 0 pra elas até
-#  ganharem suporte (precisaria de um decoder extra tipo `soundfile`).
+#  Medidor pra canais SAMPLER/AUDIO/DRUM -- lê o nível REAL direto do
+#  arquivo de áudio, na posição exata do playhead (mesmo PCM que está
+#  audível naquele instante). Só .wav por enquanto (stdlib `wave`).
 # ------------------------------------------------------------------ #
 
 def _get_wav_reader(filepath: str) -> Optional["wave.Wave_read"]:
@@ -222,6 +212,99 @@ def _update_sample_meters(scene, rack) -> None:
             ch.meter_level = ch.meter_level * METER_DECAY
 
 
+# ------------------------------------------------------------------ #
+#  Grid de steps do Channel Rack -- percussivo, sem pitch próprio.
+# ------------------------------------------------------------------ #
+def _process_step_grid(engine, rack, last_abs_step: int, abs_step: int) -> None:
+    for step in range(last_abs_step + 1, abs_step + 1):
+        for i, ch in enumerate(rack.channels):
+            if ch.instrument_type not in SYNTH_DRIVEN_TYPES:
+                continue
+            step_count = max(1, ch.step_count)
+            local_step = step % step_count
+            if ch.mute:
+                continue
+            try:
+                active = bool(ch.steps[local_step])
+            except IndexError:
+                continue
+            if not active:
+                continue
+            mixer_idx = i + 1
+            engine.mixer.note_on(DEFAULT_TRIGGER_NOTE, DEFAULT_VELOCITY, mixer_idx)
+            engine.scheduler.schedule(
+                NOTE_OFF_DELAY, engine.mixer.note_off, DEFAULT_TRIGGER_NOTE, mixer_idx,
+            )
+
+
+# ------------------------------------------------------------------ #
+#  Patterns (Piano Roll de verdade -- pitch/velocity/duração por nota,
+#  clips posicionados em beats na timeline). Cobre notas melódicas de
+#  verdade, ao contrário do grid de steps (que só liga/desliga um
+#  "tap" percussivo fixo).
+# ------------------------------------------------------------------ #
+def _process_pattern_clips(engine, scene, rack, prev_beat: float, current_beat: float) -> None:
+    patterns_props = getattr(scene, "daw_patterns", None)
+    if patterns_props is None or current_beat <= prev_beat:
+        return
+
+    for clip in patterns_props.clips:
+        if not clip.enabled:
+            continue
+
+        track_index = clip.track_index
+        if track_index < 0 or track_index >= len(rack.channels):
+            continue
+        ch = rack.channels[track_index]
+        if ch.instrument_type not in SYNTH_DRIVEN_TYPES or ch.mute:
+            continue
+
+        pattern = patterns_props.get_pattern_by_name(clip.pattern_name)
+        if pattern is None or pattern.note_count == 0:
+            continue
+
+        clip_local_prev = prev_beat - clip.start_beat
+        clip_local_cur = current_beat - clip.start_beat
+        if clip_local_cur < 0:
+            continue  # clip ainda não começou
+        if not pattern.is_looping and clip_local_prev >= clip.duration_beats:
+            continue  # clip já terminou e não repete
+
+        steps_per_beat = pattern.length_steps / max(1, pattern.time_signature_num)
+        if steps_per_beat <= 0:
+            continue
+        pattern_len_beats = pattern.length_steps / steps_per_beat  # == time_signature_num
+
+        n_reps = 1
+        if pattern.is_looping and pattern_len_beats > 0:
+            n_reps = min(MAX_PATTERN_REPS_PER_TICK, int(clip_local_cur / pattern_len_beats) + 2)
+
+        mixer_idx = track_index + 1
+
+        for rep in range(max(1, n_reps)):
+            rep_offset = rep * pattern_len_beats if pattern.is_looping else 0.0
+            for note in pattern.notes:
+                if not note.enabled:
+                    continue
+
+                note_beat_start = rep_offset + note.start_step / steps_per_beat
+                note_beat_end = note_beat_start + note.duration_steps / steps_per_beat
+
+                # corta no fim do clip (não deixa a última nota "vazar"
+                # pra além de onde o clip termina na timeline)
+                if note_beat_start >= clip.duration_beats:
+                    continue
+                note_beat_end = min(note_beat_end, clip.duration_beats)
+
+                velocity = int(max(1, min(127, round(note.velocity * 127))))
+
+                if clip_local_prev <= note_beat_start < clip_local_cur:
+                    engine.mixer.note_on(note.pitch, velocity, mixer_idx)
+
+                if clip_local_prev <= note_beat_end < clip_local_cur:
+                    engine.mixer.note_off(note.pitch, mixer_idx)
+
+
 def tick(engine, scene) -> None:
     rack = getattr(scene, "daw_channel_rack", None)
     if rack is None or len(rack.channels) == 0:
@@ -242,59 +325,35 @@ def tick(engine, scene) -> None:
 
     state = _get_state(scene)
     last_abs_step = state["last_abs_step"]
+    last_beat = state["last_beat"]
 
-    if last_abs_step is None:
+    if last_abs_step is None or last_beat is None:
         # primeiro tick depois de apertar play -- não dispara nada
         # retroativo, só estabelece a referência
         state["last_abs_step"] = abs_step
-    elif abs_step != last_abs_step:
-        if abs_step < last_abs_step:
+        state["last_beat"] = beats
+    else:
+        if abs_step < last_abs_step or beats < last_beat:
             # o playhead voltou (loop, ou o usuário reposicionou
-            # enquanto tocava) -- reseta sem disparar nada pra evitar
-            # uma rajada de notas "atrasadas" de um intervalo que não
-            # faz mais sentido
+            # enquanto tocava) -- reseta sem disparar nada
             state["last_abs_step"] = abs_step
+            state["last_beat"] = beats
         else:
-            # dispara cada step cruzado em ordem (cobre o caso de FPS
-            # baixo/BPM alto pular mais de um step por frame) -- só
-            # pra canais SYNTH/MIDI; SAMPLER/AUDIO/DRUM tocam pelo VSE
-            # e são medidos por `_update_sample_meters`, não disparados
-            # aqui.
-            for step in range(last_abs_step + 1, abs_step + 1):
-                for i, ch in enumerate(rack.channels):
-                    if ch.instrument_type not in SYNTH_DRIVEN_TYPES:
-                        continue
-                    step_count = max(1, ch.step_count)
-                    local_step = step % step_count
-                    if ch.mute:
-                        continue
-                    try:
-                        active = bool(ch.steps[local_step])
-                    except IndexError:
-                        continue
-                    if not active:
-                        continue
-                    mixer_idx = i + 1
-                    engine.mixer.note_on(DEFAULT_TRIGGER_NOTE, DEFAULT_VELOCITY, mixer_idx)
-                    engine.scheduler.schedule(
-                        NOTE_OFF_DELAY, engine.mixer.note_off, DEFAULT_TRIGGER_NOTE, mixer_idx,
-                    )
-            state["last_abs_step"] = abs_step
+            if abs_step != last_abs_step:
+                _process_step_grid(engine, rack, last_abs_step, abs_step)
+                if rack.channels:
+                    rack.current_step = abs_step % max(1, rack.channels[0].step_count)
+                state["last_abs_step"] = abs_step
 
-        # playhead do step grid (usado pelo overlay em
-        # channel_rack/overlay.py e mixer_strip_draw.py, se algum dia
-        # desenhar o passo atual)
-        if rack.channels:
-            rack.current_step = abs_step % max(1, rack.channels[0].step_count)
+            _process_pattern_clips(engine, scene, rack, last_beat, beats)
+            state["last_beat"] = beats
 
     _update_synth_meters(engine, rack)
     _update_sample_meters(scene, rack)
 
 
 def reset(scene=None) -> None:
-    """Limpa o estado de reprodução -- chame ao parar/rebobinar pra não
-    disparar uma rajada de notas "perdidas" na próxima vez que apertar
-    play. Se `scene` for None, limpa todas as cenas."""
+    """Limpa o estado de reprodução -- chame ao parar/rebobinar."""
     if scene is None:
         _state_by_scene.clear()
     else:
@@ -302,9 +361,7 @@ def reset(scene=None) -> None:
 
 
 def close_wav_cache() -> None:
-    """Fecha todos os arquivos WAV abertos pelo cache de leitura de
-    nível -- chamar ao desligar a engine (evita handles de arquivo
-    pendurados)."""
+    """Fecha todos os arquivos WAV abertos pelo cache de leitura de nível."""
     for reader in _wav_cache.values():
         try:
             reader.close()
