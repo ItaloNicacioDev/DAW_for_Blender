@@ -26,12 +26,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from ..instruments.synth import Synth, SynthPreset
-# [FIX IMPORT] Estava `from ..midi.events import (...)` -- a partir de
-# daw/modules/mixer/mixer.py, ".." sobe só até daw/modules/, e não
-# existe nenhum `modules/midi`; esses eventos MIDI moram em
-# daw_engine/midi/events.py, então é preciso subir mais um nível
-# ("...") pra sair de modules/ e entrar em daw_engine/.
-from ...daw_engine.midi.events import (
+from ..midi.events import (
     NoteOnEvent,
     NoteOffEvent,
     ControlChangeEvent,
@@ -66,6 +61,11 @@ class Channel:
         self.pan:    float = 0.0     # -1.0 (esq) .. 0.0 (centro) .. 1.0 (dir)
         self.mute:   bool  = False
         self.solo:   bool  = False
+
+        # [PONTE ÁUDIO] Nível de pico do último bloco processado -- lido
+        # por daw_engine/core/channel_rack_bridge.py pra alimentar
+        # `ChannelProperties.meter_level` com o nível REAL pós-fader.
+        self.last_peak: float = 0.0
 
         # Pré-calculados a cada mudança de pan (lei de pan constante)
         self._pan_l: float = 1.0
@@ -129,6 +129,7 @@ class Channel:
         Shape: (frames, 2) float32.
         """
         if self.mute:
+            self.last_peak = 0.0
             return np.zeros((frames, 2), dtype=np.float32)
 
         # Delega ao instrumento
@@ -140,6 +141,9 @@ class Channel:
         # Aplica pan (multiplica L e R por coeficientes diferentes)
         stereo[:, 0] *= self._pan_l
         stereo[:, 1] *= self._pan_r
+
+        # [PONTE ÁUDIO] pico deste bloco, pós-volume/pan
+        self.last_peak = float(np.max(np.abs(stereo))) if stereo.size else 0.0
 
         return stereo
 
@@ -204,9 +208,6 @@ class Mixer:
         self._channels: List[Channel] = [
             Channel("Master Synth", sample_rate=sample_rate)
         ]
-
-        self.peak_left: float = 0.0
-        self.peak_right: float = 0.0
 
     # ------------------------------------------------------------------
     # Gerenciamento de canais
@@ -337,19 +338,7 @@ class Mixer:
         for ch in self._channels:
             mixed += ch.process(frames)
 
-        out = self.master.process(mixed)
-
-        # Picos L/R do buffer processado, usados pelos medidores da UI
-        # (ver modules/mixer/meters.py -> read_engine_peaks()).
-        self.peak_left = float(np.max(np.abs(out[:, 0]))) if frames else 0.0
-        self.peak_right = float(np.max(np.abs(out[:, 1]))) if frames else 0.0
-
-        return out
-
-    def get_state(self):
-        """Estado mínimo lido pelos medidores da UI (peak_left/peak_right).
-        Ver modules/mixer/meters.py -> read_engine_peaks()."""
-        return self
+        return self.master.process(mixed)
 
     # ------------------------------------------------------------------
     # Estado
