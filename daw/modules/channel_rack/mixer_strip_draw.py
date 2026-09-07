@@ -1,12 +1,22 @@
 # modules/channel_rack/mixer_strip_draw.py
 """
-Desenho (GPU + blf) das channel strips do mixer, no estilo da imagem
-de referência: card escuro, uma coluna por canal, número/nome no topo,
-knob de pan, fader vertical com cap destacado, medidor de nível
-vertical colorido (verde/amarelo/vermelho) e botões M/S no rodapé.
+Desenho (GPU + blf) das channel strips do mixer.
 
-Autocontido -- não importa nada de `overlay.py` de propósito (os dois
-módulos podem evoluir/ser removidos de forma independente).
+[REFINO VISUAL] Reescrito pra dar mais profundidade e polish:
+  - sombra suave sob o card inteiro + realce de 1px no topo das strips
+    (simula luz vinda de cima, como qualquer UI de DAW/plugin de verdade)
+  - fader com cap em "gradiente" (duas bandas: realce em cima, sombra
+    embaixo) em vez de um retângulo chapado
+  - knob com sombra própria + anel mais grosso e com leve realce
+  - medidor de nível estilo LED segmentado (hardware de verdade) em vez
+    de uma barra sólida contínua -- mais fácil de ler o nível de
+    relance e visualmente mais rico
+  - brilho de seleção/tocando em múltiplos anéis com alpha decrescente
+    (glow suave) em vez de uma borda sólida única
+  - tipografia com mais contraste onde importa (nome do canal, valores)
+    e menos onde não importa (rótulos secundários)
+
+Autocontido -- não importa nada de `overlay.py`.
 """
 from __future__ import annotations
 
@@ -18,7 +28,7 @@ import gpu
 from gpu_extras.batch import batch_for_shader
 
 from .colors import darken, lighten
-from .mixer_strip_theme import PALETTE, meter_color
+from .mixer_strip_theme import PALETTE, meter_color, METER_SEGMENTS, METER_SEGMENT_GAP
 from .mixer_strip_geometry import panel_geometry, CORNER_R
 
 _shader = None
@@ -70,7 +80,31 @@ def _round_rect(x, y, w, h, col, radius=CORNER_R):
         _tris(tris, col)
 
 
-def _circle_outline(cx, cy, r, col, thickness=1.6, segments=24):
+def _round_rect_top(x, y, w, h, col, radius=CORNER_R):
+    """Retângulo com cantos arredondados só em cima (embaixo reto) --
+    usado pra "encaixar" visualmente um elemento no que vem antes dele."""
+    r = min(radius, w / 2, h / 2)
+    if r <= 0:
+        _rect(x, y, w, h, col)
+        return
+    _rect(x, y, w, h - r, col)
+    _rect(x + r, y + h - r, w - 2 * r, r, col)
+    corners = [
+        (x + w - r, y + h - r, 0, 90),
+        (x + r, y + h - r, 90, 180),
+    ]
+    for cx, cy, a0, a1 in corners:
+        coords = [(cx, cy)]
+        for i in range(7):
+            ang = math.radians(a0 + (a1 - a0) * i / 6)
+            coords.append((cx + math.cos(ang) * r, cy + math.sin(ang) * r))
+        tris = []
+        for i in range(1, len(coords) - 1):
+            tris.extend([coords[0], coords[i], coords[i + 1]])
+        _tris(tris, col)
+
+
+def _circle_outline(cx, cy, r, col, thickness=1.6, segments=28):
     coords = []
     for i in range(segments + 1):
         a0 = math.radians(360 * i / segments)
@@ -83,7 +117,7 @@ def _circle_outline(cx, cy, r, col, thickness=1.6, segments=24):
     _tris(coords, col)
 
 
-def _circle_fill(cx, cy, r, col, segments=24):
+def _circle_fill(cx, cy, r, col, segments=28):
     coords = [(cx, cy)]
     for i in range(segments + 1):
         a = math.radians(360 * i / segments)
@@ -94,7 +128,7 @@ def _circle_fill(cx, cy, r, col, segments=24):
     _tris(tris, col)
 
 
-def _arc_band(cx, cy, r_out, r_in, a0_deg, a1_deg, col, segments=18):
+def _arc_band(cx, cy, r_out, r_in, a0_deg, a1_deg, col, segments=20):
     """Faixa de anel entre dois raios, de a0_deg a a1_deg (graus, sentido
     matemático padrão) -- usada pro anel/trilho do knob."""
     if segments < 2:
@@ -133,45 +167,61 @@ def _txt(text, x, y, size, col, font_id=0, center_w=None):
     blf.draw(font_id, text)
 
 
+def _soft_glow(x0, y0, w, h, col, s, rings=3, radius=CORNER_R):
+    """Brilho suave em múltiplos anéis com alpha decrescente, em vez de
+    uma borda sólida única -- usado pro estado selecionado/tocando."""
+    base_a = col[3] if len(col) > 3 else 1.0
+    for i in range(rings, 0, -1):
+        pad = i * 1.6 * s
+        a = base_a * (0.30 if i == rings else (0.55 if i == 2 else 1.0)) / rings * 1.6
+        c = (col[0], col[1], col[2], min(1.0, a))
+        _round_rect(x0 - pad, y0 - pad, w + 2 * pad, h + 2 * pad, c, radius=radius + pad * 0.5)
+
+
 # ------------------------------------------------------------------ #
 #  Sub-desenhos de cada elemento da strip
 # ------------------------------------------------------------------ #
 def _draw_knob(strip, pan_value: float, accent, s: float):
     cx, cy, r = strip.knob_cx, strip.knob_cy, strip.knob_r
-    _circle_fill(cx, cy, r * 0.62, PALETTE["knob_fill"])
 
-    # trilho do knob: anel de 270° (mesmo intervalo -45..225 usado no
-    # ponteiro abaixo), sempre visível como referência de fundo
-    ring_out, ring_in = r, r * 0.72
+    # sombra sutil embaixo do knob (dá volume)
+    _circle_fill(cx, cy - 1.2 * s, r * 0.66, PALETTE["knob_shadow"])
+    _circle_fill(cx, cy, r * 0.64, PALETTE["knob_fill"])
+    # realce no topo do miolo (luz vinda de cima)
+    _circle_fill(cx, cy + r * 0.18, r * 0.40, PALETTE["knob_fill_hi"])
+
+    # trilho do knob: anel de 270°, sempre visível como referência de fundo
+    ring_out, ring_in = r, r * 0.74
     TRACK_A0, TRACK_A1 = -45.0, 225.0
     _arc_band(cx, cy, ring_out, ring_in, TRACK_A0, TRACK_A1, PALETTE["knob_ring"])
 
-    # arco de valor: preenche do centro (12h = pan 0) até a posição
-    # atual, igual ao indicador de ganho de qualquer DAW -- evita o
-    # "ponteiro grosso" que parecia um ícone de alerta.
+    # arco de valor: preenche do centro (12h = pan 0) até a posição atual
     center_angle = 90.0
     value_angle = 90.0 - max(-1.0, min(1.0, pan_value)) * 135.0
     if abs(pan_value) > 0.01:
         a0, a1 = (value_angle, center_angle) if pan_value >= 0 else (center_angle, value_angle)
         _arc_band(cx, cy, ring_out, ring_in, a0, a1, accent)
 
-    # ponteirinho fino na ponta do arco, só pra marcar a posição exata
+    # ponteirinho fino na ponta do arco
     angle = math.radians(value_angle)
     tip_r = ring_in - 1.0 * s
     ix = cx + math.cos(angle) * tip_r
     iy = cy + math.sin(angle) * tip_r
-    _line(cx, cy, ix, iy, accent, thickness=1.4 * s)
-    _circle_fill(cx, cy, 1.6 * s, accent)
+    _line(cx, cy, ix, iy, accent, thickness=1.5 * s)
+    _circle_fill(cx, cy, 1.8 * s, accent)
 
     label = f"{pan_value * 100:+.0f}" if abs(pan_value) > 0.005 else "C"
-    _txt(label, cx - strip.strip_w / 2, cy - r - 13 * s, max(7.0, 9.5 * s),
+    _txt(label, cx - strip.strip_w / 2, cy - r - 14 * s, max(7.0, 9.5 * s),
          PALETTE["knob_txt"], center_w=strip.strip_w)
 
 
 def _draw_fader(strip, volume: float, selected: bool, playing: bool, s: float):
     tx, ty = strip.fader_track_x, strip.fader_track_y
     tw, th = strip.fader_track_w, strip.fader_track_h
+
+    # trilho com leve sombra interna no topo (profundidade)
     _round_rect(tx, ty, tw, th, PALETTE["fader_track"], radius=3 * s)
+    _rect(tx, ty + th - 2 * s, tw, 2 * s, PALETTE["fader_track_edge"])
 
     fill_h = th * max(0.0, min(1.0, volume))
     _round_rect(tx, ty, tw, fill_h, PALETTE["fader_fill"], radius=3 * s)
@@ -180,16 +230,26 @@ def _draw_fader(strip, volume: float, selected: bool, playing: bool, s: float):
     cap_y = ty + fill_h - cap_h / 2
     cap_w = strip.strip_w - 24 * s
     cap_x0 = strip.knob_cx - cap_w / 2
-    cap_col = PALETTE["fader_cap_selected"] if selected else PALETTE["fader_cap"]
+
+    if selected:
+        cap_col, cap_hi, cap_lo = (PALETTE["fader_cap_selected"], PALETTE["fader_cap_selected_hi"],
+                                    PALETTE["fader_cap_selected_lo"])
+    else:
+        cap_col, cap_hi, cap_lo = PALETTE["fader_cap"], PALETTE["fader_cap_hi"], PALETTE["fader_cap_lo"]
 
     # linha caindo do cap até a base do trilho -- só quando a strip
-    # selecionada está de fato emitindo áudio (pedido original: "mostrar
-    # o audio quando a strip selecionada esta sendo tocada").
+    # selecionada está de fato emitindo áudio
     if selected and playing:
         _line(strip.knob_cx, cap_y, strip.knob_cx, ty, PALETTE["fader_cap_selected"], thickness=1.4 * s)
 
+    # cap em "gradiente" -- duas bandas (realce em cima, sombra embaixo)
+    # em vez de um bloco chapado, mais parecido com um fader físico
     _round_rect(cap_x0, cap_y, cap_w, cap_h, cap_col, radius=4 * s)
-    _rect(cap_x0 + 4 * s, cap_y + cap_h / 2 - 1, cap_w - 8 * s, 1.4 * s, darken(cap_col[:3], 0.25) + (1.0,))
+    _round_rect_top(cap_x0, cap_y + cap_h * 0.42, cap_w, cap_h * 0.58, cap_hi, radius=4 * s)
+    _rect(cap_x0, cap_y, cap_w, cap_h * 0.22, cap_lo)
+    # ranhura central (detalhe de "pegador" de fader físico)
+    _rect(cap_x0 + cap_w * 0.18, cap_y + cap_h / 2 - 0.7 * s, cap_w * 0.64, 1.4 * s,
+          darken(cap_col[:3], 0.35) + (0.8,))
 
     db = (volume - 1.0) * 60.0 if volume < 1.0 else 0.0
     label = "0.0" if volume >= 0.999 else f"{db:.1f}"
@@ -197,10 +257,8 @@ def _draw_fader(strip, volume: float, selected: bool, playing: bool, s: float):
 
 
 def _draw_insert_area(strip, top_y: float, bottom_y: float, s: float):
-    """Área vazia entre o knob e o fader, como o 'rack de inserts' vazio
-    da referência -- puramente decorativa. Número fixo de linhas
-    igualmente espaçadas (antes usava um loop que dependia do espaço
-    disponível e ficava com espaçamento inconsistente/torto)."""
+    """Área vazia entre o knob e o fader ("rack de inserts" vazio),
+    puramente decorativa -- linhas finas igualmente espaçadas."""
     x0 = strip.knob_cx - (strip.strip_w - 24 * s) / 2
     x1 = strip.knob_cx + (strip.strip_w - 24 * s) / 2
     gap = top_y - bottom_y
@@ -209,32 +267,54 @@ def _draw_insert_area(strip, top_y: float, bottom_y: float, s: float):
     n = 4
     for i in range(1, n + 1):
         y = top_y - gap * i / (n + 1)
-        _rect(x0, y, x1 - x0, 1.0, (1.0, 1.0, 1.0, 0.05))
+        _rect(x0, y, x1 - x0, 1.0, (1.0, 1.0, 1.0, 0.045))
 
 
-def _draw_meter(strip, level_l: float, level_r: float, clipping: bool):
+def _draw_meter(strip, level_l: float, level_r: float, clipping: bool, s: float):
+    """Medidor estilo LED segmentado -- cada canal (L/R) é uma coluna
+    de blocos discretos com um vão fino entre eles, em vez de uma barra
+    sólida contínua. Blocos "apagados" ficam num cinza quase invisível
+    (referência de escala); blocos "acesos" pegam a cor do limiar
+    correspondente (verde/amarelo/vermelho)."""
     mx, my, mw, mh = strip.meter_x, strip.meter_y, strip.meter_w, strip.meter_h
-    # moldura sutil pra coluna do medidor ficar visível mesmo sem sinal
-    # (antes, com level=0, ficava quase invisível contra o fundo da strip)
-    _rect(mx - 1, my - 1, mw + 2, mh + 2, PALETTE["border"])
+    _round_rect(mx - 1.5 * s, my - 1.5 * s, mw + 3 * s, mh + 3 * s, PALETTE["border"], radius=3 * s)
     _rect(mx, my, mw, mh, PALETTE["meter_bg"])
 
-    half = mw / 2 - 1
-    for offset, level in ((0.0, level_l), (half + 1, level_r)):
+    half = mw / 2 - 1 * s
+    seg_h = mh / METER_SEGMENTS
+    gap_h = seg_h * METER_SEGMENT_GAP
+    block_h = seg_h - gap_h
+
+    from .mixer_strip_theme import LEVEL_GREEN_MAX, LEVEL_YELLOW_MAX
+
+    for offset, level in ((0.0, level_l), (half + 1 * s, level_r)):
         seg_x = mx + offset
         level = max(0.0, min(1.0, level))
-        fill_h = mh * level
-        col = meter_color(level, clipping)
-        _rect(seg_x, my, half, fill_h, col)
+        lit_segments = level * METER_SEGMENTS
 
-    # linhas de referência dos limiares (sutil), ajuda a "ler" a escala
-    from .mixer_strip_theme import LEVEL_GREEN_MAX, LEVEL_YELLOW_MAX
+        for i in range(METER_SEGMENTS):
+            seg_level = (i + 1) / METER_SEGMENTS  # nível que este degrau representa
+            seg_y = my + i * seg_h + gap_h / 2
+            is_lit = i < lit_segments
+            # último segmento parcialmente aceso (transição suave em
+            # vez de tudo-ou-nada no degrau exato)
+            partial = lit_segments - i if (0 < lit_segments - i < 1) else None
+
+            if is_lit or partial:
+                col = meter_color(seg_level, clipping and seg_level > LEVEL_YELLOW_MAX)
+                if partial is not None:
+                    col = meter_color(seg_level, dim=True)
+                _rect(seg_x, seg_y, half, block_h, col)
+            else:
+                _rect(seg_x, seg_y, half, block_h, PALETTE["meter_led_off"])
+
+    # linhas de referência dos limiares
     for thr in (LEVEL_GREEN_MAX, LEVEL_YELLOW_MAX):
         ly = my + mh * thr
-        _rect(mx, ly, mw, 1.0, (0.0, 0.0, 0.0, 0.35))
+        _rect(mx, ly, mw, 1.0, (0.0, 0.0, 0.0, 0.4))
 
     if clipping:
-        _rect(mx, my + mh - 3, mw, 3, PALETTE["meter_clip"])
+        _rect(mx, my + mh - 2 * s, mw, 2 * s, PALETTE["meter_clip"])
 
 
 def _draw_strip(strip, ch, index: int, active_index: int, is_playing_selected: bool, s: float):
@@ -246,41 +326,40 @@ def _draw_strip(strip, ch, index: int, active_index: int, is_playing_selected: b
     bg = strip_bg_for(ch.mute, alt)
     body_top = strip.header_y + strip.header_h
     body_bottom = strip.footer_y - 6 * s
-    _round_rect(x0, body_bottom, x1 - x0, body_top - body_bottom, bg, radius=6 * s)
 
-    # contorno fino em todas as strips selecionadas (multi-seleção estilo
-    # DAW) -- distinto do brilho verde, que só aparece quando está tocando
-    if is_selected:
-        outline = PALETTE["selection_outline"]
-        pad = 1.5 * s
-        _round_rect(x0 - pad, body_bottom - pad, (x1 - x0) + 2 * pad,
-                     (body_top - body_bottom) + 2 * pad, outline, radius=7 * s)
-        _round_rect(x0, body_bottom, x1 - x0, body_top - body_bottom, bg, radius=6 * s)
+    # sombra suave da própria strip (profundidade contra o painel)
+    _round_rect(x0, body_bottom - 1.5 * s, x1 - x0, (body_top - body_bottom) + 1.5 * s,
+                PALETTE["panel_shadow"], radius=7 * s)
 
     if is_selected and is_playing_selected:
-        glow = PALETTE["strip_selected_glow"]
-        pad = 2 * s
+        _soft_glow(x0, body_bottom, x1 - x0, body_top - body_bottom,
+                   PALETTE["strip_selected_glow"], s, rings=3, radius=7 * s)
+    elif is_selected:
+        pad = 1.4 * s
         _round_rect(x0 - pad, body_bottom - pad, (x1 - x0) + 2 * pad,
-                     (body_top - body_bottom) + 2 * pad, glow, radius=7 * s)
-        _round_rect(x0, body_bottom, x1 - x0, body_top - body_bottom, bg, radius=6 * s)
+                    (body_top - body_bottom) + 2 * pad, PALETTE["selection_outline"], radius=7 * s)
 
-    # header: chip de cor + número + nome -- fundo mais claro quando selecionado
-    header_col = lighten(PALETTE["header_bg"][:3], 0.10) + (1.0,) if is_selected else PALETTE["header_bg"]
+    _round_rect(x0, body_bottom, x1 - x0, body_top - body_bottom, bg, radius=6 * s)
+    # realce de 1px no topo (luz vinda de cima, dá "elevação")
+    _rect(x0 + 6 * s, body_top - 1.2 * s, (x1 - x0) - 12 * s, 1.2 * s, PALETTE["strip_top_highlight"])
+
+    # header: fundo mais claro quando selecionado, chip de cor + número + nome
+    header_col = PALETTE["header_bg_light"] if is_selected else PALETTE["header_bg"]
     _round_rect(x0, strip.header_y, x1 - x0, strip.header_h, header_col, radius=6 * s)
     chip_col = tuple(ch.color) + (1.0,)
-    _round_rect(x0 + 6 * s, strip.header_y + strip.header_h / 2 - 4 * s, 8 * s, 8 * s, chip_col, radius=2 * s)
+    _round_rect(x0 + 7 * s, strip.header_y + strip.header_h / 2 - 4 * s, 8 * s, 8 * s, chip_col, radius=2.5 * s)
     number = str(getattr(ch, "vse_channel", index + 1))
-    _txt(number, x0 + 18 * s, strip.header_y + strip.header_h / 2 - 4 * s, max(7.0, 10 * s), PALETTE["header_txt"])
-    name = ch.name if len(ch.name) <= 9 else ch.name[:8] + "…"
-    _txt(name, x0, strip.header_y - 12 * s, max(6.0, 9 * s), PALETTE["header_txt_dim"], center_w=(x1 - x0))
+    _txt(number, x0 + 19 * s, strip.header_y + strip.header_h / 2 - 4 * s, max(7.0, 10 * s), PALETTE["header_txt"])
+    name = ch.name if len(ch.name) <= 10 else ch.name[:9] + "…"
+    _txt(name, x0, strip.header_y - 13 * s, max(6.0, 9 * s), PALETTE["header_txt_dim"], center_w=(x1 - x0))
 
     # ponto indicador (verde = audível, apagado = mudo) logo abaixo do header
-    dot_col = (0.30, 0.85, 0.35, 1.0) if not ch.mute else (0.30, 0.31, 0.36, 1.0)
+    dot_col = (0.34, 0.88, 0.40, 1.0) if not ch.mute else (0.32, 0.33, 0.38, 1.0)
     _circle_fill(strip.dot_cx, strip.dot_cy, strip.dot_r, dot_col)
 
     accent = chip_col if not ch.mute else darken(tuple(ch.color), 0.4) + (1.0,)
     _draw_knob(strip, getattr(ch, "pan", 0.0), accent, s)
-    _draw_insert_area(strip, strip.knob_cy - strip.knob_r - 13 * s, strip.fader_track_y + strip.fader_track_h, s)
+    _draw_insert_area(strip, strip.knob_cy - strip.knob_r - 14 * s, strip.fader_track_y + strip.fader_track_h, s)
     _draw_fader(strip, getattr(ch, "volume", 0.78), is_selected, is_playing_selected, s)
 
     level = max(0.0, min(1.0, getattr(ch, "meter_level", 0.0))) if not ch.mute else 0.0
@@ -288,15 +367,21 @@ def _draw_strip(strip, ch, index: int, active_index: int, is_playing_selected: b
     level_l = level * min(1.0, 1.0 - max(pan, 0.0))
     level_r = level * min(1.0, 1.0 + min(pan, 0.0))
     clipping = level >= 0.999
-    _draw_meter(strip, level_l, level_r, clipping)
+    _draw_meter(strip, level_l, level_r, clipping, s)
 
-    # rodapé M/S
-    mute_col = PALETTE["mute_on"] if ch.mute else PALETTE["mute_off"]
-    solo_col = PALETTE["solo_on"] if ch.solo else PALETTE["solo_off"]
+    # rodapé M/S -- com leve realce no topo do botão pra dar volume
+    mute_col, mute_hi = (PALETTE["mute_on"], PALETTE["mute_on_hi"]) if ch.mute else (PALETTE["mute_off"], None)
+    solo_col, solo_hi = (PALETTE["solo_on"], PALETTE["solo_on_hi"]) if ch.solo else (PALETTE["solo_off"], None)
+
     _round_rect(strip.mute_x, strip.footer_y, strip.btn_w, strip.btn_h, mute_col, radius=4 * s)
+    if mute_hi:
+        _round_rect_top(strip.mute_x, strip.footer_y + strip.btn_h * 0.5, strip.btn_w, strip.btn_h * 0.5, mute_hi, radius=4 * s)
     _txt("M", strip.mute_x, strip.footer_y + strip.btn_h / 2 - 4 * s, max(7.0, 9.5 * s),
-         PALETTE["btn_txt"], center_w=strip.btn_w)
+         PALETTE["btn_txt"] if not ch.mute else PALETTE["btn_txt_on_dark"], center_w=strip.btn_w)
+
     _round_rect(strip.solo_x, strip.footer_y, strip.btn_w, strip.btn_h, solo_col, radius=4 * s)
+    if solo_hi:
+        _round_rect_top(strip.solo_x, strip.footer_y + strip.btn_h * 0.5, strip.btn_w, strip.btn_h * 0.5, solo_hi, radius=4 * s)
     txt_col = PALETTE["btn_txt_on_dark"] if ch.solo else PALETTE["btn_txt"]
     _txt("S", strip.solo_x, strip.footer_y + strip.btn_h / 2 - 4 * s, max(7.0, 9.5 * s),
          txt_col, center_w=strip.btn_w)
@@ -329,17 +414,20 @@ def draw_mixer_strips():
 
     gpu.state.blend_set('ALPHA')
 
+    # sombra do card inteiro (profundidade contra o fundo do Sequencer)
+    _round_rect(px - 3, py - 4, panel_w + 6, panel_h + 6, PALETTE["panel_shadow"], radius=8 * s)
     _round_rect(px - 1, py - 1, panel_w + 2, panel_h + 2, PALETTE["border"])
     _round_rect(px, py, panel_w, panel_h, PALETTE["panel_bg"])
 
-    # barra de título -- arrastável (clique+arraste move o painel inteiro)
+    # barra de título -- arrastável, com leve realce no topo
     title_y = geo["title_y"]
     _round_rect(px, title_y, panel_w, geo["title_h"], PALETTE["header_bg"], radius=6 * s)
+    _rect(px + 4 * s, title_y + geo["title_h"] - 1 * s, panel_w - 8 * s, 1 * s, PALETTE["strip_top_highlight"])
     label = "Mixer" if collapsed else "Mixer  ·  arraste para mover"
-    _txt(label, px + 8 * s, title_y + geo["title_h"] / 2 - 4 * s,
+    _txt(label, px + 9 * s, title_y + geo["title_h"] / 2 - 4 * s,
          max(7.0, 9.5 * s), PALETTE["header_txt_dim"])
 
-    # botão de minimizar/restaurar, canto direito da barra de título
+    # botão de minimizar/restaurar
     cx0, cw = geo["collapse_x"], geo["collapse_btn_w"]
     cy0 = title_y + 3 * s
     ch_ = geo["title_h"] - 6 * s
@@ -354,11 +442,11 @@ def draw_mixer_strips():
     # alça de redimensionar, canto inferior direito
     gx, gy, gs = geo["grip_x"], geo["grip_y"], geo["grip_size"]
     for i in range(3):
-        off = i * gs / 3.2
-        _line(gx + off, gy, gx + gs, gy + gs - off, PALETTE["header_txt_dim"], thickness=1.2 * s)
+        off = i * gs / 3.0
+        _line(gx + off, gy, gx + gs, gy + gs - off, PALETTE["header_txt_soft"], thickness=1.3 * s)
 
     if not channels:
-        _txt("Nenhum canal", px + 8 * s, py + panel_h / 2, max(7.0, 10.5 * s), PALETTE["empty_txt"])
+        _txt("Nenhum canal", px + 9 * s, py + panel_h / 2, max(7.0, 10.5 * s), PALETTE["empty_txt"])
         gpu.state.blend_set('NONE')
         return
 
