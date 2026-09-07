@@ -5,8 +5,7 @@ onde cada elemento (barra de título, botão de minimizar, alça de
 redimensionar, header, knob, trilho do fader, cap, medidor, botões
 M/S) fica na tela, usado tanto por `mixer_strip_draw.py` (desenho)
 quanto por `mixer_strip_operator.py` (hit-test), pra nunca ficarem
-dessincronizados -- mesmo princípio do `_panel_geometry` que já existe
-em `overlay.py` para o step grid.
+dessincronizados.
 
 Posição e tamanho são controlados pelo usuário (ver properties.py):
   - `rack.overlay_pos_x` / `overlay_pos_y`: arraste a barra de título.
@@ -16,6 +15,12 @@ Posição e tamanho são controlados pelo usuário (ver properties.py):
     pra mudar as duas, como uma janela normal).
   - `rack.overlay_collapsed`: clique no botão "–" da barra de título
     pra minimizar (só a barra de título fica visível).
+
+[REFINO VISUAL] Proporções levemente ajustadas pra dar mais respiro
+(strip um pouco mais larga, header um pouco mais alto, medidor um
+pouco mais largo pro estilo LED segmentado) -- os nomes e a ordem dos
+campos de `StripRect` continuam os mesmos, então `mixer_strip_operator.py`
+não precisa mudar nada.
 """
 from __future__ import annotations
 
@@ -24,29 +29,29 @@ from typing import List, NamedTuple, Optional, Sequence
 # --- Valores BASE (em pixels, escala 1.0) -- larguras usam scale_x,
 # alturas usam scale_y, então redimensionar horizontal e vertical são
 # independentes um do outro. ---
-STRIP_W = 74
-STRIP_GAP = 3
+STRIP_W = 80
+STRIP_GAP = 4
 MAX_VISIBLE_STRIPS = 10
 
-TITLE_H = 20
+TITLE_H = 22
 COLLAPSE_BTN_W = 18
 GRIP_SIZE = 14
 
 HEADER_H = 30
 DOT_R = 3.0
-DOT_GAP = 9
-KNOB_D = 34
-KNOB_MARGIN_TOP = 10
-FADER_TOP_GAP = 70          # espaço "rack de inserts" vazio acima do fader
+DOT_GAP = 10
+KNOB_D = 36
+KNOB_MARGIN_TOP = 11
+FADER_TOP_GAP = 66          # espaço "rack de inserts" vazio acima do fader
 FADER_TRACK_H = 190
 FADER_TRACK_W = 8
-FADER_CAP_H = 14
-METER_W = 14
-FOOTER_GAP = 8
-BTN_H = 18
+FADER_CAP_H = 15
+METER_W = 16
+FOOTER_GAP = 9
+BTN_H = 19
 FOOTER_H = BTN_H + 10
 
-CORNER_R = 8
+CORNER_R = 9
 
 SCALE_MIN = 0.6
 SCALE_MAX = 2.5
@@ -114,8 +119,8 @@ def panel_geometry(region, channels: Sequence, pos_x: float = 16, pos_y: float =
     footer_gap = FOOTER_GAP * sy_scale
     btn_h = BTN_H * sy_scale
     footer_h = btn_h + 10 * sy_scale
-    pad_x = 8 * sx_scale
-    pad_y = 8 * sy_scale
+    pad_x = 9 * sx_scale
+    pad_y = 9 * sy_scale
 
     body_h = header_h + dot_gap + knob_margin_top + knob_d + fader_top_gap + fader_track_h + footer_gap + footer_h
     panel_w = (n * strip_w + (n - 1) * strip_gap + 2 * pad_x) if visible else 220 * sx_scale
@@ -138,7 +143,7 @@ def panel_geometry(region, channels: Sequence, pos_x: float = 16, pos_y: float =
             fader_track_y = knob_cy - knob_d / 2 - fader_top_gap - fader_track_h
             fader_track_x = sxp + strip_w / 2 - fader_track_w / 2
 
-            meter_x = sxp + strip_w - meter_w - 6 * sx_scale
+            meter_x = sxp + strip_w - meter_w - 7 * sx_scale
             meter_y = fader_track_y
             meter_h = fader_track_h
 
