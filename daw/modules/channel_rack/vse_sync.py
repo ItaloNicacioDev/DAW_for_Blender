@@ -41,12 +41,28 @@ DAW_LOG_VSE_SYNC = True
 _warned_mono_pan: set = set()
 
 
+def _all_strips(seq_editor):
+    """[FIX API BLENDER 5.x] Devolve todas as strips (recursivo, inclui
+    dentro de meta-strips) -- `SequenceEditor.sequences_all` foi
+    renomeado pra `strips_all` no Blender 5.x (o nome antigo ainda
+    existia como "Deprecated" até a 4.x, mas na 5.2 já não existe mais
+    de jeito nenhum -- é isso que causava
+    'SequenceEditor' object has no attribute 'sequences_all' e
+    derrubava a sincronização inteira). Tenta o nome novo primeiro,
+    cai pro antigo se estiver rodando numa versão mais velha do
+    Blender."""
+    strips_all = getattr(seq_editor, "strips_all", None)
+    if strips_all is not None:
+        return strips_all
+    return getattr(seq_editor, "sequences_all", [])
+
+
 def _sound_strips_on_channel(scene, vse_channel: int):
     seq_editor = getattr(scene, "sequence_editor", None)
     if seq_editor is None:
         return []
     return [
-        s for s in seq_editor.sequences_all
+        s for s in _all_strips(seq_editor)
         if s.type == 'SOUND' and s.channel == vse_channel
     ]
 
