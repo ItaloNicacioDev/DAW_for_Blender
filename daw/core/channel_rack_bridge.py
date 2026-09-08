@@ -150,7 +150,17 @@ def _find_sound_strip(scene, vse_channel: int, frame: int):
     seq_editor = getattr(scene, "sequence_editor", None)
     if seq_editor is None:
         return None
-    for strip in seq_editor.sequences_all:
+    # [FIX API BLENDER 5.x] `SequenceEditor.sequences_all` foi renomeado
+    # pra `strips_all` no Blender 5.x -- o nome antigo não existe mais
+    # na 5.2 (mesmo bug já corrigido em modules/channel_rack/vse_sync.py,
+    # que esta função replica pra não quebrar o meter de novo). Sem isso
+    # aqui, `tick()` lançava AttributeError em TODO frame durante o play
+    # pra qualquer canal SAMPLER/AUDIO/DRUM, era pego pelo try/except de
+    # `Engine._update()` e o medidor nunca recebia um valor novo.
+    strips = getattr(seq_editor, "strips_all", None)
+    if strips is None:
+        strips = getattr(seq_editor, "sequences_all", [])
+    for strip in strips:
         if strip.type != 'SOUND':
             continue
         if strip.channel != vse_channel:
