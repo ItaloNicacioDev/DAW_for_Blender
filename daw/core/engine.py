@@ -36,17 +36,13 @@ from .registry import Registry
 from .logger import LOGGER
 from .constants import EngineState, DEFAULT_BPM
 
-# [FIX PONTE ÁUDIO] Antes, Engine não tinha mixer nem saída de áudio --
-# só o transporte/clock/scheduler ficavam "rodando no vazio" (o
-# scheduler nunca recebia nenhuma tarefa, então seu tick() era sempre
-# um no-op). Isso fazia o addon logar "Motor iniciado" sem nunca
-# produzir som nenhum, e o medidor do mixer nunca tinha nível real pra
-# mostrar. As linhas abaixo dão à Engine um Mixer de verdade e uma
-# saída de áudio real (via sounddevice, com fallback seguro se não
-# estiver instalado -- ver audio/stream.py).
-from ..mixer import Mixer
-from ..audio.output import AudioOutput
-from ..audio.config import ENGINE_CONFIG
+# [FIX PONTE ÁUDIO/METER] Engine não tinha mixer nenhum -- os LEDs de
+# nível do Mixer/Channel Rack ficavam travados no último valor
+# arrastado manualmente, porque nada gerava um pico novo a cada frame
+# durante o play (ver channel_rack_bridge.py, que agora é chamado por
+# `_update` logo abaixo). Import tardio evitado aqui de propósito: o
+# Mixer não depende de bpy, então pode ficar no topo com os outros.
+from ..mixer.mixer import Mixer
 
 
 class Engine:
@@ -92,13 +88,10 @@ class Engine:
         self.history = History()
         self.registry = Registry()
 
-        # [FIX PONTE ÁUDIO] Mixer real + saída de áudio real. O Mixer já
-        # nasce com o "Channel 0" default (ver mixer/mixer.py); canais
-        # extras são criados/sincronizados por `channel_rack_bridge.py`
-        # pra espelhar `scene.daw_channel_rack.channels`.
-        self.mixer = Mixer(sample_rate=ENGINE_CONFIG.sample_rate)
-        self.audio_output = AudioOutput()
-        self.audio_output.set_generator(self.mixer)  # Mixer.process(frames) já bate com o contrato esperado
+        # [FIX PONTE ÁUDIO/METER] Mixer real -- alimenta tanto o áudio
+        # dos canais SYNTH/MIDI quanto o `last_peak` que o VU meter do
+        # Mixer/Channel Rack lê (ver channel_rack_bridge.py).
+        self.mixer = Mixer(sample_rate=48000)
 
         # ------------------------------------------------------------------
         # Estado interno da engine
@@ -137,17 +130,6 @@ class Engine:
         if self.session.current_project is None:
             self.session.new_project()
 
-        # [FIX PONTE ÁUDIO] Liga a saída de áudio real. `start_safe()`
-        # nunca levanta exceção -- se `sounddevice` não estiver
-        # instalado, a engine continua rodando normalmente (clock,
-        # transporte, ponte do Channel Rack), só sem som real audível
-        # (fica só a lógica/o medidor calculando em silêncio).
-        ok, msg = self.audio_output.start_safe()
-        if ok:
-            LOGGER.info("Engine", msg)
-        else:
-            LOGGER.warning("Engine", msg)
-
         LOGGER.info("Engine", "Motor iniciado.")
 
     def shutdown(self) -> None:
@@ -162,20 +144,13 @@ class Engine:
         # Para o transporte primeiro
         self._stop_transport()
 
-        # [FIX PONTE ÁUDIO] Desliga a saída de áudio real antes de
-        # parar o clock/scheduler.
-        try:
-            self.audio_output.stop()
-        except Exception as e:
-            LOGGER.warning("Engine", f"Erro ao parar saída de áudio: {e}")
-
         self.clock.stop()
         self.scheduler.clear()
         self._is_running = False
         self._engine_state = EngineState.STOPPED
 
-        # [FIX PONTE ÁUDIO] Fecha os arquivos .wav abertos pelo cache
-        # de leitura de nível dos canais SAMPLER/AUDIO/DRUM.
+        # [FIX PONTE ÁUDIO/METER] Fecha os arquivos .wav abertos pelo
+        # cache de leitura de nível dos canais SAMPLER/AUDIO/DRUM.
         try:
             from .channel_rack_bridge import close_wav_cache as _close_wav_cache
             _close_wav_cache()
@@ -211,15 +186,17 @@ class Engine:
         self.transport.update(delta)
         self.scheduler.tick()
 
-        # [FIX PONTE ÁUDIO] Só dispara notas do Channel Rack quando o
-        # Blender está de fato reproduzindo (spacebar/play) -- não a
-        # cada scrub manual do playhead, que também dispara
-        # frame_change_post e faria a "reprodução" avançar/disparar
-        # notas mesmo parado.
+        # [FIX PONTE ÁUDIO/METER] Só roda a ponte do Channel Rack
+        # (dispara steps SYNTH/MIDI + atualiza `meter_level` de TODOS
+        # os canais, inclusive SAMPLER/AUDIO/DRUM) quando o Blender
+        # está de fato reproduzindo (spacebar/play) -- não a cada
+        # scrub manual do playhead, que também dispara
+        # frame_change_post. Sem isso, os LEDs do mixer nunca recebiam
+        # um nível novo durante o play e ficavam travados.
         if bpy.context.screen is not None and bpy.context.screen.is_animation_playing:
             try:
-                from . import channel_rack_bridge
-                channel_rack_bridge.tick(self, scene)
+                from .channel_rack_bridge import tick as _channel_rack_tick
+                _channel_rack_tick(self, scene)
             except Exception as e:
                 LOGGER.error("Engine", f"Erro na ponte do Channel Rack: {e}")
 
@@ -397,10 +374,11 @@ class Engine:
         """Para o transporte sem emitir evento (usado internamente)."""
         self.transport.stop()
         self._engine_state = EngineState.STOPPED
-        # [FIX PONTE ÁUDIO] Sem isso, a próxima vez que desse play a
-        # ponte tentaria "recuperar" todos os steps entre o ponto onde
-        # parou e o novo ponto de partida, disparando uma rajada de
-        # notas atrasadas de uma vez só.
+
+        # [FIX PONTE ÁUDIO/METER] Sem isso, a próxima vez que desse
+        # play a ponte tentaria "recuperar" todos os steps entre o
+        # ponto onde parou e o novo ponto de partida, disparando uma
+        # rajada de notas atrasadas de uma vez só.
         try:
             from .channel_rack_bridge import reset as _reset_channel_rack_bridge
             _reset_channel_rack_bridge()
@@ -410,46 +388,6 @@ class Engine:
             self.mixer.all_notes_off()
         except Exception:
             pass
-
-    # ------------------------------------------------------------------
-    # [FIX PONTE ÁUDIO] Fachada de compatibilidade -- métodos que
-    # `daw/core/register.py::get_engine()` já documentava existir
-    # ("A Engine expõe set_volume/set_pan/set_mute/set_solo/
-    # set_master_volume/note_on/note_off/get_state()"), mas que nunca
-    # tinham sido implementados de verdade. Delegam pro Mixer real.
-    # ------------------------------------------------------------------
-
-    def set_volume(self, channel_idx: int, volume: float) -> None:
-        self.mixer.set_volume(channel_idx, volume)
-
-    def set_pan(self, channel_idx: int, pan: float) -> None:
-        self.mixer.set_pan(channel_idx, pan)
-
-    def set_mute(self, channel_idx: int, mute: bool) -> None:
-        self.mixer.set_mute(channel_idx, mute)
-
-    def set_solo(self, channel_idx: int, solo: bool) -> None:
-        self.mixer.set_solo(channel_idx, solo)
-
-    def set_master_volume(self, volume: float) -> None:
-        self.mixer.set_master_volume(volume)
-
-    def note_on(self, note: int, velocity: int = 100, channel_idx: int = 0) -> None:
-        self.mixer.note_on(note, velocity, channel_idx)
-
-    def note_off(self, note: int, channel_idx: int = 0) -> None:
-        self.mixer.note_off(note, channel_idx)
-
-    def get_state(self) -> dict:
-        """Snapshot leve do estado atual, útil pra depuração/UI."""
-        return {
-            "engine_state": self._engine_state.name if hasattr(self._engine_state, "name") else str(self._engine_state),
-            "is_running": self._is_running,
-            "is_playing": self.is_playing,
-            "current_time": self.current_time,
-            "channel_count": self.mixer.channel_count,
-            "audio_output_active": self.audio_output.active,
-        }
 
 
 # ------------------------------------------------------------------
