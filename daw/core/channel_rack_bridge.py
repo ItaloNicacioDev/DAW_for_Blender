@@ -57,6 +57,11 @@ _state_by_scene: Dict[str, dict] = {}
 # aplicado ao nível REAL vindo do Mixer/dos arquivos de áudio)
 METER_DECAY = 0.75
 
+# Liga print de diagnóstico no console (1x por segundo, não a cada
+# frame) mostrando o que a ponte está lendo/escrevendo pra cada canal
+# de sample -- desligue (False) depois de confirmar que está tudo ok.
+DAW_LOG_METERS = True
+
 # Cache de leitores de WAV abertos, por filepath -- evita reabrir o
 # arquivo a cada tick (frame_change_post pode disparar 24-60x/seg)
 _wav_cache: Dict[str, "wave.Wave_read"] = {}
@@ -208,18 +213,29 @@ def _update_sample_meters(scene, rack) -> None:
         strip = _find_sound_strip(scene, getattr(ch, "vse_channel", 1), scene.frame_current)
         if strip is None or not getattr(strip, "sound", None):
             ch.meter_level *= METER_DECAY
+            if DAW_LOG_METERS and scene.frame_current % 24 == 0:
+                print(f"[DAW][meter] '{ch.name}' (vse_channel={getattr(ch, 'vse_channel', '?')}) "
+                      f"-- nenhuma strip de som no frame {scene.frame_current}. "
+                      f"Confira se há um strip SOUND nesse canal cobrindo esse frame.")
             continue
 
         filepath = bpy.path.abspath(strip.sound.filepath)
         strip_local_frame = scene.frame_current - strip.frame_final_start
         seconds_into_strip = (strip_local_frame / fps) + (getattr(strip, "frame_offset_start", 0) / fps)
 
-        peak = _read_peak_from_wav(filepath, seconds_into_strip) * max(0.0, getattr(ch, "volume", 1.0))
+        raw_peak = _read_peak_from_wav(filepath, seconds_into_strip)
+        peak = raw_peak * max(0.0, getattr(ch, "volume", 1.0))
         peak = max(0.0, min(1.0, peak))
         if peak > ch.meter_level:
             ch.meter_level = peak
         else:
             ch.meter_level = ch.meter_level * METER_DECAY
+
+        if DAW_LOG_METERS and scene.frame_current % 24 == 0:
+            ext_ok = filepath.lower().endswith(".wav")
+            print(f"[DAW][meter] '{ch.name}' frame={scene.frame_current} "
+                  f"arquivo={'OK(.wav)' if ext_ok else 'NÃO-WAV, sem leitor -- fica em 0'} "
+                  f"raw_peak={raw_peak:.3f} meter_level={ch.meter_level:.3f}")
 
 
 def tick(engine, scene) -> None:
