@@ -26,7 +26,16 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from ..instruments.synth import Synth, SynthPreset
-from ..midi.events import (
+# [FIX IMPORT] Não existe pacote `daw.modules.midi` -- os eventos MIDI
+# vivem em `daw.daw_engine.midi.events` (pacote irmão de `modules`,
+# não filho dele). O import relativo antigo (`from ..midi.events import`)
+# resolvia para `daw.modules.midi.events`, que nunca existiu, e isso
+# derrubava o import do módulo `mixer` inteiro -- por isso ele nunca
+# aparecia registrado no log ("Módulo mixer registrado" nunca era
+# impresso) e os faders do Mixer não tinham efeito nenhum: o painel,
+# os operators e o PropertyGroup (`scene.daw_mixer`) nunca chegavam a
+# existir.
+from ...daw_engine.midi.events import (
     NoteOnEvent,
     NoteOffEvent,
     ControlChangeEvent,
