@@ -17,10 +17,28 @@ Chamado a partir de `update=` callbacks nas próprias propriedades (ver
 properties.py) -- ou seja, roda IMEDIATAMENTE a cada arraste do
 fader/knob ou clique em M/S, mesmo com o Blender parado/pausado (não
 depende de play nem de nenhum timer).
+
+[LIMITAÇÃO DA API DO BLENDER -- não é bug deste código] O Pan de uma
+`SoundSequence` só tem efeito em fontes de áudio MONO
+(bpy.types.SoundSequence.pan: "Playback panning of the sound (only
+for Mono sources)"). Se o arquivo importado for estéreo (a maioria dos
+loops/samples comerciais é), girar o knob de pan no mixer escreve o
+valor certinho em `strip.pan`, mas o Blender simplesmente IGNORA esse
+valor na hora de tocar -- não é possível contornar isso via Python, é
+uma restrição da própria engine de áudio do VSE. `DAW_LOG_VSE_SYNC`
+abaixo imprime um aviso no console a primeira vez que isso acontece
+por canal, pra ficar claro que não é o addon que não está funcionando.
 """
 from __future__ import annotations
 
 from typing import Iterable
+
+# Liga prints de diagnóstico no console do Blender (Window > Toggle
+# System Console, no Windows) toda vez que este módulo escreve nas
+# strips -- desligue (False) depois de confirmar que está tudo ok.
+DAW_LOG_VSE_SYNC = True
+
+_warned_mono_pan: set = set()
 
 
 def _sound_strips_on_channel(scene, vse_channel: int):
@@ -38,6 +56,12 @@ def sync_channel_to_vse(channel, scene, any_solo_active: bool) -> None:
     reais do VSE que estão no `channel.vse_channel` dele."""
     strips = _sound_strips_on_channel(scene, getattr(channel, "vse_channel", 1))
     if not strips:
+        if DAW_LOG_VSE_SYNC:
+            print(f"[DAW][vse_sync] Canal '{channel.name}' (vse_channel="
+                  f"{getattr(channel, 'vse_channel', '?')}) -- NENHUMA strip de "
+                  f"som encontrada nesse canal do VSE. Confira se o número do "
+                  f"'Canal VSE' do canal bate com o canal onde a strip está na "
+                  f"timeline.")
         return
 
     # Solo: se QUALQUER canal do rack está em solo, todo canal que não
@@ -53,12 +77,30 @@ def sync_channel_to_vse(channel, scene, any_solo_active: bool) -> None:
         try:
             strip.volume = volume
             strip.mute = effective_mute
+
             if hasattr(strip, "pan"):
                 strip.pan = pan
+                # [LIMITAÇÃO DA API] avisa uma vez por strip se a fonte
+                # for estéreo -- o pan nunca vai soar, mesmo escrito
+                # certinho (ver docstring do módulo).
+                sound = getattr(strip, "sound", None)
+                if (DAW_LOG_VSE_SYNC and sound is not None
+                        and getattr(sound, "use_mono", None) is False
+                        and strip.name not in _warned_mono_pan):
+                    _warned_mono_pan.add(strip.name)
+                    print(f"[DAW][vse_sync] Aviso: a strip '{strip.name}' é "
+                          f"ESTÉREO -- o Pan do Blender só funciona em fontes "
+                          f"MONO (limitação da própria API, não do addon). O "
+                          f"volume continua funcionando normalmente.")
         except (AttributeError, ReferenceError):
             # strip pode ter sido removida entre o find e o write (raro,
             # mas evita crashar o update callback por causa disso)
             continue
+        else:
+            if DAW_LOG_VSE_SYNC:
+                print(f"[DAW][vse_sync] '{channel.name}' -> strip '{strip.name}' "
+                      f"(canal VSE {strip.channel}): volume={volume:.3f} "
+                      f"pan={pan:.2f} mute={effective_mute}")
 
 
 def sync_all_channels_to_vse(rack, scene) -> None:
