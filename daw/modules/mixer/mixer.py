@@ -26,16 +26,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from ..instruments.synth import Synth, SynthPreset
-# [FIX IMPORT] Não existe pacote `daw.modules.midi` -- os eventos MIDI
-# vivem em `daw.daw_engine.midi.events` (pacote irmão de `modules`,
-# não filho dele). O import relativo antigo (`from ..midi.events import`)
-# resolvia para `daw.modules.midi.events`, que nunca existiu, e isso
-# derrubava o import do módulo `mixer` inteiro -- por isso ele nunca
-# aparecia registrado no log ("Módulo mixer registrado" nunca era
-# impresso) e os faders do Mixer não tinham efeito nenhum: o painel,
-# os operators e o PropertyGroup (`scene.daw_mixer`) nunca chegavam a
-# existir.
-from ...daw_engine.midi.events import (
+from ..midi.events import (
     NoteOnEvent,
     NoteOffEvent,
     ControlChangeEvent,
@@ -71,9 +62,13 @@ class Channel:
         self.mute:   bool  = False
         self.solo:   bool  = False
 
-        # [PONTE ÁUDIO] Nível de pico do último bloco processado -- lido
-        # por daw_engine/core/channel_rack_bridge.py pra alimentar
-        # `ChannelProperties.meter_level` com o nível REAL pós-fader.
+        # [FIX VU METER] Pico (0.0-1.0, pós-fader) do último bloco
+        # processado -- é isso que channel_rack_bridge.py lê pra
+        # alimentar `ChannelProperties.meter_level` dos canais
+        # SYNTH/MIDI em tempo real. Sem isso, o LED do mixer ficava
+        # travado no valor de quando a strip foi arrastada pela última
+        # vez, porque nada escrevia um nível novo a cada frame durante
+        # o play.
         self.last_peak: float = 0.0
 
         # Pré-calculados a cada mudança de pan (lei de pan constante)
@@ -151,7 +146,7 @@ class Channel:
         stereo[:, 0] *= self._pan_l
         stereo[:, 1] *= self._pan_r
 
-        # [PONTE ÁUDIO] pico deste bloco, pós-volume/pan
+        # [FIX VU METER] pico pós-fader deste bloco (ver __init__)
         self.last_peak = float(np.max(np.abs(stereo))) if stereo.size else 0.0
 
         return stereo
