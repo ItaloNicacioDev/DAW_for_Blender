@@ -67,6 +67,46 @@ def _sound_strips_on_channel(scene, vse_channel: int):
     ]
 
 
+# Público (sem `_`) -- usado pela UI pra decidir se mostra o aviso de
+# "Canal VSE sem strip" e pelo operator de auto-fix abaixo. Mesma lógica
+# de `_sound_strips_on_channel`, só exposta pra fora deste módulo.
+def channel_has_matching_strip(scene, vse_channel: int) -> bool:
+    return bool(_sound_strips_on_channel(scene, vse_channel))
+
+
+def find_vse_channel_with_sound(scene, rack, exclude_index: int = -1) -> "int | None":
+    """Varre todas as strips SOUND da timeline e devolve o número do
+    primeiro canal do VSE que:
+      1. tem pelo menos uma strip de som, e
+      2. ainda não está sendo usado como `vse_channel` por NENHUM outro
+         canal do rack (senão dois tracks ficariam "escutando" a mesma
+         strip -- raramente é o que o usuário quer).
+
+    Usado pelo operator "Auto-detectar Canal VSE" (`DAW_OT_AutoFixVseChannel`
+    em operators.py) pra corrigir o caso mostrado no console como
+    "NENHUMA strip de som encontrada nesse canal do VSE" sem o usuário
+    precisar ficar contando canal por canal na timeline manualmente.
+    Devolve None se não achar nenhum canal candidato (ex.: todas as
+    strips de som da timeline já estão "reivindicadas" por outros
+    tracks, ou não há nenhuma strip de som na cena)."""
+    seq_editor = getattr(scene, "sequence_editor", None)
+    if seq_editor is None:
+        return None
+
+    used = {
+        c.vse_channel for i, c in enumerate(rack.channels)
+        if i != exclude_index
+    }
+
+    channels_with_sound = sorted({
+        s.channel for s in _all_strips(seq_editor) if s.type == 'SOUND'
+    })
+    for vse_channel in channels_with_sound:
+        if vse_channel not in used:
+            return vse_channel
+    return None
+
+
 def sync_channel_to_vse(channel, scene, any_solo_active: bool) -> None:
     """Escreve o estado de UM canal do Channel Rack nas strips de som
     reais do VSE que estão no `channel.vse_channel` dele."""
