@@ -32,6 +32,25 @@ METER_TICK_INTERVAL = 0.1  # ~10x/seg -- suave o bastante pro olho, barato o bas
 METER_DECAY_PER_TICK = 0.3  # fração do nível anterior mantida a cada tick sem sinal novo (efeito "caindo")
 
 
+def _tag_redraw_sequencers():
+    """
+    [FIX MEDIDOR PARADO] Atualizar `channel.meter_level` num bpy.app.timers
+    não faz o Blender repintar o painel sozinho -- a UI só redesenha em
+    resposta a eventos (mouse sobre a área, etc). Sem isso, a barra de
+    progresso (UILayout.progress) do Channel Rack fica com a cor de
+    "vazio" (clara/branca) na tela pra sempre, mesmo com o valor real
+    mudando por trás. Precisa forçar o redraw a cada tick, igual já é
+    feito em mixer_strip_operator.py e overlay.py.
+    """
+    try:
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'SEQUENCE_EDITOR':
+                    area.tag_redraw()
+    except Exception:
+        pass
+
+
 def _meter_update_tick():
     """
     Roda a cada METER_TICK_INTERVAL segundos (bpy.app.timers) enquanto o
@@ -104,6 +123,11 @@ def _meter_update_tick():
         # else: tocando de verdade e sem preview/INPUT manual -- deixa
         # quieto, a ponte do daw_engine já está atualizando (e decaindo)
         # este canal com o nível real a cada frame.
+
+    # Sem isso, `channel.meter_level` muda no dado mas a barrinha na
+    # lista do Channel Rack nunca repinta (ver nota na definição da
+    # função acima) -- é por isso que ela ficava sempre parada/branca.
+    _tag_redraw_sequencers()
 
     return METER_TICK_INTERVAL
 
