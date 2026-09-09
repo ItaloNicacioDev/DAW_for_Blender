@@ -30,6 +30,17 @@ from typing import Dict, Optional
 
 import bpy
 
+
+def _tag_redraw_sequencers() -> None:
+    try:
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'SEQUENCE_EDITOR':
+                    area.tag_redraw()
+    except Exception:
+        pass
+
+
 STEPS_PER_BEAT = 4
 
 # Nota fixa usada pro "trigger" de step (percussivo/one-shot) -- ainda
@@ -315,6 +326,16 @@ def tick(engine, scene) -> None:
 
     _update_synth_meters(engine, rack)
     _update_sample_meters(scene, rack)
+
+    # [FIX MEDIDOR PARADO] Mesmo problema do timer em
+    # channel_rack/register.py: escrever `ch.meter_level` aqui não
+    # garante por si só que o painel do N-sidebar (a barrinha branca
+    # de UILayout.progress) repinte a cada frame. Na maioria das vezes
+    # o próprio avanço do playhead já dispara redraw da área, mas forçar
+    # aqui também cobre casos em que só a região do N-panel está sendo
+    # observada (outra área/tela) e não seria redesenhada por conta do
+    # frame_change_post sozinho.
+    _tag_redraw_sequencers()
 
 
 def reset(scene=None) -> None:
