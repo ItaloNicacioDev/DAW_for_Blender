@@ -25,7 +25,6 @@ step sequencers no estilo FL Studio (16 steps = 1 compasso de 4/4).
 """
 from __future__ import annotations
 
-import wave
 from typing import Dict, Optional
 
 import bpy
@@ -75,7 +74,6 @@ DAW_LOG_METERS = True
 
 # Cache de leitores de WAV abertos, por filepath -- evita reabrir o
 # arquivo a cada tick (frame_change_post pode disparar 24-60x/seg)
-_wav_cache: Dict[str, "wave.Wave_read"] = {}
 READ_WINDOW_FRAMES = 512  # ~10ms @ 48kHz -- suficiente pra um pico "instantâneo"
 
 
@@ -137,24 +135,108 @@ def _update_synth_meters(engine, rack) -> None:
 #  Blender (que não expõe uma torneira de análise em tempo real pra
 #  strips de som do VSE).
 #
-#  LIMITAÇÃO CONHECIDA: só lê .wav (via módulo `wave` da stdlib, sem
-#  dependência extra). Amostras em outros formatos (mp3/ogg/flac)
-#  tocam normalmente pelo VSE, mas o medidor fica em 0 pra elas até
-#  ganharem suporte (precisaria de um decoder extra tipo `soundfile`).
+#  LIMITAÇÃO CONHECIDA: só lê .wav. Amostras em outros formatos
+#  (mp3/ogg/flac) tocam normalmente pelo VSE, mas o medidor fica em 0
+#  pra elas até ganharem suporte (precisaria de um decoder extra tipo
+#  `soundfile`).
+#
+#  [FIX FORMATO REAL DO ARQUIVO] Antes esta ponte usava o módulo
+#  `wave` da stdlib pra ler os frames -- só que `wave` só entende PCM
+#  inteiro de 8/16/32-bit "de fábrica": WAV de 24-bit (3 bytes/amostra,
+#  o padrão de fato em packs de sample comerciais como os da Cymatics)
+#  caía direto no `else: return 0.0` do código antigo, e WAV em
+#  32-bit float (comum em exports de DAW) fazia `wave.open()` levantar
+#  `wave.Error: unknown format` -- pego em silêncio pelo try/except,
+#  então o medidor ficava sempre em 0 sem nenhum erro visível no
+#  console. Por isso o parser do cabeçalho RIFF é feito manualmente
+#  aqui, sem depender de `wave`, cobrindo PCM 8/16/24/32-bit E float
+#  32-bit -- os dois formatos que cobrem praticamente qualquer sample
+#  de loop pack ou export de DAW por aí.
 # ------------------------------------------------------------------ #
 
-def _get_wav_reader(filepath: str) -> Optional["wave.Wave_read"]:
-    reader = _wav_cache.get(filepath)
-    if reader is not None:
-        return reader
-    if not filepath.lower().endswith(".wav"):
-        return None
+import struct
+
+_wav_header_cache: Dict[str, object] = {}  # filepath -> dict de header, ou False se inválido
+_wav_file_cache: Dict[str, object] = {}  # filepath -> arquivo binário aberto
+
+
+def _parse_wav_header(filepath: str) -> Optional[dict]:
+    """Lê o cabeçalho RIFF/WAVE manualmente (sem o módulo `wave`) pra
+    descobrir o formato real de amostra (PCM inteiro ou float, e a
+    largura de bits de verdade) e onde o chunk `data` começa."""
     try:
-        reader = wave.open(filepath, "rb")
+        f = open(filepath, "rb")
     except Exception:
         return None
-    _wav_cache[filepath] = reader
-    return reader
+
+    try:
+        riff = f.read(12)
+        if len(riff) < 12 or riff[0:4] != b"RIFF" or riff[8:12] != b"WAVE":
+            return None
+
+        fmt = None
+        data_offset = None
+        data_size = None
+
+        while True:
+            chunk_header = f.read(8)
+            if len(chunk_header) < 8:
+                break
+            chunk_id, chunk_size = struct.unpack("<4sI", chunk_header)
+
+            if chunk_id == b"fmt ":
+                fmt_data = f.read(chunk_size)
+                if len(fmt_data) < 16:
+                    return None
+                audio_format, num_channels, sample_rate, _byte_rate, _block_align, bits_per_sample = \
+                    struct.unpack("<HHIIHH", fmt_data[:16])
+                fmt = {
+                    "audio_format": audio_format,
+                    "num_channels": max(1, num_channels),
+                    "sample_rate": sample_rate,
+                    "bits_per_sample": bits_per_sample,
+                }
+                if chunk_size % 2:
+                    f.seek(1, 1)
+            elif chunk_id == b"data":
+                data_offset = f.tell()
+                data_size = chunk_size
+                break
+            else:
+                f.seek(chunk_size + (chunk_size % 2), 1)
+
+        if fmt is None or data_offset is None:
+            return None
+
+        fmt["data_offset"] = data_offset
+        fmt["data_size"] = data_size
+        return fmt
+    except Exception:
+        return None
+    finally:
+        f.close()
+
+
+def _get_wav_file(filepath: str):
+    fh = _wav_file_cache.get(filepath)
+    if fh is not None:
+        return fh
+    fh = open(filepath, "rb")
+    _wav_file_cache[filepath] = fh
+    return fh
+
+
+def _get_wav_reader(filepath: str) -> Optional[dict]:
+    """Mantido pelo nome antigo por compatibilidade -- devolve o header
+    parseado (ou None), cacheado por filepath."""
+    if not filepath.lower().endswith(".wav"):
+        return None
+    header = _wav_header_cache.get(filepath)
+    if header is not None:
+        return header if header is not False else None
+    header = _parse_wav_header(filepath)
+    _wav_header_cache[filepath] = header if header is not None else False
+    return header
 
 
 def _find_sound_strip(scene, vse_channel: int, frame: int):
@@ -182,36 +264,75 @@ def _find_sound_strip(scene, vse_channel: int, frame: int):
 
 
 def _read_peak_from_wav(filepath: str, seconds_into_strip: float) -> float:
-    reader = _get_wav_reader(filepath)
-    if reader is None:
+    header = _get_wav_reader(filepath)
+    if header is None:
         return 0.0
+
+    bits = header["bits_per_sample"]
+    channels = header["num_channels"]
+    sample_rate = header["sample_rate"]
+    audio_format = header["audio_format"]
+    bytes_per_sample = bits // 8
+    if bytes_per_sample <= 0 or sample_rate <= 0:
+        return 0.0
+
+    frame_size = bytes_per_sample * channels
+    if frame_size <= 0:
+        return 0.0
+
+    total_frames = header["data_size"] // frame_size
+    start_frame = max(0, int(seconds_into_strip * sample_rate))
+    if start_frame >= total_frames:
+        return 0.0
+
+    byte_offset = header["data_offset"] + start_frame * frame_size
+    n_bytes = READ_WINDOW_FRAMES * frame_size
+
     try:
-        sr = reader.getframerate()
-        sampwidth = reader.getsampwidth()
-        n_channels = reader.getnchannels()
-        n_frames = reader.getnframes()
+        f = _get_wav_file(filepath)
+        f.seek(byte_offset)
+        raw = f.read(n_bytes)
+    except Exception:
+        return 0.0
+    if not raw:
+        return 0.0
 
-        start_frame = max(0, int(seconds_into_strip * sr))
-        if start_frame >= n_frames:
-            return 0.0
-
-        reader.setpos(start_frame)
-        raw = reader.readframes(READ_WINDOW_FRAMES)
-        if not raw:
-            return 0.0
-
+    try:
         import numpy as np
-        if sampwidth == 2:
-            data = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-        elif sampwidth == 1:
+
+        # audio_format 3 = IEEE float (WAVE_FORMAT_IEEE_FLOAT) -- comum
+        # em exports de DAW; audio_format 1 = PCM inteiro "normal".
+        if audio_format == 3 and bytes_per_sample == 4:
+            n = len(raw) - (len(raw) % 4)
+            data = np.frombuffer(raw[:n], dtype=np.float32)
+        elif bytes_per_sample == 1:
             data = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
-        elif sampwidth == 4:
-            data = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+        elif bytes_per_sample == 2:
+            n = len(raw) - (len(raw) % 2)
+            data = np.frombuffer(raw[:n], dtype=np.int16).astype(np.float32) / 32768.0
+        elif bytes_per_sample == 3:
+            # 24-bit PCM: 3 bytes/amostra little-endian -- sem tipo
+            # nativo no numpy, então monta o int32 manualmente e faz
+            # sign-extend do bit 23 (é isso que o `wave` da stdlib não
+            # sabe fazer, e por isso o medidor ficava sempre em 0 pra
+            # samples de 24-bit como os da Cymatics).
+            n = len(raw) - (len(raw) % 3)
+            raw_arr = np.frombuffer(raw[:n], dtype=np.uint8).reshape(-1, 3)
+            b0 = raw_arr[:, 0].astype(np.int32)
+            b1 = raw_arr[:, 1].astype(np.int32)
+            b2 = raw_arr[:, 2].astype(np.int32)
+            val = b0 | (b1 << 8) | (b2 << 16)
+            val = np.where(val & 0x800000, val - 0x1000000, val)
+            data = val.astype(np.float32) / 8388608.0
+        elif bytes_per_sample == 4:
+            n = len(raw) - (len(raw) % 4)
+            data = np.frombuffer(raw[:n], dtype=np.int32).astype(np.float32) / 2147483648.0
         else:
             return 0.0
 
-        if n_channels > 1:
-            data = data.reshape(-1, n_channels)
+        if channels > 1 and data.size >= channels:
+            usable = data.size - (data.size % channels)
+            data = data[:usable].reshape(-1, channels)
 
         return float(np.max(np.abs(data))) if data.size else 0.0
     except Exception:
@@ -352,9 +473,10 @@ def close_wav_cache() -> None:
     """Fecha todos os arquivos WAV abertos pelo cache de leitura de
     nível -- chamar ao desligar a engine (evita handles de arquivo
     pendurados)."""
-    for reader in _wav_cache.values():
+    for fh in _wav_file_cache.values():
         try:
-            reader.close()
+            fh.close()
         except Exception:
             pass
-    _wav_cache.clear()
+    _wav_file_cache.clear()
+    _wav_header_cache.clear()
