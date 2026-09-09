@@ -26,7 +26,15 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from ..instruments.synth import Synth, SynthPreset
-from ..midi.events import (
+# [FIX IMPORT QUEBRADO] Não existe `daw.modules.midi` -- os eventos
+# MIDI de verdade (NoteOnEvent/NoteOffEvent/etc, com tempo e validação
+# de range) vivem em `daw_engine.midi.events` (ver meters.py, que já
+# importa a engine do mesmo jeito: `from ...daw_engine import ENGINE`).
+# Esse `from ..midi.events import (...)` estava tentando importar um
+# pacote irmão `modules/midi` que nunca existiu -- por isso o módulo
+# Mixer inteiro falhava ao registrar ("ModuleNotFoundError: No module
+# named 'daw.modules.midi'") e ficava sempre indisponível.
+from ...daw_engine.midi.events import (
     NoteOnEvent,
     NoteOffEvent,
     ControlChangeEvent,
