@@ -36,12 +36,17 @@ from .registry import Registry
 from .logger import LOGGER
 from .constants import EngineState, DEFAULT_BPM
 
-# [FIX PONTE ÁUDIO/METER] Engine não tinha mixer nenhum -- os LEDs de
-# nível do Mixer/Channel Rack ficavam travados no último valor
-# arrastado manualmente, porque nada gerava um pico novo a cada frame
-# durante o play (ver channel_rack_bridge.py, que agora é chamado por
-# `_update` logo abaixo). Import tardio evitado aqui de propósito: o
-# Mixer não depende de bpy, então pode ficar no topo com os outros.
+# [FIX PONTE ÁUDIO/METER] Este é o motor que de fato roda (é ele que
+# `daw/core/register.py` importa e inicia via `from ..daw_engine import
+# ENGINE; ENGINE.start()`) -- só que, até aqui, esta classe não tinha
+# `self.mixer` nem chamava `channel_rack_bridge.tick()`. Existe uma
+# SEGUNDA cópia deste arquivo em `daw/core/engine.py` com o Mixer e a
+# ponte já implementados (mesmos comentários "[FIX PONTE ÁUDIO/METER]"
+# lá), mas ela nunca é instanciada -- é código morto, porque
+# `register.py` aponta pra ESTE módulo (`daw_engine`), não pra aquele.
+# Resultado prático: os LEDs de nível nunca recebiam um valor real
+# durante o play, mesmo com a ponte "corrigida" -- ela simplesmente
+# nunca era chamada. A correção é replicar aqui o mesmo wiring.
 from ..mixer.mixer import Mixer
 
 
@@ -152,7 +157,7 @@ class Engine:
         # [FIX PONTE ÁUDIO/METER] Fecha os arquivos .wav abertos pelo
         # cache de leitura de nível dos canais SAMPLER/AUDIO/DRUM.
         try:
-            from .channel_rack_bridge import close_wav_cache as _close_wav_cache
+            from ...core.channel_rack_bridge import close_wav_cache as _close_wav_cache
             _close_wav_cache()
         except Exception:
             pass
@@ -191,11 +196,10 @@ class Engine:
         # os canais, inclusive SAMPLER/AUDIO/DRUM) quando o Blender
         # está de fato reproduzindo (spacebar/play) -- não a cada
         # scrub manual do playhead, que também dispara
-        # frame_change_post. Sem isso, os LEDs do mixer nunca recebiam
-        # um nível novo durante o play e ficavam travados.
+        # frame_change_post.
         if bpy.context.screen is not None and bpy.context.screen.is_animation_playing:
             try:
-                from .channel_rack_bridge import tick as _channel_rack_tick
+                from ...core.channel_rack_bridge import tick as _channel_rack_tick
                 _channel_rack_tick(self, scene)
             except Exception as e:
                 LOGGER.error("Engine", f"Erro na ponte do Channel Rack: {e}")
@@ -380,7 +384,7 @@ class Engine:
         # ponto onde parou e o novo ponto de partida, disparando uma
         # rajada de notas atrasadas de uma vez só.
         try:
-            from .channel_rack_bridge import reset as _reset_channel_rack_bridge
+            from ...core.channel_rack_bridge import reset as _reset_channel_rack_bridge
             _reset_channel_rack_bridge()
         except Exception:
             pass
