@@ -24,6 +24,7 @@ from __future__ import annotations
 import bpy
 from bpy.types import Panel, UIList
 
+from . import vse_sync
 from .icons import (
     icon_for_instrument,
     icon_for_mute,
@@ -82,8 +83,19 @@ class DAW_UL_ChannelList(UIList):
         except AttributeError:
             meter.label(text=f"{int(channel.meter_level * 100)}%")
 
-        # Canal do VSE que este track controla/observa.
-        row.prop(channel, "vse_channel", text="")
+        # Canal do VSE que este track controla/observa. Se não existe
+        # nenhuma strip de som nesse canal, o medidor e o volume/pan/
+        # mute repassado pra strip real ficam sem efeito -- mostra um
+        # ícone de aviso clicável (em vez de só logar no console) que
+        # já chama o auto-fix.
+        vse_row = row.row(align=True)
+        vse_row.prop(channel, "vse_channel", text="")
+        if not vse_sync.channel_has_matching_strip(context.scene, channel.vse_channel):
+            warn = vse_row.operator(
+                "daw.autofix_vse_channel", text="", icon='ERROR',
+                emboss=False,
+            )
+            warn.channel_index = index
 
         row.prop(
             channel, "locked", text="",
@@ -228,7 +240,14 @@ class DAW_PT_ChannelRack(Panel):
                 # Canal do VSE que este track controla -- no rodapé da
                 # tira, mesma posição geral dos controles secundários na
                 # imagem de referência.
-                strip.prop(ch, "vse_channel", text="")
+                vse_footer = strip.row(align=True)
+                vse_footer.prop(ch, "vse_channel", text="")
+                if not vse_sync.channel_has_matching_strip(context.scene, ch.vse_channel):
+                    warn = vse_footer.operator(
+                        "daw.autofix_vse_channel", text="", icon='ERROR',
+                        emboss=False,
+                    )
+                    warn.channel_index = i
 
         layout.separator(factor=1.5)
 
@@ -250,6 +269,21 @@ class DAW_PT_ChannelRack(Panel):
             row = box.row(align=True)
             row.prop(channel, "monitor_source", text="Monitor")
             row.prop(channel, "vse_channel", text="Canal VSE")
+
+            if not vse_sync.channel_has_matching_strip(context.scene, channel.vse_channel):
+                warn_box = box.box()
+                warn_row = warn_box.row(align=True)
+                warn_row.alert = True
+                warn_row.label(
+                    text="Nenhuma strip de som no Canal VSE atual -- "
+                         "medidor e volume/pan/mute não têm efeito.",
+                    icon='ERROR',
+                )
+                fix = warn_box.operator(
+                    "daw.autofix_vse_channel", text="Auto-detectar Canal VSE",
+                    icon='VIEWZOOM',
+                )
+                fix.channel_index = rack.active_channel_index
 
             row = box.row(align=True)
             row.operator("daw.clear_channel_steps", text="Limpar Pattern", icon='TRASH')
