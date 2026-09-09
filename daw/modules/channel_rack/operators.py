@@ -14,6 +14,7 @@ from bpy.types import Operator
 
 from .colors import get_color_by_index
 from .utils import unique_channel_name, clamp_index
+from . import vse_sync
 
 
 def _rack(context):
@@ -336,6 +337,47 @@ class DAW_OT_RemoveGroup(Operator):
         return {'FINISHED'}
 
 
+class DAW_OT_AutoFixVseChannel(Operator):
+    """Corrige o caso descrito no console como '[DAW][vse_sync] ...
+    NENHUMA strip de som encontrada nesse canal do VSE': procura na
+    timeline um canal do VSE que já tenha uma strip de som e ainda não
+    esteja em uso por nenhum outro track do rack, e aponta o
+    `vse_channel` deste canal pra lá. Sem isso, o medidor deste track
+    (e o volume/pan/mute repassados pra strip de verdade) ficam
+    travados/mudos porque não existe nenhuma strip pra ler/escrever no
+    canal configurado."""
+    bl_idname = "daw.autofix_vse_channel"
+    bl_label = "Auto-detectar Canal VSE"
+    bl_description = (
+        "Procura na timeline um canal do VSE com uma strip de som "
+        "ainda não usada por outro track e aponta este canal pra lá"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    channel_index: IntProperty(default=-1)
+
+    def execute(self, context):
+        rack = _rack(context)
+        ch_index = self.channel_index if self.channel_index >= 0 else rack.active_channel_index
+        if not (0 <= ch_index < len(rack.channels)):
+            return {'CANCELLED'}
+        ch = rack.channels[ch_index]
+
+        found = vse_sync.find_vse_channel_with_sound(context.scene, rack, exclude_index=ch_index)
+        if found is None:
+            self.report(
+                {'WARNING'},
+                "Nenhuma strip de som livre encontrada na timeline pra "
+                "apontar este canal. Confira se a strip existe e se já "
+                "não está em uso por outro track do rack.",
+            )
+            return {'CANCELLED'}
+
+        ch.vse_channel = found  # dispara o update= -> sync_from_channel_update
+        self.report({'INFO'}, f"Canal '{ch.name}' agora aponta pro Canal VSE {found}")
+        return {'FINISHED'}
+
+
 class DAW_OT_AssignChannelToGroup(Operator):
     bl_idname = "daw.assign_channel_to_group"
     bl_label = "Atribuir ao Grupo"
@@ -369,4 +411,5 @@ classes = [
     DAW_OT_AddGroup,
     DAW_OT_RemoveGroup,
     DAW_OT_AssignChannelToGroup,
+    DAW_OT_AutoFixVseChannel,
 ]
