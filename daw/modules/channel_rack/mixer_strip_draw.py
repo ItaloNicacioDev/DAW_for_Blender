@@ -276,6 +276,19 @@ def _draw_meter(strip, level_l: float, level_r: float, clipping: bool, s: float)
     sólida contínua. Blocos "apagados" ficam num cinza quase invisível
     (referência de escala); blocos "acesos" pegam a cor do limiar
     correspondente (verde/amarelo/vermelho)."""
+    # [FIX MEDIDOR SEMPRE BRANCO] Até aqui, `_draw_strip` já tinha
+    # chamado `_txt()` (blf.draw) várias vezes antes de chegar aqui
+    # (número do canal, nome, "C" do pan) -- e `blf.draw()` desliga o
+    # blend de alpha internamente sem restaurar. Sem isso, o branco
+    # quase invisível de `PALETTE["meter_led_off"]` (alpha 0.035) era
+    # desenhado 100% opaco -- por isso os segmentos "apagados" sempre
+    # apareciam como um branco sólido, nunca em cinza escuro, não
+    # importa o nível real. `gpu.state.blend_set` é barato de chamar
+    # de novo (é só um estado, não recompila shader), então religar
+    # aqui é a forma mais segura de garantir isso sem depender da
+    # ordem de desenho no resto do arquivo.
+    gpu.state.blend_set('ALPHA')
+
     mx, my, mw, mh = strip.meter_x, strip.meter_y, strip.meter_w, strip.meter_h
     _round_rect(mx - 1.5 * s, my - 1.5 * s, mw + 3 * s, mh + 3 * s, PALETTE["border"], radius=3 * s)
     _rect(mx, my, mw, mh, PALETTE["meter_bg"])
