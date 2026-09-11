@@ -165,6 +165,15 @@ def _txt(text, x, y, size, col, font_id=0, center_w=None):
     blf.color(font_id, *col)
     blf.position(font_id, x, y, 0)
     blf.draw(font_id, text)
+    # [FIX MEDIDOR SEMPRE BRANCO] `blf.draw()` desliga o blend de alpha
+    # internamente e não restaura -- qualquer `_rect`/`_round_rect` com
+    # cor semitransparente desenhado logo depois de QUALQUER `_txt()`
+    # saía 100% opaco em vez de translúcido (foi assim que o medidor
+    # LED "apagado", que devia ser um branco quase invisível a 3.5% de
+    # opacidade, virava um branco sólido). Restaurar aqui, na função
+    # de texto em si, cobre todo mundo que chama `_txt()` neste
+    # arquivo, sem precisar caçar cada ponto de chamada.
+    gpu.state.blend_set('ALPHA')
 
 
 def _soft_glow(x0, y0, w, h, col, s, rings=3, radius=CORNER_R):
