@@ -67,10 +67,12 @@ _state_by_scene: Dict[str, dict] = {}
 # aplicado ao nível REAL vindo do Mixer/dos arquivos de áudio)
 METER_DECAY = 0.75
 
-# Liga print de diagnóstico no console (1x por segundo, não a cada
-# frame) mostrando o que a ponte está lendo/escrevendo pra cada canal
-# de sample -- desligue (False) depois de confirmar que está tudo ok.
-DAW_LOG_METERS = True
+# Liga print de diagnóstico no console mostrando o que a ponte está
+# lendo/escrevendo pra cada canal de sample -- útil pra depurar
+# problemas de nível/monitoramento, mas gera bastante ruído no console
+# durante o play normal. Fica desligado por padrão; religue (True)
+# manualmente se precisar investigar algo.
+DAW_LOG_METERS = False
 
 # Cache de leitores de WAV abertos, por filepath -- evita reabrir o
 # arquivo a cada tick (frame_change_post pode disparar 24-60x/seg)
@@ -355,7 +357,7 @@ def _update_sample_meters(scene, rack) -> None:
         strip = _find_sound_strip(scene, getattr(ch, "vse_channel", 1), scene.frame_current)
         if strip is None or not getattr(strip, "sound", None):
             ch.meter_level *= METER_DECAY
-            if DAW_LOG_METERS and scene.frame_current % 5 == 0:
+            if DAW_LOG_METERS and scene.frame_current % 24 == 0:
                 print(f"[DAW][meter] '{ch.name}' (vse_channel={getattr(ch, 'vse_channel', '?')}) "
                       f"-- nenhuma strip de som no frame {scene.frame_current}. "
                       f"Confira se há um strip SOUND nesse canal cobrindo esse frame.")
@@ -373,7 +375,7 @@ def _update_sample_meters(scene, rack) -> None:
         else:
             ch.meter_level = ch.meter_level * METER_DECAY
 
-        if DAW_LOG_METERS and scene.frame_current % 5 == 0:
+        if DAW_LOG_METERS and scene.frame_current % 24 == 0:
             ext_ok = filepath.lower().endswith(".wav")
             print(f"[DAW][meter] '{ch.name}' frame={scene.frame_current} "
                   f"arquivo={'OK(.wav)' if ext_ok else 'NÃO-WAV, sem leitor -- fica em 0'} "
@@ -383,8 +385,6 @@ def _update_sample_meters(scene, rack) -> None:
 def tick(engine, scene) -> None:
     rack = getattr(scene, "daw_channel_rack", None)
     if rack is None or len(rack.channels) == 0:
-        if DAW_LOG_METERS and scene.frame_current % 30 == 0:
-            print(f"[DAW][DIAG] tick() saiu cedo: rack={'None' if rack is None else 'existe, 0 canais'}")
         return
 
     _sync_mixer_channels(engine, rack)
@@ -395,8 +395,6 @@ def tick(engine, scene) -> None:
 
     fps = scene.render.fps / max(scene.render.fps_base, 0.0001)
     if fps <= 0:
-        if DAW_LOG_METERS:
-            print("[DAW][DIAG] tick() saiu cedo: fps <= 0")
         return
     seconds = scene.frame_current / fps
     beats = seconds * (bpm / 60.0)
