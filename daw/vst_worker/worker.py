@@ -882,8 +882,20 @@ def _serve(conn: socket.socket) -> None:
 
             _EDITOR_OPEN[vst_id] = True
             fire_job = _Job({"cmd": "_open_editor_blocking", "vst_id": vst_id}, b"")
-            _juce_queue.put(fire_job)  # não espera fire_job.event -- fire-and-forget
+            # [FIX RACE GIL] Manda a confirmação ANTES de entregar o job
+            # pra thread JUCE, não depois. Se fosse na ordem antiga
+            # (queue.put() primeiro, send_frame() depois), a thread JUCE
+            # podia começar a chamada nativa do dawdreamer quase na hora
+            # -- e se essa chamada prender a GIL por um tempo (comum em
+            # plugins pesados tipo BBC Symphony, que fazem bastante coisa
+            # síncrona logo ao abrir: carregar amostras, checar licença
+            # etc.), a THREAD DE REDE fica travada tentando rodar
+            # send_frame() (que também precisa da GIL pra executar seus
+            # bytecodes Python), e o Blender achava que o worker nem
+            # respondeu -- quando na verdade a resposta só não conseguia
+            # sair a tempo por causa dessa corrida entre as duas threads.
             send_frame(conn, {"id": req_id, "ok": True, "already_open": False})
+            _juce_queue.put(fire_job)  # não espera fire_job.event -- fire-and-forget
             continue
 
         if cmd == "trigger_live_note":
