@@ -41,12 +41,12 @@ from .constants import EngineState, DEFAULT_BPM
 # ENGINE; ENGINE.start()`) -- só que, até aqui, esta classe não tinha
 # `self.mixer` nem chamava `channel_rack_bridge.tick()`. Existe uma
 # SEGUNDA cópia deste arquivo em `daw/core/engine.py` com o Mixer e a
-# ponte já implementados (mesmos comentários "[FIX PONTE ÁUDIO/METER]"
-# lá), mas ela nunca é instanciada -- é código morto, porque
-# `register.py` aponta pra ESTE módulo (`daw_engine`), não pra aquele.
-# Resultado prático: os LEDs de nível nunca recebiam um valor real
-# durante o play, mesmo com a ponte "corrigida" -- ela simplesmente
-# nunca era chamada. A correção é replicar aqui o mesmo wiring.
+# ponte já implementados, mas ela nunca é instanciada -- é código
+# morto, porque `register.py` aponta pra ESTE módulo (`daw_engine`),
+# não pra aquele. Resultado prático: os LEDs de nível nunca recebiam
+# um valor real durante o play, mesmo com a ponte "corrigida" -- ela
+# simplesmente nunca era chamada. A correção é replicar aqui o mesmo
+# wiring.
 from ..mixer.mixer import Mixer
 
 
