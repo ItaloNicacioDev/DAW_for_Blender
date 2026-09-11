@@ -191,17 +191,33 @@ class Engine:
         self.transport.update(delta)
         self.scheduler.tick()
 
+        # [DIAG MEDIDOR] Print temporário, sem gate de frame%24, só pra
+        # confirmar de vez -- sem adivinhar mais -- se este handler
+        # está rodando de verdade e o que `is_animation_playing` está
+        # valendo no momento exato do play. Remover depois de resolvido.
+        screen = bpy.context.screen
+        self._diag_tick_count = getattr(self, "_diag_tick_count", 0) + 1
+        if self._diag_tick_count % 10 == 1:
+            print(f"[DAW][DIAG] _update rodando -- frame={scene.frame_current} "
+                  f"screen={'OK' if screen is not None else 'None'} "
+                  f"is_animation_playing={getattr(screen, 'is_animation_playing', 'N/A')}")
+
         # [FIX PONTE ÁUDIO/METER] Só roda a ponte do Channel Rack
         # (dispara steps SYNTH/MIDI + atualiza `meter_level` de TODOS
         # os canais, inclusive SAMPLER/AUDIO/DRUM) quando o Blender
         # está de fato reproduzindo (spacebar/play) -- não a cada
         # scrub manual do playhead, que também dispara
         # frame_change_post.
-        if bpy.context.screen is not None and bpy.context.screen.is_animation_playing:
+        if screen is not None and screen.is_animation_playing:
             try:
                 from ...core.channel_rack_bridge import tick as _channel_rack_tick
+                if self._diag_tick_count % 10 == 1:
+                    print("[DAW][DIAG] chamando channel_rack_bridge.tick()...")
                 _channel_rack_tick(self, scene)
             except Exception as e:
+                import traceback
+                print("[DAW][DIAG] EXCEÇÃO na ponte do Channel Rack:")
+                traceback.print_exc()
                 LOGGER.error("Engine", f"Erro na ponte do Channel Rack: {e}")
 
         self.events.emit("frame_update", {
