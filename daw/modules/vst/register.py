@@ -107,13 +107,26 @@ def register():
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
 
-    # Recarrega os VSTs do arquivo que já está aberto agora (o load_post
-    # só dispara em aberturas futuras de arquivo, não no que já está na tela
-    # quando o addon é ativado/atualizado).
-    try:
-        _on_load_post(None)
-    except Exception as e:
-        print(f"[DAW][vst] Falha ao recarregar VSTs no registro do addon: {e}")
+    # [FIX TIMING VST] Recarrega os VSTs do arquivo que já está aberto
+    # agora (o load_post só dispara em aberturas futuras de arquivo,
+    # não no que já está na tela quando o addon é ativado/atualizado).
+    #
+    # Chamar `_on_load_post(None)` direto aqui, sem adiar, falhava
+    # sempre com "'_RestrictData' object has no attribute 'scenes'":
+    # durante o próprio register() do addon o `bpy.context` do Blender
+    # ainda está num modo restrito (é assim pro Blender inteiro, não é
+    # bug nosso), e algo na cadeia de recarregar os VSTs esbarra nisso.
+    # A saída padrão pra esse tipo de problema é agendar a chamada com
+    # `bpy.app.timers` pra rodar um instante depois -- ainda no mesmo
+    # frame de UI, mas já fora do contexto restrito do register().
+    def _deferred_initial_vst_reload():
+        try:
+            _on_load_post(None)
+        except Exception as e:
+            print(f"[DAW][vst] Falha ao recarregar VSTs no registro do addon: {e}")
+        return None  # não repete -- é uma chamada única
+
+    bpy.app.timers.register(_deferred_initial_vst_reload, first_interval=0.0)
 
     print("[DAW] Módulo vst registrado")
 
