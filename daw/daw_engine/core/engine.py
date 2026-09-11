@@ -36,6 +36,16 @@ from .registry import Registry
 from .logger import LOGGER
 from .constants import EngineState, DEFAULT_BPM
 
+# [FIX PONTE ÁUDIO/METER] Este é o motor que de fato roda (é ele que
+# `daw/core/register.py` importa e inicia via `from ..daw_engine import
+# ENGINE; ENGINE.start()`) -- só que, até aqui, esta classe não tinha
+# `self.mixer` nem chamava `channel_rack_bridge.tick()`. Existe uma
+# SEGUNDA cópia deste arquivo em `daw/core/engine.py` com o Mixer e a
+# ponte já implementados, mas ela nunca é instanciada -- é código
+# morto, porque `register.py` aponta pra ESTE módulo (`daw_engine`),
+# não pra aquele.
+from ..mixer.mixer import Mixer
+
 
 class Engine:
     """
@@ -79,6 +89,11 @@ class Engine:
         self.state = State()
         self.history = History()
         self.registry = Registry()
+
+        # [FIX PONTE ÁUDIO/METER] Mixer real -- alimenta tanto o áudio
+        # dos canais SYNTH/MIDI quanto o `last_peak` que o VU meter do
+        # Mixer/Channel Rack lê (ver channel_rack_bridge.py).
+        self.mixer = Mixer(sample_rate=48000)
 
         # ------------------------------------------------------------------
         # Estado interno da engine
@@ -136,6 +151,14 @@ class Engine:
         self._is_running = False
         self._engine_state = EngineState.STOPPED
 
+        # [FIX PONTE ÁUDIO/METER] Fecha os arquivos .wav abertos pelo
+        # cache de leitura de nível dos canais SAMPLER/AUDIO/DRUM.
+        try:
+            from ...core.channel_rack_bridge import close_wav_cache as _close_wav_cache
+            _close_wav_cache()
+        except Exception:
+            pass
+
         # Remove o handler de frame com segurança
         try:
             if self._frame_handler in bpy.app.handlers.frame_change_post:
@@ -164,6 +187,30 @@ class Engine:
 
         self.transport.update(delta)
         self.scheduler.tick()
+
+        # [DIAG MEDIDOR] Print temporário pra confirmar de vez se este
+        # handler está rodando e o que `is_animation_playing` vale no
+        # momento do play. Remover depois de resolvido.
+        screen = bpy.context.screen
+        self._diag_tick_count = getattr(self, "_diag_tick_count", 0) + 1
+        if self._diag_tick_count % 10 == 1:
+            print(f"[DAW][DIAG] _update rodando -- frame={scene.frame_current} "
+                  f"screen={'OK' if screen is not None else 'None'} "
+                  f"is_animation_playing={getattr(screen, 'is_animation_playing', 'N/A')}")
+
+        # [FIX PONTE ÁUDIO/METER] Só roda a ponte do Channel Rack
+        # quando o Blender está de fato reproduzindo (spacebar/play).
+        if screen is not None and screen.is_animation_playing:
+            try:
+                from ...core.channel_rack_bridge import tick as _channel_rack_tick
+                if self._diag_tick_count % 10 == 1:
+                    print("[DAW][DIAG] chamando channel_rack_bridge.tick()...")
+                _channel_rack_tick(self, scene)
+            except Exception as e:
+                import traceback
+                print("[DAW][DIAG] EXCEÇÃO na ponte do Channel Rack:")
+                traceback.print_exc()
+                LOGGER.error("Engine", f"Erro na ponte do Channel Rack: {e}")
 
         self.events.emit("frame_update", {
             "frame":  scene.frame_current,
@@ -339,6 +386,16 @@ class Engine:
         """Para o transporte sem emitir evento (usado internamente)."""
         self.transport.stop()
         self._engine_state = EngineState.STOPPED
+
+        try:
+            from ...core.channel_rack_bridge import reset as _reset_channel_rack_bridge
+            _reset_channel_rack_bridge()
+        except Exception:
+            pass
+        try:
+            self.mixer.all_notes_off()
+        except Exception:
+            pass
 
 
 # ------------------------------------------------------------------
