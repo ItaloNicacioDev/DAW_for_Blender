@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
+from ctypes import wintypes
 from pathlib import Path
 
 # Reusa tudo que já validamos no passo 1: resolve_vst3_binary,
@@ -324,7 +325,13 @@ def main():
     ref_count = component_vtbl.release(self_ptr)
     print(f"release() -> refcount restante reportado={ref_count}")
 
-    ctypes.windll.kernel32.FreeLibrary(dll._handle)
+    # windll.kernel32.FreeLibrary sem argtypes declarado assume um
+    # int comum, que estoura em handles de 64 bits -- por isso o
+    # OverflowError. HMODULE é do tamanho certo de ponteiro.
+    kernel32 = ctypes.windll.kernel32
+    kernel32.FreeLibrary.argtypes = [wintypes.HMODULE]
+    kernel32.FreeLibrary.restype = wintypes.BOOL
+    kernel32.FreeLibrary(dll._handle)
     print("\nDLL liberada. Passo 2 concluído sem crash.")
 
 
