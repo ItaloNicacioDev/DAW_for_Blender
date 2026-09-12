@@ -826,6 +826,29 @@ def _run_job(job: _Job) -> None:
 
 
 def _juce_thread_main() -> None:
+    # [FIX COM/STA PRA PLUGINS COM UI DE LICENÇA] Essa thread nunca
+    # inicializava o COM do Windows antes de chamar o dawdreamer/JUCE.
+    # Plugins simples não notam a diferença, mas plugins com telas de
+    # licença/ativação baseadas em WebView (comuns em bibliotecas
+    # grandes tipo BBC Symphony, e em synths modernos tipo Serum2)
+    # dependem de componentes COM que exigem a thread chamadora com um
+    # apartment STA inicializado -- sem isso, a criação desse
+    # componente trava esperando um COM que nunca foi preparado. Isso
+    # bate exatamente com o padrão observado: plugin simples abre,
+    # plugin com ativação trava.
+    try:
+        import ctypes
+        COINIT_APARTMENTTHREADED = 0x2
+        hr = ctypes.windll.ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+        # S_OK=0 ou S_FALSE=1 (já inicializado) são sucesso; qualquer
+        # outro HRESULT é falha, mas não vale abortar a thread por isso
+        # -- só logar e seguir, o pior caso é voltar ao comportamento
+        # antigo (sem COM) pra plugins que não precisam disso.
+        _log(f"COM inicializado na thread JUCE (STA), hr={hr}")
+    except Exception as e:
+        _log(f"AVISO: não foi possível inicializar COM na thread JUCE ({e}) -- "
+             f"plugins com UI de licença baseada em WebView podem travar ao abrir")
+
     _log("thread JUCE dedicada iniciada -- toda interação com dawdreamer passa por aqui")
     while True:
         job = _juce_queue.get()
