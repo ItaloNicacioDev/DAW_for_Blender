@@ -621,6 +621,147 @@ class IComponentHandlerObj(ctypes.Structure):
     _fields_ = [("lpVtbl", ctypes.POINTER(IComponentHandlerVtbl))]
 
 
+# ═══════════════════════════════════════════════════════════════
+#  Extensões do handler que plugins modernos costumam pedir via
+#  queryInterface no objeto que passamos em setComponentHandler().
+#  Recusar essas três (como o host fazia antes) é uma resposta
+#  VÁLIDA pela spec, mas na prática vários plugins (GUI construída
+#  com frameworks mais recentes, como parece ser o caso do Serum 2)
+#  assumem que pelo menos IComponentHandler2 existe e usam o
+#  ponteiro sem checar o hr direito -- daí o crash em vtable nula.
+#  IDs tirados direto do SDK público da Steinberg (ivsteditcontroller.h
+#  / ivstunits.h), não são "descobertos" por engenharia reversa do
+#  Serum -- são a spec documentada que qualquer host implementa.
+# ═══════════════════════════════════════════════════════════════
+
+# DECLARE_CLASS_IID (IComponentHandler2, 0xF040B4B3, 0xA36045EC, 0xABCDC045, 0xB4D5A2CC)
+IID_IComponentHandler2 = step1._uid_from_four_u32(0xF040B4B3, 0xA36045EC, 0xABCDC045, 0xB4D5A2CC)
+# DECLARE_CLASS_IID (IUnitHandler, 0x4B5147F8, 0x4654486B, 0x8DAB30BA, 0x163A3C56)
+IID_IUnitHandler = step1._uid_from_four_u32(0x4B5147F8, 0x4654486B, 0x8DAB30BA, 0x163A3C56)
+# DECLARE_CLASS_IID (IUnitHandler2, 0xF89F8CDF, 0x699E4BA5, 0x96AAC9A4, 0x81452B01)
+IID_IUnitHandler2 = step1._uid_from_four_u32(0xF89F8CDF, 0x699E4BA5, 0x96AAC9A4, 0x81452B01)
+
+SetDirtyFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_uint8)
+RequestOpenEditorFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_char_p)
+StartGroupEditFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p)
+FinishGroupEditFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p)
+
+
+class IComponentHandler2Vtbl(ctypes.Structure):
+    _fields_ = [
+        ("queryInterface", step1.QueryInterfaceFunc),
+        ("addRef", step1.AddRefFunc),
+        ("release", step1.ReleaseFunc),
+        ("setDirty", SetDirtyFunc),
+        ("requestOpenEditor", RequestOpenEditorFunc),
+        ("startGroupEdit", StartGroupEditFunc),
+        ("finishGroupEdit", FinishGroupEditFunc),
+    ]
+
+
+class IComponentHandler2Obj(ctypes.Structure):
+    _fields_ = [("lpVtbl", ctypes.POINTER(IComponentHandler2Vtbl))]
+
+
+class HostComponentHandler2:
+    """Stub no-op, mas um objeto REAL (vtable não-nula) -- é a
+    diferença que importa pra um plugin que assume suporte a essa
+    extensão e chama direto sem checar o hr do queryInterface."""
+
+    def __init__(self):
+        self._qi = step1.QueryInterfaceFunc(self._query_interface)
+        self._ar = step1.AddRefFunc(lambda this: 1)
+        self._rel = step1.ReleaseFunc(lambda this: 1)
+        self._set_dirty = SetDirtyFunc(self._set_dirty_impl)
+        self._request_open_editor = RequestOpenEditorFunc(self._request_open_editor_impl)
+        self._start_group = StartGroupEditFunc(lambda this: step1.kResultOk)
+        self._finish_group = FinishGroupEditFunc(lambda this: step1.kResultOk)
+        self._vtbl = IComponentHandler2Vtbl(
+            self._qi, self._ar, self._rel,
+            self._set_dirty, self._request_open_editor, self._start_group, self._finish_group,
+        )
+        self._obj = IComponentHandler2Obj(ctypes.pointer(self._vtbl))
+        self.ptr = ctypes.cast(ctypes.pointer(self._obj), ctypes.c_void_p)
+
+    def _query_interface(self, this, iid_ptr, obj_ptr_ptr):
+        out = ctypes.cast(obj_ptr_ptr, ctypes.POINTER(ctypes.c_void_p))
+        out[0] = None
+        return step1.kNoInterface
+
+    def _set_dirty_impl(self, this, state):
+        return step1.kResultOk
+
+    def _request_open_editor_impl(self, this, name):
+        return step1.kResultOk
+
+
+NotifyUnitSelectionFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_int32)
+NotifyProgramListChangeFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32)
+
+
+class IUnitHandlerVtbl(ctypes.Structure):
+    _fields_ = [
+        ("queryInterface", step1.QueryInterfaceFunc),
+        ("addRef", step1.AddRefFunc),
+        ("release", step1.ReleaseFunc),
+        ("notifyUnitSelection", NotifyUnitSelectionFunc),
+        ("notifyProgramListChange", NotifyProgramListChangeFunc),
+    ]
+
+
+class IUnitHandlerObj(ctypes.Structure):
+    _fields_ = [("lpVtbl", ctypes.POINTER(IUnitHandlerVtbl))]
+
+
+class HostUnitHandler:
+    def __init__(self):
+        self._qi = step1.QueryInterfaceFunc(self._query_interface)
+        self._ar = step1.AddRefFunc(lambda this: 1)
+        self._rel = step1.ReleaseFunc(lambda this: 1)
+        self._notify_sel = NotifyUnitSelectionFunc(lambda this, unit_id: step1.kResultOk)
+        self._notify_list = NotifyProgramListChangeFunc(lambda this, list_id, idx: step1.kResultOk)
+        self._vtbl = IUnitHandlerVtbl(self._qi, self._ar, self._rel, self._notify_sel, self._notify_list)
+        self._obj = IUnitHandlerObj(ctypes.pointer(self._vtbl))
+        self.ptr = ctypes.cast(ctypes.pointer(self._obj), ctypes.c_void_p)
+
+    def _query_interface(self, this, iid_ptr, obj_ptr_ptr):
+        out = ctypes.cast(obj_ptr_ptr, ctypes.POINTER(ctypes.c_void_p))
+        out[0] = None
+        return step1.kNoInterface
+
+
+NotifyUnitByBusChangeFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p)
+
+
+class IUnitHandler2Vtbl(ctypes.Structure):
+    _fields_ = [
+        ("queryInterface", step1.QueryInterfaceFunc),
+        ("addRef", step1.AddRefFunc),
+        ("release", step1.ReleaseFunc),
+        ("notifyUnitByBusChange", NotifyUnitByBusChangeFunc),
+    ]
+
+
+class IUnitHandler2Obj(ctypes.Structure):
+    _fields_ = [("lpVtbl", ctypes.POINTER(IUnitHandler2Vtbl))]
+
+
+class HostUnitHandler2:
+    def __init__(self):
+        self._qi = step1.QueryInterfaceFunc(self._query_interface)
+        self._ar = step1.AddRefFunc(lambda this: 1)
+        self._rel = step1.ReleaseFunc(lambda this: 1)
+        self._notify_bus = NotifyUnitByBusChangeFunc(lambda this: step1.kResultOk)
+        self._vtbl = IUnitHandler2Vtbl(self._qi, self._ar, self._rel, self._notify_bus)
+        self._obj = IUnitHandler2Obj(ctypes.pointer(self._vtbl))
+        self.ptr = ctypes.cast(ctypes.pointer(self._obj), ctypes.c_void_p)
+
+    def _query_interface(self, this, iid_ptr, obj_ptr_ptr):
+        out = ctypes.cast(obj_ptr_ptr, ctypes.POINTER(ctypes.c_void_p))
+        out[0] = None
+        return step1.kNoInterface
+
+
 class HostComponentHandler:
     def __init__(self):
         self._qi = step1.QueryInterfaceFunc(self._query_interface)
@@ -634,8 +775,25 @@ class HostComponentHandler:
         self._obj = IComponentHandlerObj(ctypes.pointer(self._vtbl))
         self.ptr = ctypes.cast(ctypes.pointer(self._obj), ctypes.c_void_p)
 
+        # Extensões que hosts reais expõem no mesmo objeto (mantidas
+        # vivas aqui pelo mesmo motivo de sempre: se o Python coletar
+        # esses sub-objetos, a vtable que o plugin guardou vira lixo).
+        self._handler2 = HostComponentHandler2()
+        self._unit_handler = HostUnitHandler()
+        self._unit_handler2 = HostUnitHandler2()
+
     def _query_interface(self, this, iid_ptr, obj_ptr_ptr):
+        requested = bytes(iid_ptr.contents)
         out = ctypes.cast(obj_ptr_ptr, ctypes.POINTER(ctypes.c_void_p))
+        if requested == bytes(IID_IComponentHandler2):
+            out[0] = self._handler2.ptr.value
+            return step1.kResultOk
+        if requested == bytes(IID_IUnitHandler):
+            out[0] = self._unit_handler.ptr.value
+            return step1.kResultOk
+        if requested == bytes(IID_IUnitHandler2):
+            out[0] = self._unit_handler2.ptr.value
+            return step1.kResultOk
         out[0] = None
         return step1.kNoInterface
 
