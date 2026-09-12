@@ -49,7 +49,7 @@ O que esse script NÃO faz ainda:
     conexão de fato num motor de áudio.
 
 USO:
-    python vst3_host_step4_open_gui.py "C:\\Program Files\\Common Files\\VST3\\Serum2.vst3"
+    python vst3_host_step4_open_gui.py "C:\\Caminho\\Para\\O\\Plugin.vst3"
 """
 
 from __future__ import annotations
@@ -109,6 +109,18 @@ kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 kernel32.FreeLibrary.argtypes = [wintypes.HMODULE]
 kernel32.FreeLibrary.restype = wintypes.BOOL
 
+# Muitos plugins com GUI customizada (skins desenhadas na mão, tipo o
+# Serum) usam COM por baixo dos panos (Direct2D/DirectWrite/WIC) pra
+# renderizar. Sem inicializar o COM na thread que chama createView(),
+# a PRÓPRIA implementação do plugin recebe ponteiros NULL de volta de
+# chamadas COM internas e crasha -- é exatamente o
+# "access violation reading 0x0" que aparece se isso faltar.
+ole32 = ctypes.windll.ole32
+ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+ole32.CoInitializeEx.restype = ctypes.c_long
+COINIT_APARTMENTTHREADED = 0x2
+COINIT_DISABLE_OLE1DDE = 0x4
+
 
 # ═══════════════════════════════════════════════════════════════
 #  Constantes / structs do Win32 puro (não é coisa do VST3)
@@ -116,10 +128,37 @@ kernel32.FreeLibrary.restype = wintypes.BOOL
 
 WM_CLOSE = 0x0010
 WM_DESTROY = 0x0002
-WS_OVERLAPPEDWINDOW = 0x00CF0000
+WS_CLIPCHILDREN = 0x02000000
+WS_CLIPSIBLINGS = 0x04000000
+WS_OVERLAPPEDWINDOW = 0x00CF0000 | WS_CLIPCHILDREN | WS_CLIPSIBLINGS
 SW_SHOWNORMAL = 1
 IDC_ARROW = 32512
 COLOR_WINDOW_BRUSH = ctypes.cast(6, wintypes.HBRUSH)  # COLOR_WINDOW + 1
+
+# [FIX GUI Serum 2 / plugins com renderização HiDPI] Sem declarar
+# DPI-awareness do PROCESSO antes de qualquer janela existir, alguns
+# plugins com GUI vetorial (Serum 2 é um exemplo conhecido) consultam
+# a API de escala do Windows já dentro do próprio attached() pra
+# montar o objeto interno de renderização -- se essa consulta falha
+# (processo "DPI-unaware" == comportamento padrão do Python), esse
+# objeto interno do PLUGIN fica com vtable nula, e a primeira chamada
+# virtual nele derruba o processo com "access violation reading 0x..."
+# (o offset bate com o slot da vtable, não com endereço 0 puro).
+# Plugins com GUI simples/bitmap fixo nunca fazem essa consulta, por
+# isso abrem normalmente sem esse fix.
+try:
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4 & (2**64 - 1))
+    user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+    user32.SetProcessDpiAwarenessContext.restype = wintypes.BOOL
+    if not user32.SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2):
+        raise OSError("SetProcessDpiAwarenessContext falhou")
+except (AttributeError, OSError):
+    # Windows mais antigo sem Per-Monitor V2 -- cai pro fallback
+    # "DPI aware" simples (melhor que nada).
+    try:
+        user32.SetProcessDPIAware()
+    except AttributeError:
+        pass
 
 WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM)
 
@@ -277,14 +316,23 @@ class IPlugFrameObj(ctypes.Structure):
 # createView() devolve o ponteiro IPlugView* DIRETO (não é tresult
 # via out-param como quase tudo no resto do SDK) -- por isso o passo
 # 3 declarou esse slot como genérico (não sabíamos o restype certo
-# ainda). Aqui a gente reaproveita a mesma vtable do passo 3 (mesmos
-# 18 slots, mesma ordem) só trocando a assinatura do ÚLTIMO slot pra
-# ter o restype certo (c_void_p, não int32).
+# ainda). setComponentState() também precisava de assinatura real
+# (recebe um IBStream* -- o passo 3 só tinha o slot genérico porque
+# ainda não processávamos estado). Aqui a gente reaproveita a mesma
+# vtable do passo 3 (mesmos 18 slots, mesma ordem) só trocando a
+# assinatura desses dois slots.
 CreateViewFunc = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)
+SetComponentStateFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p)
+SetComponentHandlerFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p)
+
+_editcontroller_fields = list(step3.IEditControllerVtbl._fields_)
+_editcontroller_fields[5] = ("setComponentState", SetComponentStateFunc)  # confirmado pelo índice: qi,ar,rel,init,term,setComponentState,...
+_editcontroller_fields[16] = ("setComponentHandler", SetComponentHandlerFunc)
+_editcontroller_fields[-1] = ("createView", CreateViewFunc)
 
 
 class IEditControllerVtblFull(ctypes.Structure):
-    _fields_ = list(step3.IEditControllerVtbl._fields_[:-1]) + [("createView", CreateViewFunc)]
+    _fields_ = _editcontroller_fields
 
 
 class IEditControllerObjFull(ctypes.Structure):
@@ -295,10 +343,323 @@ kEditor = b"editor"  # ViewType::kEditor
 kPlatformTypeHWND = b"HWND"
 
 
+# O passo 2 declarou getState()/setState() do IComponent como slot
+# genérico (não processávamos estado ainda). Igual fizemos com o
+# IEditController acima, reaproveitamos a vtable original só
+# corrigindo a assinatura do slot que vamos chamar de verdade.
+GetStateFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p)
+
+_component_fields = list(step2.IComponentVtbl._fields_)
+_component_fields[13] = ("getState", GetStateFunc)  # qi,ar,rel,init,term,getControllerClassId,setIoMode,getBusCount,getBusInfo,getRoutingInfo,activateBus,setActive,setState,getState
+
+
+class IComponentVtblFull(ctypes.Structure):
+    _fields_ = _component_fields
+
+
+class IComponentObjFull(ctypes.Structure):
+    _fields_ = [("lpVtbl", ctypes.POINTER(IComponentVtblFull))]
+
+
 # ═══════════════════════════════════════════════════════════════
-#  IPlugFrame mínimo (o "host context" da GUI): o plugin chama isso
-#  quando quer redimensionar a própria janela.
+#  IConnectionPoint (pluginterfaces/vst/ivstmessage.h) -- conecta o
+#  IComponent e o IEditController quando são objetos SEPARADOS. Sem
+#  isso os dois ficam "cegos" um pro outro; vários plugins (Serum
+#  incluso) esperam essa conexão antes de montar a GUI.
 # ═══════════════════════════════════════════════════════════════
+
+# DECLARE_CLASS_IID (IConnectionPoint, 0x70A4156F, 0x6E6E4026, 0x989148BF, 0xAA60D8D1)
+IID_IConnectionPoint = step1._uid_from_four_u32(0x70A4156F, 0x6E6E4026, 0x989148BF, 0xAA60D8D1)
+
+ConnectFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p)
+DisconnectFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p)
+NotifyFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p)
+
+
+class IConnectionPointVtbl(ctypes.Structure):
+    _fields_ = [
+        ("queryInterface", step1.QueryInterfaceFunc),
+        ("addRef", step1.AddRefFunc),
+        ("release", step1.ReleaseFunc),
+        ("connect", ConnectFunc),
+        ("disconnect", DisconnectFunc),
+        ("notify", NotifyFunc),
+    ]
+
+
+class IConnectionPointObj(ctypes.Structure):
+    _fields_ = [("lpVtbl", ctypes.POINTER(IConnectionPointVtbl))]
+
+
+# ═══════════════════════════════════════════════════════════════
+#  IBStream (pluginterfaces/base/ibstream.h) -- implementado do lado
+#  do HOST (em memória, com um bytearray) pra servir de "correio"
+#  entre component.getState() e controller.setComponentState(). É
+#  assim que hosts de verdade sincronizam o estado antes de abrir a
+#  GUI -- sem isso, o controller não sabe o preset/valores atuais.
+# ═══════════════════════════════════════════════════════════════
+
+# DECLARE_CLASS_IID (IBStream, 0xC3BF6EA2, 0x30994752, 0x9B6BF990, 0x1EE33E9B)
+IID_IBStream = step1._uid_from_four_u32(0xC3BF6EA2, 0x30994752, 0x9B6BF990, 0x1EE33E9B)
+
+kIBSeekSet, kIBSeekCur, kIBSeekEnd = 0, 1, 2
+
+ReadFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p)
+WriteFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p)
+SeekFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_int64, ctypes.c_int32, ctypes.c_void_p)
+TellFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p)
+
+
+class IBStreamVtbl(ctypes.Structure):
+    _fields_ = [
+        ("queryInterface", step1.QueryInterfaceFunc),
+        ("addRef", step1.AddRefFunc),
+        ("release", step1.ReleaseFunc),
+        ("read", ReadFunc),
+        ("write", WriteFunc),
+        ("seek", SeekFunc),
+        ("tell", TellFunc),
+    ]
+
+
+class IBStreamObj(ctypes.Structure):
+    _fields_ = [("lpVtbl", ctypes.POINTER(IBStreamVtbl))]
+
+
+class MemoryBStream:
+    """IBStream em memória, do lado do host. Mesmo padrão dos outros
+    objetos mínimos (host context, plug frame): guarda os callbacks
+    vivos como atributos da instância."""
+
+    def __init__(self):
+        self._buf = bytearray()
+        self._pos = 0
+
+        self._qi = step1.QueryInterfaceFunc(self._query_interface)
+        self._ar = step1.AddRefFunc(self._add_ref)
+        self._rel = step1.ReleaseFunc(self._release)
+        self._read = ReadFunc(self._read_impl)
+        self._write = WriteFunc(self._write_impl)
+        self._seek = SeekFunc(self._seek_impl)
+        self._tell = TellFunc(self._tell_impl)
+        self._vtbl = IBStreamVtbl(self._qi, self._ar, self._rel, self._read, self._write, self._seek, self._tell)
+        self._obj = IBStreamObj(ctypes.pointer(self._vtbl))
+        self.ptr = ctypes.cast(ctypes.pointer(self._obj), ctypes.c_void_p)
+
+    def _query_interface(self, this, iid_ptr, obj_ptr_ptr):
+        out = ctypes.cast(obj_ptr_ptr, ctypes.POINTER(ctypes.c_void_p))
+        out[0] = None
+        return step1.kNoInterface
+
+    def _add_ref(self, this):
+        return 1
+
+    def _release(self, this):
+        return 1
+
+    def _read_impl(self, this, buffer, num_bytes, num_bytes_read_ptr):
+        available = len(self._buf) - self._pos
+        to_read = max(0, min(num_bytes, available))
+        if to_read > 0 and buffer:
+            chunk = bytes(self._buf[self._pos:self._pos + to_read])
+            ctypes.memmove(buffer, chunk, to_read)
+            self._pos += to_read
+        if num_bytes_read_ptr:
+            ctypes.cast(num_bytes_read_ptr, ctypes.POINTER(ctypes.c_int32))[0] = to_read
+        return step1.kResultOk
+
+    def _write_impl(self, this, buffer, num_bytes, num_bytes_written_ptr):
+        chunk = ctypes.string_at(buffer, num_bytes) if buffer and num_bytes > 0 else b""
+        end = self._pos + len(chunk)
+        if end > len(self._buf):
+            self._buf.extend(b"\x00" * (end - len(self._buf)))
+        self._buf[self._pos:end] = chunk
+        self._pos = end
+        if num_bytes_written_ptr:
+            ctypes.cast(num_bytes_written_ptr, ctypes.POINTER(ctypes.c_int32))[0] = len(chunk)
+        return step1.kResultOk
+
+    def _seek_impl(self, this, pos, mode, result_ptr):
+        if mode == kIBSeekSet:
+            new_pos = pos
+        elif mode == kIBSeekCur:
+            new_pos = self._pos + pos
+        elif mode == kIBSeekEnd:
+            new_pos = len(self._buf) + pos
+        else:
+            return 0x80004005  # E_FAIL -- modo desconhecido
+        self._pos = max(0, new_pos)
+        if result_ptr:
+            ctypes.cast(result_ptr, ctypes.POINTER(ctypes.c_int64))[0] = self._pos
+        return step1.kResultOk
+
+    def _tell_impl(self, this, pos_ptr):
+        if pos_ptr:
+            ctypes.cast(pos_ptr, ctypes.POINTER(ctypes.c_int64))[0] = self._pos
+        return step1.kResultOk
+
+    def rewind(self):
+        self._pos = 0
+
+
+# ═══════════════════════════════════════════════════════════════
+#  IHostApplication (pluginterfaces/vst/ivsthostapplication.h) -- é
+#  isso que é passado como 'context' pro initialize() do componente
+#  e do controller. O host context mínimo do passo 2 (MinimalHostContext)
+#  recusava TUDO via queryInterface, inclusive isso -- alguns plugins
+#  guardam o resultado dessa consulta e usam (ex: pra mostrar o nome
+#  do host, ou pra criar objetos auxiliares) já durante a montagem da
+#  GUI, sem checar null antes. Aqui implementamos o mínimo (getName +
+#  createInstance) igual um host de verdade faria.
+# ═══════════════════════════════════════════════════════════════
+
+# DECLARE_CLASS_IID (IHostApplication, 0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36A664E5)
+IID_IHostApplication = step1._uid_from_four_u32(0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36A664E5)
+
+GetNameFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p)
+HostCreateInstanceFunc = ctypes.WINFUNCTYPE(
+    ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+)
+
+
+class IHostApplicationVtbl(ctypes.Structure):
+    _fields_ = [
+        ("queryInterface", step1.QueryInterfaceFunc),
+        ("addRef", step1.AddRefFunc),
+        ("release", step1.ReleaseFunc),
+        ("getName", GetNameFunc),
+        ("createInstance", HostCreateInstanceFunc),
+    ]
+
+
+class IHostApplicationObj(ctypes.Structure):
+    _fields_ = [("lpVtbl", ctypes.POINTER(IHostApplicationVtbl))]
+
+
+class HostApplicationContext:
+    """Substitui o MinimalHostContext do passo 2. A MESMA vtable
+    serve tanto pra ser passada como 'context' (que é só um FUnknown)
+    quanto pra ser devolvida quando o plugin pergunta especificamente
+    por IHostApplication -- IHostApplication só ACRESCENTA métodos
+    depois de FUnknown, não redefine nada, então um objeto só resolve
+    os dois papéis."""
+
+    def __init__(self, name="Native VST3 Host (Python)"):
+        self._name = name
+        self._qi = step1.QueryInterfaceFunc(self._query_interface)
+        self._ar = step1.AddRefFunc(self._add_ref)
+        self._rel = step1.ReleaseFunc(self._release)
+        self._get_name = GetNameFunc(self._get_name_impl)
+        self._create_instance = HostCreateInstanceFunc(self._create_instance_impl)
+        self._vtbl = IHostApplicationVtbl(self._qi, self._ar, self._rel, self._get_name, self._create_instance)
+        self._obj = IHostApplicationObj(ctypes.pointer(self._vtbl))
+        self.ptr = ctypes.cast(ctypes.pointer(self._obj), ctypes.c_void_p)
+
+    def _query_interface(self, this, iid_ptr, obj_ptr_ptr):
+        requested = bytes(iid_ptr.contents)
+        out = ctypes.cast(obj_ptr_ptr, ctypes.POINTER(ctypes.c_void_p))
+        if requested in (bytes(IID_IHostApplication), bytes(step1.IID_FUnknown)):
+            out[0] = this
+            return step1.kResultOk
+        out[0] = None
+        return step1.kNoInterface
+
+    def _add_ref(self, this):
+        return 1
+
+    def _release(self, this):
+        return 1
+
+    def _get_name_impl(self, this, name_buf_ptr):
+        if name_buf_ptr:
+            text = self._name[:127]
+            buf = (ctypes.c_wchar * 128).from_address(name_buf_ptr)
+            for i, ch in enumerate(text):
+                buf[i] = ch
+            buf[len(text)] = "\x00"
+        return step1.kResultOk
+
+    def _create_instance_impl(self, this, cid, iid, obj_ptr_ptr):
+        # Não implementamos criação de objetos do lado do host ainda
+        # (IMessage, IAttributeList) -- devolve "não implementado".
+        out = ctypes.cast(obj_ptr_ptr, ctypes.POINTER(ctypes.c_void_p))
+        out[0] = None
+        return 0x80004001  # kNotImplemented
+
+
+# ═══════════════════════════════════════════════════════════════
+#  IComponentHandler (pluginterfaces/vst/ivsteditcontroller.h) -- o
+#  controller espera um handler setado ANTES do createView(); vários
+#  frameworks de GUI consultam esse ponteiro já na construção da
+#  view. beginEdit/performEdit/endEdit só confirmamos (não aplicamos
+#  a mudança de verdade ainda -- isso é o próximo passo, conectar num
+#  motor de áudio real).
+# ═══════════════════════════════════════════════════════════════
+
+# DECLARE_CLASS_IID (IComponentHandler, 0x93A0BEA3, 0x0BD045DB, 0x8E890B0C, 0xC1E46AC6)
+IID_IComponentHandler = step1._uid_from_four_u32(0x93A0BEA3, 0x0BD045DB, 0x8E890B0C, 0xC1E46AC6)
+
+BeginEditFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_uint32)
+PerformEditFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_double)
+EndEditFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_uint32)
+RestartComponentFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_int32)
+
+
+class IComponentHandlerVtbl(ctypes.Structure):
+    _fields_ = [
+        ("queryInterface", step1.QueryInterfaceFunc),
+        ("addRef", step1.AddRefFunc),
+        ("release", step1.ReleaseFunc),
+        ("beginEdit", BeginEditFunc),
+        ("performEdit", PerformEditFunc),
+        ("endEdit", EndEditFunc),
+        ("restartComponent", RestartComponentFunc),
+    ]
+
+
+class IComponentHandlerObj(ctypes.Structure):
+    _fields_ = [("lpVtbl", ctypes.POINTER(IComponentHandlerVtbl))]
+
+
+class HostComponentHandler:
+    def __init__(self):
+        self._qi = step1.QueryInterfaceFunc(self._query_interface)
+        self._ar = step1.AddRefFunc(self._add_ref)
+        self._rel = step1.ReleaseFunc(self._release)
+        self._begin = BeginEditFunc(self._begin_edit)
+        self._perform = PerformEditFunc(self._perform_edit)
+        self._end = EndEditFunc(self._end_edit)
+        self._restart = RestartComponentFunc(self._restart_component)
+        self._vtbl = IComponentHandlerVtbl(self._qi, self._ar, self._rel, self._begin, self._perform, self._end, self._restart)
+        self._obj = IComponentHandlerObj(ctypes.pointer(self._vtbl))
+        self.ptr = ctypes.cast(ctypes.pointer(self._obj), ctypes.c_void_p)
+
+    def _query_interface(self, this, iid_ptr, obj_ptr_ptr):
+        out = ctypes.cast(obj_ptr_ptr, ctypes.POINTER(ctypes.c_void_p))
+        out[0] = None
+        return step1.kNoInterface
+
+    def _add_ref(self, this):
+        return 1
+
+    def _release(self, this):
+        return 1
+
+    def _begin_edit(self, this, param_id):
+        return step1.kResultOk
+
+    def _perform_edit(self, this, param_id, value_normalized):
+        return step1.kResultOk
+
+    def _end_edit(self, this, param_id):
+        return step1.kResultOk
+
+    def _restart_component(self, this, flags):
+        print(f"  [IComponentHandler] plugin pediu restartComponent(flags={flags:#x}) -- reconhecido, ainda não tratado.")
+        return step1.kResultOk
+
+
+
 
 class HostPlugFrame:
     def __init__(self, hwnd):
@@ -343,13 +704,34 @@ class HostPlugFrame:
 # ═══════════════════════════════════════════════════════════════
 
 def main():
-    if len(sys.argv) < 2:
-        print("Uso: python vst3_host_step4_open_gui.py \"C:\\caminho\\pro\\Plugin.vst3\"")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    if not args:
+        print("Uso: python vst3_host_step4_open_gui.py \"C:\\caminho\\pro\\Plugin.vst3\" [--no-state-sync] [--no-connection-point]")
         sys.exit(1)
 
-    vst3_path = sys.argv[1]
+    vst3_path = args[0]
+    skip_state_sync = "--no-state-sync" in flags
+    skip_connection_point = "--no-connection-point" in flags
     print(f"Carregando: {vst3_path}")
+    if skip_state_sync:
+        print("[debug] pulando getState()/setComponentState() -- teste de isolamento")
+    if skip_connection_point:
+        print("[debug] pulando connect() do IConnectionPoint -- teste de isolamento")
 
+    hr_co = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)
+    co_initialized = hr_co in (0, 1)  # S_OK ou S_FALSE (já inicializado igual)
+    if hr_co not in (0, 1):
+        print(f"Aviso: CoInitializeEx devolveu hr={hr_co:#x} -- seguindo mesmo assim.")
+
+    try:
+        _main_body(vst3_path, skip_state_sync=skip_state_sync, skip_connection_point=skip_connection_point)
+    finally:
+        if co_initialized:
+            ole32.CoUninitialize()
+
+
+def _main_body(vst3_path: str, skip_state_sync: bool = False, skip_connection_point: bool = False):
     dll, factory = step1.load_vst3_factory(vst3_path)
     classes = step1.list_classes(factory)
     audio_class = step2.find_audio_module_class(classes)
@@ -359,7 +741,7 @@ def main():
     component_vtbl = component_ptr.contents.lpVtbl.contents
     component_self = ctypes.cast(component_ptr, ctypes.c_void_p)
 
-    host_context = step2.MinimalHostContext()
+    host_context = HostApplicationContext()
     hr = component_vtbl.initialize(component_self, host_context.ptr)
     if hr != step1.kResultOk:
         raise RuntimeError(f"initialize() do componente falhou (hr={hr:#x})")
@@ -372,16 +754,71 @@ def main():
     def teardown_component_only():
         component_vtbl.terminate(component_self)
         component_vtbl.release(component_self)
-        kernel32.FreeLibrary(dll._handle)
+        step1.unload_vst3_module(dll)
 
     if ctrl_vtbl is None:
         print("Esse plugin não expõe IEditController -- não dá pra abrir GUI.")
         teardown_component_only()
         return
 
-    # Recasta pro tipo com createView() de verdade (restype certo).
+    # Recasta pros tipos com assinatura real (getState, setComponentState, createView).
     ctrl_full_ptr = ctypes.cast(ctrl_self, ctypes.POINTER(IEditControllerObjFull))
     ctrl_full_vtbl = ctrl_full_ptr.contents.lpVtbl.contents
+    component_full_ptr = ctypes.cast(component_self, ctypes.POINTER(IComponentObjFull))
+    component_full_vtbl = component_full_ptr.contents.lpVtbl.contents
+
+    connected = False
+    comp_cp_vtbl = comp_cp_self = ctrl_cp_vtbl = ctrl_cp_self = None
+    if ctrl_is_separate:
+        # Handshake padrão que hosts de verdade fazem antes de abrir
+        # a GUI: conectar os dois objetos via IConnectionPoint, e
+        # sincronizar o estado atual do componente no controller.
+        # Sem isso, alguns plugins (Serum incluso) crasham dentro do
+        # próprio createView() porque a GUI deles lê dados que só
+        # existem depois desse handshake.
+        comp_cp_vtbl = comp_cp_self = ctrl_cp_vtbl = ctrl_cp_self = None
+        if skip_connection_point:
+            print("\n[debug] pulando conexão IComponent <-> IEditController (--no-connection-point).")
+        else:
+            print("\nConectando IComponent <-> IEditController...")
+            comp_cp_obj = ctypes.c_void_p()
+            hr_comp_cp = component_vtbl.queryInterface(component_self, ctypes.byref(IID_IConnectionPoint), ctypes.byref(comp_cp_obj))
+            ctrl_cp_obj = ctypes.c_void_p()
+            hr_ctrl_cp = ctrl_vtbl.queryInterface(ctrl_self, ctypes.byref(IID_IConnectionPoint), ctypes.byref(ctrl_cp_obj))
+
+            if hr_comp_cp == step1.kResultOk and hr_ctrl_cp == step1.kResultOk:
+                comp_cp_ptr = ctypes.cast(comp_cp_obj, ctypes.POINTER(IConnectionPointObj))
+                comp_cp_vtbl = comp_cp_ptr.contents.lpVtbl.contents
+                comp_cp_self = ctypes.cast(comp_cp_ptr, ctypes.c_void_p)
+
+                ctrl_cp_ptr = ctypes.cast(ctrl_cp_obj, ctypes.POINTER(IConnectionPointObj))
+                ctrl_cp_vtbl = ctrl_cp_ptr.contents.lpVtbl.contents
+                ctrl_cp_self = ctypes.cast(ctrl_cp_ptr, ctypes.c_void_p)
+
+                hr1 = comp_cp_vtbl.connect(comp_cp_self, ctrl_cp_self)
+                hr2 = ctrl_cp_vtbl.connect(ctrl_cp_self, comp_cp_self)
+                print(f"  connect() -> componente={hr1:#x} controller={hr2:#x}")
+                connected = hr1 == step1.kResultOk and hr2 == step1.kResultOk
+            else:
+                print("  Esse plugin não suporta IConnectionPoint -- pulando (comum em plugins mais simples).")
+
+        if skip_state_sync:
+            print("[debug] pulando getState()/setComponentState() (--no-state-sync).")
+        else:
+            print("Sincronizando estado (component.getState -> controller.setComponentState)...")
+            state_stream = MemoryBStream()
+            hr_get = component_full_vtbl.getState(component_self, state_stream.ptr)
+            if hr_get == step1.kResultOk:
+                state_stream.rewind()
+                hr_set = ctrl_full_vtbl.setComponentState(ctrl_self, state_stream.ptr)
+                print(f"  getState() -> hr={hr_get:#x} ({len(state_stream._buf)} bytes), setComponentState() -> hr={hr_set:#x}")
+            else:
+                print(f"  getState() falhou (hr={hr_get:#x}) -- seguindo sem sincronizar estado.")
+
+    print("\nsetComponentHandler()...")
+    handler = HostComponentHandler()
+    hr_handler = ctrl_full_vtbl.setComponentHandler(ctrl_self, handler.ptr)
+    print(f"  setComponentHandler() -> hr={hr_handler:#x}")
 
     view_ptr_raw = ctrl_full_vtbl.createView(ctrl_self, kEditor)
     if not view_ptr_raw:
@@ -433,6 +870,13 @@ def main():
     print("\nJanela fechada, desfazendo tudo...")
     view_vtbl.removed(view_self)
     view_vtbl.release(view_self)
+
+    if connected:
+        comp_cp_vtbl.disconnect(comp_cp_self, ctrl_cp_self)
+        ctrl_cp_vtbl.disconnect(ctrl_cp_self, comp_cp_self)
+        comp_cp_vtbl.release(comp_cp_self)
+        ctrl_cp_vtbl.release(ctrl_cp_self)
+        print("  IConnectionPoint desconectado.")
 
     if ctrl_is_separate:
         ctrl_vtbl.terminate(ctrl_self)

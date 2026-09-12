@@ -212,6 +212,17 @@ def load_vst3_factory(vst3_path: str):
     print(f"Binário real resolvido: {real_path}")
     dll = ctypes.WinDLL(real_path)
 
+    # InitDll() é OPCIONAL no Windows pela spec (o Windows já roda os
+    # construtores globais da DLL sozinho via DllMain) -- mas vários
+    # plugins colocam ali inicialização de recursos (fontes, bitmaps,
+    # estado interno da GUI) que só acontece se o host chamar isso
+    # explicitamente. Hosts de verdade sempre chamam quando existe.
+    if hasattr(dll, "InitDll"):
+        dll.InitDll.restype = ctypes.c_int32  # BOOL
+        dll.InitDll.argtypes = []
+        ok = dll.InitDll()
+        print(f"InitDll() -> {'OK' if ok else 'devolveu false (mas seguindo mesmo assim)'}")
+
     if not hasattr(dll, "GetPluginFactory"):
         raise RuntimeError(
             f"'{vst3_path}' não exporta GetPluginFactory() -- não é um "
@@ -229,6 +240,23 @@ def load_vst3_factory(vst3_path: str):
 
     factory = ctypes.cast(raw_ptr, ctypes.POINTER(IPluginFactoryObj))
     return dll, factory
+
+
+def unload_vst3_module(dll):
+    """Contraparte de load_vst3_factory(): chama ExitDll() (se
+    exportado -- espelha o InitDll() opcional) e SÓ DEPOIS libera a
+    DLL via FreeLibrary. Centralizado aqui pra todo passo usar a
+    mesma sequência, com os argtypes/restype certos (HMODULE é do
+    tamanho de um ponteiro -- default do ctypes trunca em 64-bit)."""
+    if hasattr(dll, "ExitDll"):
+        dll.ExitDll.restype = ctypes.c_int32
+        dll.ExitDll.argtypes = []
+        dll.ExitDll()
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.FreeLibrary.argtypes = [wintypes.HMODULE]
+    kernel32.FreeLibrary.restype = wintypes.BOOL
+    kernel32.FreeLibrary(dll._handle)
 
 
 def list_classes(factory) -> list[dict]:
