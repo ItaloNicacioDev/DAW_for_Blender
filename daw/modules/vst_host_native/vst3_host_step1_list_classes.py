@@ -69,16 +69,27 @@ def tuid_from_hex(hex_str: str) -> TUID:
 
 # FUID da IPluginFactory -- vem direto do SDK (pluginterfaces/base/ipluginfactory.h):
 #   DECLARE_CLASS_IID (IPluginFactory, 0x7A4D811C, 0x52114A1F, 0xAED9D2EE, 0x0B43BF9F)
-# Isso empacota como 16 bytes: os 4 primeiros = 0x7A4D811C (little-endian
-# como uint32), os próximos 4 = 0x52114A1F, etc. -- é assim que
-# DECLARE_CLASS_IID monta o TUID por baixo dos panos.
+#
+# ATENÇÃO -- isso NÃO é simplesmente "4 uint32 little-endian colados".
+# A macro INLINE_UID do SDK (funknown.h), quando COM_COMPATIBLE está
+# definido (é o caso no Windows), empacota do jeito que um GUID do
+# Windows é empacotado:
+#   l1 -> 4 bytes little-endian                  (Data1)
+#   l2 -> DUAS metades de 16 bits, cada little-endian (Data2 + Data3)
+#   l3 -> 4 bytes BIG-endian, cru                 (Data4[0..3])
+#   l4 -> 4 bytes BIG-endian, cru                 (Data4[4..7])
+# Empacotar l2/l3/l4 como little-endian "normal" gera um TUID
+# diferente do de verdade -- o plugin recusa a interface
+# (E_NOINTERFACE) porque o IID simplesmente não bate.
 def _uid_from_four_u32(a: int, b: int, c: int, d: int) -> TUID:
-    raw = (
-        a.to_bytes(4, "little")
-        + b.to_bytes(4, "little")
-        + c.to_bytes(4, "little")
-        + d.to_bytes(4, "little")
-    )
+    raw = bytearray(16)
+    raw[0:4] = a.to_bytes(4, "little")
+    raw[4] = (b >> 16) & 0xFF
+    raw[5] = (b >> 24) & 0xFF
+    raw[6] = b & 0xFF
+    raw[7] = (b >> 8) & 0xFF
+    raw[8:12] = c.to_bytes(4, "big")
+    raw[12:16] = d.to_bytes(4, "big")
     return TUID(*raw)
 
 
