@@ -882,20 +882,27 @@ def _serve(conn: socket.socket) -> None:
 
             _EDITOR_OPEN[vst_id] = True
             fire_job = _Job({"cmd": "_open_editor_blocking", "vst_id": vst_id}, b"")
-            # [FIX RACE GIL] Manda a confirmação ANTES de entregar o job
-            # pra thread JUCE, não depois. Se fosse na ordem antiga
-            # (queue.put() primeiro, send_frame() depois), a thread JUCE
-            # podia começar a chamada nativa do dawdreamer quase na hora
-            # -- e se essa chamada prender a GIL por um tempo (comum em
-            # plugins pesados tipo BBC Symphony, que fazem bastante coisa
-            # síncrona logo ao abrir: carregar amostras, checar licença
-            # etc.), a THREAD DE REDE fica travada tentando rodar
-            # send_frame() (que também precisa da GIL pra executar seus
-            # bytecodes Python), e o Blender achava que o worker nem
-            # respondeu -- quando na verdade a resposta só não conseguia
-            # sair a tempo por causa dessa corrida entre as duas threads.
+            # [FIX THREAD ISOLADA POR PLUGIN] Antes, TODO plugin (load,
+            # parâmetros, render E abertura de editor) passava pela
+            # mesma fila/thread global (`_juce_queue`/`_juce_thread`).
+            # Como `open_editor()` é bloqueante até o usuário fechar a
+            # janela, um plugin que trava ao abrir a interface (ex.:
+            # esperando uma checagem de licença que nunca aparece)
+            # travava essa thread pra sempre -- e como é a MESMA thread
+            # pra todo mundo, NENHUM outro plugin conseguia mais abrir
+            # editor, tocar nota ou renderizar depois disso.
+            #
+            # Cada plugin já tem seu próprio `dd.RenderEngine` (ver
+            # `_cmd_load`), então não tem problema de segurança em
+            # rodar `open_editor()` de cada um numa thread dedicada e
+            # descartável, só para essa chamada -- diferente de
+            # load/parâmetros/render, que continuam serializados na
+            # thread JUCE compartilhada.
             send_frame(conn, {"id": req_id, "ok": True, "already_open": False})
-            _juce_queue.put(fire_job)  # não espera fire_job.event -- fire-and-forget
+            threading.Thread(
+                target=_run_job, args=(fire_job,),
+                name=f"vst-editor-{vst_id}", daemon=True,
+            ).start()
             continue
 
         if cmd == "trigger_live_note":
