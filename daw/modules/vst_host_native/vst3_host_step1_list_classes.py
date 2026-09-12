@@ -162,10 +162,44 @@ class IPluginFactoryObj(ctypes.Structure):
     _fields_ = [("lpVtbl", ctypes.POINTER(IPluginFactoryVtbl))]
 
 
+def resolve_vst3_binary(vst3_path: str) -> str:
+    """Desde o SDK 3.6.10, um .vst3 normalmente NÃO é uma DLL solta --
+    é um bundle (uma PASTA chamada Algo.vst3) com a DLL de verdade
+    dentro de Contents/x86_64-win/Algo.vst3 (mesmo nome, mesma
+    extensão, mas agora é arquivo).
+
+    Passar o caminho da pasta pro LoadLibrary/WinDLL não dá "not
+    found" -- dá exatamente WinError 5 (Acesso negado), porque o
+    carregador tenta mapear a "pasta" como PE e falha. É isso que
+    estava acontecendo aqui.
+    """
+    from pathlib import Path
+
+    p = Path(vst3_path)
+
+    if p.is_file():
+        return str(p)  # formato antigo: já é a DLL direto
+
+    if p.is_dir():
+        for arch in ("x86_64-win", "x86-win"):
+            candidate = p / "Contents" / arch / p.name
+            if candidate.is_file():
+                return str(candidate)
+        raise FileNotFoundError(
+            f"'{vst3_path}' é um bundle, mas não achei o binário em "
+            f"Contents/x86_64-win/{p.name} nem Contents/x86-win/{p.name}. "
+            f"Confira o conteúdo da pasta manualmente."
+        )
+
+    raise FileNotFoundError(f"'{vst3_path}' não existe.")
+
+
 def load_vst3_factory(vst3_path: str):
     """Carrega o .vst3 e devolve (dll, factory_ptr) -- factory_ptr já
     é um IPluginFactoryObj* pronto pra chamar os métodos."""
-    dll = ctypes.WinDLL(vst3_path)
+    real_path = resolve_vst3_binary(vst3_path)
+    print(f"Binário real resolvido: {real_path}")
+    dll = ctypes.WinDLL(real_path)
 
     if not hasattr(dll, "GetPluginFactory"):
         raise RuntimeError(
