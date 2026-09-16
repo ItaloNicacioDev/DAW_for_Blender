@@ -8,7 +8,8 @@ Responsabilidades:
     - Expor interface de get/set de parâmetros por ID ou nome
     - SEM dependência de bpy (portável para motor C++/audio)
 
-Processamento real: delegado a DawdreamerIPCBridge (ipc_engine.py)
+Processamento real: delegado a NativeVST3Bridge (native_engine.py) --
+motor VST3 nativo em ctypes puro, sem worker externo/dawdreamer.
 """
 from __future__ import annotations
 
@@ -136,7 +137,7 @@ class VST:
     # ------------------------------------------------------------------
     def load(self, sample_rate: int = 44100, block_size: int = 512) -> bool:
         """
-        Carrega o plugin de verdade através do worker IPC (ipc_engine.py).
+        Carrega o plugin de verdade através do motor nativo (native_engine.py).
 
         Detecta automaticamente VST2 x VST3 pela extensão do arquivo e
         escolhe o modo de processamento certo (efeito ou instrumento MIDI)
@@ -147,7 +148,7 @@ class VST:
         preenchido e `self.loaded` permanece False.
         """
         from .engine import detect_plugin_format
-        from .ipc_engine import DawdreamerIPCBridge, is_available, install_instructions
+        from .native_engine import NativeVST3Bridge as DawdreamerIPCBridge, is_available, install_instructions
 
         self.error = None
         self.plugin_format = detect_plugin_format(self.path)
@@ -254,7 +255,7 @@ class VST:
         Resolve `self.automation` em uma lista ordenada de pontos
         `[tempo_em_segundos, {param_id_str: valor_normalizado}]`, prontos
         pra enviar ao worker via IPC (ver DawdreamerIPCBridge.process_effect
-        / render_instrument em ipc_engine.py).
+        / render_instrument em native_engine.py).
 
         Só inclui parâmetros que de fato têm pontos de automação -- os
         demais continuam com o valor constante já empurrado via
