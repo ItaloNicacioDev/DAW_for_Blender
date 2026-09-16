@@ -16,7 +16,7 @@ from __future__ import annotations
 import bpy
 from bpy.types import Panel, UIList
 
-from . import ipc_engine
+from . import native_engine
 from .live_monitor import _try_import_sounddevice
 from .utils import get_chain, get_scan_cache_timestamp
 from .pressets import get_preset_manager
@@ -38,20 +38,19 @@ def _active_channel_name(context) -> str:
 
 def _draw_engine_status(layout):
     """
-    Status do motor de VST (worker vendorizado, ver ipc_engine.py).
+    Status do motor de VST (nativo, ver native_engine.py).
 
-    Não existe mais botão de instalação: o worker (Python embutido +
-    dawdreamer) já vem junto no addon. Se a pasta vendor esperada não
-    estiver presente, é um problema de build/empacotamento do addon,
-    não algo que o usuário final deveria resolver na hora — por isso
-    mostramos só um aviso discreto, sem oferecer instalação via pip.
+    O motor roda dentro do próprio processo do Blender via ctypes,
+    sem worker externo nem dawdreamer vendorizado -- só depende do
+    sistema operacional ser Windows (é onde a API VST3 dos plugins
+    conversa via COM/Win32).
     """
-    if ipc_engine.is_available():
+    if native_engine.is_available():
         return  # tudo certo, não precisa mostrar nada
 
     box = layout.box()
-    box.label(text="Motor de VST não encontrado no addon", icon='ERROR')
-    box.label(text="Reinstale o addon com a pasta vendor/ completa.")
+    box.label(text="Motor de VST não disponível nesse sistema", icon='ERROR')
+    box.label(text="O host VST3 nativo desse addon só funciona no Windows.")
 
 
 def _draw_sounddevice_status(layout):
