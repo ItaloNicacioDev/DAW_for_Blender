@@ -476,6 +476,170 @@ class DAW_OT_SaveMixerInsertPreset(Operator):
 
 
 # ---------------------------------------------------------------------- #
+# Insert do tipo VST -- carrega um plugin de verdade dentro do slot,
+# reusando o mesmo motor/registro global que o channel_rack usa (ver
+# modules/vst/utils.py). O insert (MixerInsertSlotProperties.vst) é uma
+# DawVstProperty igual à do channel_rack, só que vivendo dentro de um
+# slot do mixer em vez de uma cadeia por canal.
+# ---------------------------------------------------------------------- #
+class DAW_OT_LoadVstIntoMixerInsert(Operator):
+    bl_idname = "daw.load_vst_into_mixer_insert"
+    bl_label = "Carregar VST no Insert"
+    bl_description = "Carrega um plugin VST descoberto neste insert do mixer"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    track_index: IntProperty(default=-1)
+    slot_index: IntProperty(default=-1)
+    vst_path: StringProperty(default="")
+    vst_name: StringProperty(default="")
+
+    def execute(self, context):
+        from ..vst.utils import get_or_create_live_vst, sync_rna_from_pure, make_unique_vst_id, unregister_live_vst
+
+        track = _track_for(context, self.track_index)
+        if track is None:
+            self.report({'WARNING'}, "Nenhuma faixa selecionada")
+            return {'CANCELLED'}
+        index = self.slot_index if self.slot_index >= 0 else track.active_insert_index
+        if not (0 <= index < len(track.inserts)):
+            return {'CANCELLED'}
+
+        slot = track.inserts[index]
+        if slot.effect_type != 'VST':
+            self.report({'ERROR'}, "Esse insert não é do tipo VST")
+            return {'CANCELLED'}
+
+        # Se já tinha um plugin carregado nesse slot, descarrega antes de
+        # trocar (senão o registro global fica com uma instância órfã).
+        if slot.vst.vst_id:
+            old = _get_live_vst_safe(slot.vst.vst_id)
+            if old is not None:
+                old.unload()
+            unregister_live_vst(slot.vst.vst_id)
+
+        slot.vst.vst_path = self.vst_path
+        slot.vst.vst_name = self.vst_name
+        slot.vst.vst_id = make_unique_vst_id(self.vst_name, [])
+        slot.vst.vst_type = "EFFECT"
+        slot.vst.bypass = False
+
+        daw_props = getattr(context.scene, "daw", None)
+        sample_rate = int(daw_props.sample_rate) if daw_props else 44100
+
+        vst = get_or_create_live_vst(slot.vst)
+        ok = vst.load(sample_rate=sample_rate)
+        sync_rna_from_pure(slot.vst, vst)
+
+        if ok:
+            self.report({'INFO'}, f"VST '{slot.vst.vst_name}' carregado no insert")
+        else:
+            self.report({'WARNING'}, slot.vst.error_message or "Falha ao carregar VST")
+        return {'FINISHED'}
+
+
+class DAW_OT_UnloadMixerInsertVst(Operator):
+    bl_idname = "daw.unload_mixer_insert_vst"
+    bl_label = "Descarregar VST do Insert"
+    bl_description = "Descarrega o plugin VST deste insert (o slot continua na cadeia, vazio)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    track_index: IntProperty(default=-1)
+    slot_index: IntProperty(default=-1)
+
+    def execute(self, context):
+        from ..vst.utils import unregister_live_vst
+
+        track = _track_for(context, self.track_index)
+        if track is None:
+            return {'CANCELLED'}
+        index = self.slot_index if self.slot_index >= 0 else track.active_insert_index
+        if not (0 <= index < len(track.inserts)):
+            return {'CANCELLED'}
+
+        slot = track.inserts[index]
+        if slot.vst.vst_id:
+            live = _get_live_vst_safe(slot.vst.vst_id)
+            if live is not None:
+                live.unload()
+            unregister_live_vst(slot.vst.vst_id)
+
+        slot.vst.vst_id = ""
+        slot.vst.vst_path = ""
+        slot.vst.vst_name = ""
+        slot.vst.is_loaded = False
+        slot.vst.parameters.clear()
+        return {'FINISHED'}
+
+
+class DAW_OT_OpenMixerInsertVstEditor(Operator):
+    bl_idname = "daw.open_mixer_insert_vst_editor"
+    bl_label = "Abrir Interface do Plugin"
+    bl_description = "Abre a janela nativa (GUI) do plugin carregado neste insert -- não bloqueia o Blender"
+    bl_options = {'REGISTER'}
+
+    track_index: IntProperty(default=-1)
+    slot_index: IntProperty(default=-1)
+
+    def execute(self, context):
+        track = _track_for(context, self.track_index)
+        if track is None:
+            return {'CANCELLED'}
+        index = self.slot_index if self.slot_index >= 0 else track.active_insert_index
+        if not (0 <= index < len(track.inserts)):
+            return {'CANCELLED'}
+
+        slot = track.inserts[index]
+        vst = _get_live_vst_safe(slot.vst.vst_id) if slot.vst.vst_id else None
+        if vst is None or not vst.loaded:
+            self.report({'WARNING'}, "Carregue o VST antes de abrir a interface")
+            return {'CANCELLED'}
+
+        ok = vst.open_editor()
+        if ok:
+            self.report({'INFO'}, f"Abrindo interface de '{slot.vst.vst_name}'...")
+        else:
+            self.report({'WARNING'}, "Este plugin não tem interface nativa suportada")
+        return {'FINISHED'} if ok else {'CANCELLED'}
+
+
+class DAW_OT_SetMixerInsertVstParameter(Operator):
+    bl_idname = "daw.set_mixer_insert_vst_parameter"
+    bl_label = "Setar Parâmetro do VST"
+    bl_description = "Altera um parâmetro do plugin carregado neste insert"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    track_index: IntProperty(default=-1)
+    slot_index: IntProperty(default=-1)
+    param_id: IntProperty(default=0)
+    value: FloatProperty(default=0.5, min=0.0, max=1.0)
+
+    def execute(self, context):
+        track = _track_for(context, self.track_index)
+        if track is None:
+            return {'CANCELLED'}
+        index = self.slot_index if self.slot_index >= 0 else track.active_insert_index
+        if not (0 <= index < len(track.inserts)):
+            return {'CANCELLED'}
+
+        slot = track.inserts[index]
+        vst = _get_live_vst_safe(slot.vst.vst_id) if slot.vst.vst_id else None
+        if vst is None or not vst.loaded:
+            return {'CANCELLED'}
+
+        vst.set_parameter(self.param_id, self.value)
+        for p in slot.vst.parameters:
+            if p.param_id == self.param_id:
+                p.param_value = self.value
+                break
+        return {'FINISHED'}
+
+
+def _get_live_vst_safe(vst_id: str):
+    from ..vst.utils import get_live_vst
+    return get_live_vst(vst_id)
+
+
+# ---------------------------------------------------------------------- #
 # Sends
 # ---------------------------------------------------------------------- #
 class DAW_OT_AddMixerSend(Operator):
@@ -627,6 +791,11 @@ classes = [
     DAW_OT_ResetMixerInsert,
     DAW_OT_ApplyMixerInsertPreset,
     DAW_OT_SaveMixerInsertPreset,
+    # Insert do tipo VST
+    DAW_OT_LoadVstIntoMixerInsert,
+    DAW_OT_UnloadMixerInsertVst,
+    DAW_OT_OpenMixerInsertVstEditor,
+    DAW_OT_SetMixerInsertVstParameter,
     # Sends
     DAW_OT_AddMixerSend,
     DAW_OT_RemoveMixerSend,
