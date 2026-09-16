@@ -5,9 +5,10 @@ Módulo VST da DAW.
 Arquitetura (arquivos novos/alterados marcados com *):
     vst.py            — modelo puro de um plugin VST (sem bpy)
     engine.py         — utilitários de plugin (detecção de formato VST2/VST3)
-    ipc_engine.py   * — motor real de processamento: cliente IPC pro worker
-                        externo (vendorizado, ver vst_worker/), que hospeda
-                        o dawdreamer de verdade num Python separado
+    native_engine.py* — motor real de processamento: host VST3 nativo em
+                        ctypes puro (ver modules/vst_host_native/), rodando
+                        dentro do próprio processo do Blender -- sem worker
+                        externo, sem dawdreamer, sem Python vendorizado
     pressets.py       — presets embutidos + presets do usuário (JSON)
     utils.py          — registro global vst_id -> VST puro, varredura
     properties.py   * — PropertyGroups (+ scroll, busca, auto-bounce, sounddevice)
@@ -37,7 +38,7 @@ except ImportError:  # pragma: no cover - allows test/CLI usage outside Blender
 
 from .vst import VST, VSTAutomationPoint, VSTProgramType, VSTProgramParameter, VSTProgramState
 from . import engine
-from . import ipc_engine
+from . import native_engine
 
 if bpy is not None:
     from . import timeline_bridge
@@ -85,8 +86,8 @@ __all__ = [
     "VST", "VSTAutomationPoint", "VSTProgramType", "VSTProgramParameter", "VSTProgramState",
     # Utilitários de plugin (detecção de formato)
     "engine",
-    # Motor real (worker IPC vendorizado)
-    "ipc_engine",
+    # Motor real (host VST3 nativo em ctypes, dentro do processo)
+    "native_engine",
     # Ponte com a timeline nativa do Blender
     "timeline_bridge",
     # Persistência (save/load de projeto)
