@@ -39,6 +39,8 @@ from bpy.props import (
 )
 from bpy.types import PropertyGroup
 
+from ..vst.properties import DawVstProperty
+
 from .tracks import MASTER_TRACK_NAME, get_color_by_index
 from .effects import EFFECT_TYPE_ITEMS
 from .sends import MAX_SENDS_PER_TRACK
@@ -132,6 +134,15 @@ class MixerInsertSlotProperties(PropertyGroup):
     bypass: BoolProperty(name="Bypass", default=False)
 
     params: CollectionProperty(type=MixerInsertParamProperties)
+
+    # Só relevante quando effect_type == 'VST' -- reaproveita a MESMA
+    # PropertyGroup rica que o channel_rack usa pra VST (path, nome,
+    # id, tipo, bypass, is_loaded, parâmetros reais do plugin etc.),
+    # em vez de duplicar todos esses campos aqui. Ver
+    # modules/vst/utils.py (get_or_create_live_vst, sync_rna_from_pure)
+    # -- funcionam sem alteração com esse campo, já que só esperam os
+    # atributos que DawVstProperty já tem.
+    vst: PointerProperty(type=DawVstProperty)
 
     def get_param(self, name: str, default: float = 0.0) -> float:
         for p in self.params:
