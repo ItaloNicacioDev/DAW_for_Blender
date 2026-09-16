@@ -100,6 +100,34 @@ class DAW_UL_MixerSendList(UIList):
 # ---------------------------------------------------------------------- #
 # Menus
 # ---------------------------------------------------------------------- #
+class DAW_MT_pick_vst_for_mixer_insert(Menu):
+    """Menu com os plugins já descobertos (mesmo scan usado pelo
+    channel_rack, ver context.scene.daw_vst_browser) pra carregar
+    dentro de um insert do mixer do tipo VST."""
+    bl_idname = "DAW_MT_pick_vst_for_mixer_insert"
+    bl_label = "Escolher Plugin VST"
+
+    def draw(self, context):
+        layout = self.layout
+        mixer = context.scene.daw_mixer
+        browser = getattr(context.scene, "daw_vst_browser", None)
+        discovered = browser.discovered_vsts if browser is not None else []
+
+        if not discovered:
+            layout.label(text="Nenhum VST encontrado -- escaneie no painel VST")
+            return
+
+        track = mixer.active_track
+        slot_index = track.active_insert_index if track is not None else -1
+
+        for entry in discovered:
+            op = layout.operator("daw.load_vst_into_mixer_insert", text=entry.vst_name)
+            op.track_index = mixer.active_track_index
+            op.slot_index = slot_index
+            op.vst_path = entry.vst_path
+            op.vst_name = entry.vst_name
+
+
 class DAW_MT_AddMixerInsert(Menu):
     """Menu para escolher qual tipo de efeito adicionar à cadeia da faixa."""
     bl_idname = "DAW_MT_add_mixer_insert"
@@ -331,19 +359,65 @@ class DAW_PT_MixerInserts(Panel):
         row.prop(slot, "enabled")
         row.prop(slot, "bypass")
 
-        row = box.row(align=True)
-        row.menu("DAW_MT_mixer_insert_presets", text="Presets", icon='PRESET')
-        op = row.operator("daw.save_mixer_insert_preset", text="", icon='FILE_TICK')
-        op.track_index = mixer.active_track_index
-        op = row.operator("daw.reset_mixer_insert", text="", icon='LOOP_BACK')
-        op.track_index = mixer.active_track_index
+        if slot.effect_type == 'VST':
+            self._draw_vst_insert(context, box, mixer.active_track_index, track.active_insert_index, slot)
+        else:
+            row = box.row(align=True)
+            row.menu("DAW_MT_mixer_insert_presets", text="Presets", icon='PRESET')
+            op = row.operator("daw.save_mixer_insert_preset", text="", icon='FILE_TICK')
+            op.track_index = mixer.active_track_index
+            op = row.operator("daw.reset_mixer_insert", text="", icon='LOOP_BACK')
+            op.track_index = mixer.active_track_index
 
-        if len(slot.params) > 0:
+            if len(slot.params) > 0:
+                box.separator()
+                for param in slot.params:
+                    row = box.row(align=True)
+                    row.label(text=param.name.replace("_", " ").title())
+                    row.prop(param, "value", text="")
+
+    @staticmethod
+    def _draw_vst_insert(context, box, track_index: int, slot_index: int, slot):
+        """Desenha o estado de um insert do tipo VST: qual plugin está
+        carregado (se algum), botão pra trocar/carregar, abrir a GUI
+        nativa e a lista de parâmetros reais do plugin (não o `params`
+        genérico usado pelos efeitos embutidos)."""
+        vst = slot.vst
+
+        if not vst.vst_id:
+            box.label(text="Nenhum plugin carregado", icon='INFO')
+            box.operator_context = 'INVOKE_DEFAULT'
+            box.menu("DAW_MT_pick_vst_for_mixer_insert", text="Escolher Plugin...", icon='PLUGIN')
+            return
+
+        row = box.row(align=True)
+        icon = 'CHECKMARK' if vst.is_loaded else 'ERROR'
+        row.label(text=vst.vst_name or vst.vst_id, icon=icon)
+        row.menu("DAW_MT_pick_vst_for_mixer_insert", text="", icon='FILE_REFRESH')
+        op = row.operator("daw.unload_mixer_insert_vst", text="", icon='X')
+        op.track_index = track_index
+        op.slot_index = slot_index
+
+        if not vst.is_loaded:
+            if vst.error_message:
+                box.label(text=vst.error_message, icon='ERROR')
+            return
+
+        row = box.row()
+        op = row.operator("daw.open_mixer_insert_vst_editor", text="Abrir Interface", icon='WINDOW')
+        op.track_index = track_index
+        op.slot_index = slot_index
+
+        if len(vst.parameters) > 0:
             box.separator()
-            for param in slot.params:
+            for p in vst.parameters:
                 row = box.row(align=True)
-                row.label(text=param.name.replace("_", " ").title())
-                row.prop(param, "value", text="")
+                row.prop(p, "param_value", text=p.param_name)
+                op = row.operator("daw.set_mixer_insert_vst_parameter", text="", icon='CHECKMARK')
+                op.track_index = track_index
+                op.slot_index = slot_index
+                op.param_id = p.param_id
+                op.value = p.param_value
 
 
 class DAW_PT_MixerSends(Panel):
@@ -417,6 +491,7 @@ classes = [
     DAW_UL_MixerInsertList,
     DAW_UL_MixerSendList,
     DAW_MT_AddMixerInsert,
+    DAW_MT_pick_vst_for_mixer_insert,
     DAW_MT_MixerInsertPresets,
     DAW_MT_SetMixerTrackOutput,
     DAW_MT_AddMixerSend,
