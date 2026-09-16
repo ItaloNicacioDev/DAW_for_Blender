@@ -43,6 +43,12 @@ class InsertSlot:
     enabled: bool = True
     bypass: bool = False
     params: Dict[str, float] = field(default_factory=dict)
+    # Só usado quando effect_type == "VST" -- referência pro objeto VST
+    # vivo no registro global (ver modules/vst/utils.py:get_live_vst).
+    # O estado rico (path, parâmetros, se está carregado etc.) mora no
+    # lado RNA (MixerInsertSlotProperties.vst); aqui só guardamos o id
+    # pra sobreviver a save/load de projeto.
+    vst_id: str = ""
 
     def __post_init__(self) -> None:
         # Se nenhum parâmetro foi passado explicitamente na criação, inicia
@@ -78,6 +84,7 @@ class InsertSlot:
             enabled=self.enabled,
             bypass=self.bypass,
             params=dict(self.params),
+            vst_id=self.vst_id,
         )
 
     # ------------------------------------------------------------------
@@ -89,6 +96,7 @@ class InsertSlot:
             "enabled": self.enabled,
             "bypass": self.bypass,
             "params": dict(self.params),
+            "vst_id": self.vst_id,
         }
 
     @classmethod
@@ -98,6 +106,7 @@ class InsertSlot:
             enabled=bool(data.get("enabled", True)),
             bypass=bool(data.get("bypass", False)),
             params=dict(data.get("params", {})),
+            vst_id=str(data.get("vst_id", "")),
         )
 
     def __repr__(self) -> str:
