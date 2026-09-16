@@ -27,6 +27,7 @@ EFFECT_TYPES: Tuple[str, ...] = (
     "FLANGER",
     "PHASER",
     "DISTORTION",
+    "VST",
 )
 
 # (identificador, rótulo legível, descrição, ícone nativo do Blender)
@@ -40,6 +41,7 @@ EFFECT_TYPE_ITEMS: Tuple[Tuple[str, str, str], ...] = (
     ("FLANGER", "Flanger", "Modulação de pente com feedback"),
     ("PHASER", "Phaser", "Filtro all-pass modulado em cascata"),
     ("DISTORTION", "Distorção", "Saturação / overdrive"),
+    ("VST", "Plugin VST", "Plugin VST3 externo carregado nesse slot"),
 )
 
 EFFECT_TYPE_ICONS: Dict[str, str] = {
@@ -52,9 +54,13 @@ EFFECT_TYPE_ICONS: Dict[str, str] = {
     "FLANGER": "MOD_WAVE",
     "PHASER": "MOD_WAVE",
     "DISTORTION": "MOD_NOISE",
+    "VST": "PLUGIN",
 }
 
 # Parâmetros padrão de cada tipo de efeito ao ser adicionado a um insert.
+# VST não tem parâmetros fixos -- eles vêm do próprio plugin carregado
+# (ver MixerInsertSlotProperties.vst.parameters em properties.py), por
+# isso fica de fora do catálogo estático abaixo.
 DEFAULT_PARAMS: Dict[str, Dict[str, float]] = {
     "EQ": {"low_gain": 0.0, "mid_gain": 0.0, "high_gain": 0.0, "mid_freq": 1000.0},
     "COMPRESSOR": {"threshold": -18.0, "ratio": 4.0, "attack": 0.01, "release": 0.15, "makeup": 0.0},
@@ -65,6 +71,7 @@ DEFAULT_PARAMS: Dict[str, Dict[str, float]] = {
     "FLANGER": {"rate": 0.25, "depth": 0.5, "feedback": 0.3, "mix": 0.5},
     "PHASER": {"rate": 0.3, "depth": 0.6, "stages": 4, "mix": 0.5},
     "DISTORTION": {"drive": 0.3, "tone": 0.5, "mix": 1.0},
+    "VST": {},
 }
 
 
