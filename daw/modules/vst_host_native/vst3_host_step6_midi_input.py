@@ -66,6 +66,75 @@ import vst3_host_step5_process_audio as step5  # noqa: E402
 
 
 # ═══════════════════════════════════════════════════════════════
+#  Assinaturas que ainda faltavam nas vtables dos passos 3/4/5
+#
+#  O passo 3 declarou getParamNormalized/setParamNormalized/setState
+#  como slot GENÉRICO (`_GenericFunc`, ou seja: 1 argumento, retorno
+#  int32) só pra manter o offset dos métodos seguintes -- naquele
+#  passo a gente ainda não chamava nenhum deles. O native_host chama,
+#  e aí dá o erro clássico:
+#
+#      TypeError: this function takes 1 argument (2 given)
+#
+#  ...em list_parameters(), na primeira vez que o addon lista os
+#  parâmetros de um plugin recém-carregado. Não é só contagem de
+#  argumento: getParamNormalized devolve DOUBLE (volta em XMM0), e
+#  lido como int32 viria lixo mesmo se o número de argumentos batesse.
+#
+#  Mesmo padrão dos passos anteriores: reaproveita a vtable de cima
+#  (mesmos slots, mesma ordem) trocando só as assinaturas que agora
+#  vamos usar de verdade, e instala por cima dos tipos do passo 4/5
+#  pra quem já casta usando eles (native_host) pegar de graça.
+# ═══════════════════════════════════════════════════════════════
+
+GetParamNormalizedFunc = ctypes.WINFUNCTYPE(ctypes.c_double, ctypes.c_void_p, ctypes.c_uint32)
+SetParamNormalizedFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_double)
+SetStateFunc = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p)
+
+_ec_fields = list(step4.IEditControllerVtblFull._fields_)
+# qi,ar,rel,init,term,setComponentState,setState,getState,getParameterCount,
+# getParameterInfo,getParamStringByValue,getParamValueByString,
+# normalizedParamToPlain,plainParamToNormalized,getParamNormalized(14),
+# setParamNormalized(15),setComponentHandler(16),createView(17)
+assert _ec_fields[14][0] == "getParamNormalized" and _ec_fields[15][0] == "setParamNormalized"
+_ec_fields[6] = ("setState", SetStateFunc)
+_ec_fields[14] = ("getParamNormalized", GetParamNormalizedFunc)
+_ec_fields[15] = ("setParamNormalized", SetParamNormalizedFunc)
+
+
+class IEditControllerVtblFull2(ctypes.Structure):
+    _fields_ = _ec_fields
+
+
+class IEditControllerObjFull2(ctypes.Structure):
+    _fields_ = [("lpVtbl", ctypes.POINTER(IEditControllerVtblFull2))]
+
+
+# IComponent::setState (slot 12) também era genérico -- usado no
+# load_state() do native_host.
+_comp_fields = list(step5.IComponentVtblFull2._fields_)
+assert _comp_fields[12][0] == "setState"
+_comp_fields[12] = ("setState", SetStateFunc)
+
+
+class IComponentVtblFull3(ctypes.Structure):
+    _fields_ = _comp_fields
+
+
+class IComponentObjFull3(ctypes.Structure):
+    _fields_ = [("lpVtbl", ctypes.POINTER(IComponentVtblFull3))]
+
+
+# Instala por cima (mesma ideia do monkeypatch do LiveAudioEngine lá
+# embaixo): quem castar com step4.IEditControllerObjFull ou
+# step5.IComponentObjFull2 passa a enxergar os slots tipados.
+step4.IEditControllerObjFull = IEditControllerObjFull2
+step4.IEditControllerVtblFull = IEditControllerVtblFull2
+step5.IComponentObjFull2 = IComponentObjFull3
+step5.IComponentVtblFull2 = IComponentVtblFull3
+
+
+# ═══════════════════════════════════════════════════════════════
 #  Event (pluginterfaces/vst/ivstevents.h)
 #
 #  struct Event {
