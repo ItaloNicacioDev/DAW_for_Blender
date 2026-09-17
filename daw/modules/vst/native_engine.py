@@ -33,6 +33,14 @@ if str(_VST_HOST_NATIVE_DIR) not in sys.path:
 
 from native_host import VST3PluginInstance  # noqa: E402
 
+# ─── Instala o open_editor() correto (thread principal + sem PostQuitMessage)
+try:
+    import native_editor as _native_editor
+    _native_editor.install()
+except Exception as _e:
+    import traceback
+    print(f"[DAW] native_editor não carregou — editor de plugin pode travar/fechar o Blender: {_e}")
+    traceback.print_exc()
 
 # Registro fraco de todas as pontes vivas -- só pra shutdown_worker()
 # conseguir fechar editores/threads abertos no unregister() do addon
@@ -207,6 +215,11 @@ def shutdown_worker() -> None:
     processo externo pra matar -- mas fecha qualquer editor de plugin
     (janela + thread + saída de áudio) que tenha ficado aberto, senão
     o Blender pode fechar com handles nativos pendurados."""
+    try:
+        import native_editor as _ne
+        _ne.close_all()
+    except Exception:
+        pass
     for bridge in list(_all_bridges):
         try:
             bridge.unload()
