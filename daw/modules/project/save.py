@@ -220,9 +220,7 @@ def serialize_project(scene) -> Dict[str, Any]:
     if pl_props is not None:
         data["modules"]["playlist"] = _serialize_playlist(pl_props)
  
-    # ════════════════════════════════════════════════════════════════
-    # NOVO: Serializar VST (adicionar estas linhas)
-    # ════════════════════════════════════════════════════════════════
+    # VST
     try:
         from ..vst import persistence as vst_persistence
         vst_data = vst_persistence.serialize_vst_state(scene)
@@ -230,7 +228,15 @@ def serialize_project(scene) -> Dict[str, Any]:
             data["modules"]["vst"] = vst_data
     except Exception as e:
         print(f"[DAW] Aviso ao serializar VST: {e}")
-    # ════════════════════════════════════════════════════════════════
+
+    # Automação (clips e curvas)
+    try:
+        from ..automation import store as automation_store
+        clips = automation_store.get_clips(scene)
+        if clips:
+            data["modules"]["automation"] = automation_store.clips_to_data(clips)
+    except Exception as e:
+        print(f"[DAW] Aviso ao serializar automação: {e}")
  
     return data
 
