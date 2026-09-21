@@ -1,8 +1,7 @@
 # modules/effects/reverb.py
 """
 Modelo de parâmetros do efeito Reverb (sem dependência de bpy).
-Processamento real de áudio acontece no motor C++ — ver chorus.py para
-a nota completa sobre a arquitetura.
+O processamento de áudio real está em dsp.py (numpy, offline).
 """
 from __future__ import annotations
 
