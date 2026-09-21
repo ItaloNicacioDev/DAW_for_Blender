@@ -82,7 +82,7 @@ user32.CreateWindowExW.argtypes = [
 user32.CreateWindowExW.restype = wintypes.HWND
 
 user32.DefWindowProcW.argtypes = [wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM]
-user32.DefWindowProcW.restype = ctypes.c_long
+user32.DefWindowProcW.restype = ctypes.c_ssize_t  # LRESULT tem tamanho de ponteiro (64-bit)
 
 user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.UpdateWindow.argtypes = [wintypes.HWND]
@@ -91,7 +91,7 @@ user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, ctyp
 user32.GetMessageW.restype = ctypes.c_int
 user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
 user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
-user32.DispatchMessageW.restype = ctypes.c_long
+user32.DispatchMessageW.restype = ctypes.c_ssize_t
 
 user32.DestroyWindow.argtypes = [wintypes.HWND]
 user32.PostQuitMessage.argtypes = [ctypes.c_int]
@@ -160,7 +160,7 @@ except (AttributeError, OSError):
     except AttributeError:
         pass
 
-WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM)
+WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM)
 
 
 class WNDCLASSW(ctypes.Structure):
