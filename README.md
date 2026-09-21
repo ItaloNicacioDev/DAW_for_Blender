@@ -1,111 +1,70 @@
-🎛️ Blender DAW
+# DAW for Blender  (beta)
 
+Uma DAW (estação de trabalho de áudio) que roda dentro do Blender: mixer,
+channel rack, patterns, piano roll, playlist, sampler, gravação, automação,
+efeitos, exportação e host de plugins VST3.
 
+> **Status: beta.** Veja "O que funciona / limitações" antes de usar em produção.
 
+## Requisitos
 
+- **Blender 4.5+**
+- **Windows** para plugins **VST3**. Em macOS/Linux o resto da DAW carrega
+  normalmente, mas o host VST fica desativado (o painel VST avisa).
+- Opcional, para gravação e monitor ao vivo: `sounddevice` (o Blender não o traz).
+  Instale no Python do Blender:
 
+  ```
+  <pasta_do_blender>/python/bin/python -m pip install sounddevice
+  ```
 
+  Alguns recursos do módulo Browser (miniaturas/preview) usam `soundfile` e `Pillow`.
 
+## Instalação
 
-A modular Digital Audio Workstation integrated directly into Blender.
+1. Gere o pacote: `python tools/build_release.py` (cria `dist/daw-<versão>.zip`),
+   ou compacte a pasta `daw/` inteira num `.zip`.
+2. Blender → Edit → Preferences → Add-ons → Install from Disk… → escolha o `.zip`.
+3. Ative **Blender DAW**. O workspace "DAW" e o Application Template são criados
+   automaticamente.
 
-📌 Overview
+## O que funciona / limitações
 
-Blender DAW is an experimental addon that transforms Blender into a modular Digital Audio Workstation (DAW), enabling music production directly inside the 3D environment.
+| Área | Estado |
+|---|---|
+| Transporte, timeline, playlist, patterns, piano roll, channel rack | Funcional |
+| Mixer (volume, pan, mute, solo, sends, buses, presets) | Funcional |
+| Salvar/carregar projeto (`.json`) | Mixer, patterns, piano roll, playlist, VST e **automação**. Channel rack, sampler e metrônomo ainda **não** entram no `.json` |
+| **Efeitos internos** (EQ, Compressor, Limiter, Reverb, Delay, Chorus, Flanger, Phaser, Distorção) | Processam áudio de verdade, mas de forma **offline (bounce)**, não em tempo real — veja abaixo |
+| **Automação** | Aplica `master.volume`, `channel.N.volume/pan/mute` (ou `volume`/`pan`/`mute` da faixa ativa) durante a reprodução. **Não** automatiza parâmetros de efeitos/instrumentos ainda |
+| VST3 | Só Windows. O plugin roda **dentro do processo do Blender**: se ele travar, o Blender fecha. Salve com frequência |
+| Módulo Browser | Ainda sem interface (desativado) |
 
-The goal is to unify audio production and visual workflows, creating a hybrid creative pipeline inside a single software ecosystem.
+### Como usar os efeitos internos
 
-The project includes:
+Os efeitos não rodam em tempo real durante o play. Em vez disso:
 
-🔊 A custom-built audio engine (currently experimental)
+1. Adicione os efeitos na cadeia da faixa (painel **Mixer → Inserts**) ou do
+   canal (painel **Efeitos**).
+2. Clique em **Aplicar Inserts a uma Strip** (ou **Aplicar Efeitos a uma Strip**)
+   e escolha a strip de áudio.
+3. O áudio processado vira uma nova strip (com a cauda de delay/reverb) e a
+   original é mutada. Nada é apagado.
 
-🧩 Modular architecture
+Os efeitos são feitos só com numpy (o Blender não traz scipy), em `modules/effects/dsp.py`.
 
-🎹 MIDI-based workflow
+## Testes
 
-🔄 External audio processing integration
+Os testes rodam **fora do Blender**:
 
-🏗️ Architecture
-Blender DAW
-│
-├── Core Audio Engine (Experimental)
-├── MIDI System (Piano Roll)
-├── Mixer Module
-├── Sampler Module
-├── Audio Converter
-│   └── AudioMax (External Plugin)
-└── UI Integration (Splash Session + Panels)
-🚀 Features
-Module	Status
-🎹 Piano Roll	🟡 In Development
-🎚️ Control Mixer	🟡 Partial
-🎛️ Sampler	🟡 Partial
-🔄 Audio Converter	🟢 Functional (via AudioMax)
-🔊 Custom Audio Engine	🔴 Experimental
-🖥️ Dedicated Splash Screen Session	🟢 Active
-🧩 Modular System	🟡 Expanding
-🔌 External Dependency
+```
+pip install numpy pytest
+python -m pytest
+```
 
-The Audio Converter module relies on:
+Cobrem o DSP, a persistência/aplicação da automação, o parser de versões do
+updater e a proteção contra falha de import do host VST fora do Windows.
 
-Audio Max for Blender 5.0
-🔗 https://github.com/ItaloNicacioDev/audio_max_for_blender5.0
+## Licença
 
-This plugin is responsible for auxiliary audio processing and optimization inside Blender.
-
-⚠️ Beta Notice
-
-This project is currently in active BETA development.
-
-Some features may not function properly.
-
-Certain modules may be incomplete or temporarily disabled.
-
-The custom audio engine is still under testing.
-
-Structural changes may occur between versions.
-
-Use in production environments is not recommended at this stage.
-
-🎯 Project Goals
-
-Integrate music production into Blender
-
-Develop a fully modular open-source DAW system
-
-Enable advanced synchronization between audio and animation
-
-Expand MIDI capabilities
-
-Explore experimental VST integration
-
-📦 Installation (Preview)
-
-Download or clone the repository
-
-Install it as a Blender addon
-
-Install the AudioMax plugin
-
-Enable both addons in
-Edit → Preferences → Add-ons
-
-🗺️ Roadmap
-
- Audio engine optimization
-
- Advanced MIDI implementation
-
- Multi-track export
-
- Experimental VST support
-
- Dedicated DAW-style workspace
-
- Performance improvements
-
-🤝 Contributing
-
-Contributions, feedback, and experimental ideas are welcome.
-
-This project aims to push the boundaries of Blender as a multimedia production platform.
+Veja `LICENSE.md` e `THIRD-PARTY-LICENSES.md` (samples de freewavesamples.com).
