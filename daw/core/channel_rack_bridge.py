@@ -341,6 +341,24 @@ def _read_peak_from_wav(filepath: str, seconds_into_strip: float) -> float:
         return 0.0
 
 
+def _beat_grid_peak_for_channel(scene, ch) -> Optional[float]:
+    """Pico atual do Beat Grid se `ch` for o canal do strip 'BeatGrid';
+    None se este canal não tem nada a ver com o Beat Grid."""
+    try:
+        from ..ui import beat_grid as _bg
+        info = _bg.beat_strip_info()
+    except Exception:
+        return None
+    if info is None:
+        return None
+    strip_channel, s_start, s_end, _sc = info
+    if strip_channel != getattr(ch, "vse_channel", 1):
+        return None
+    if not (s_start <= scene.frame_current < s_end):
+        return 0.0
+    return _bg.take_beat_peak()
+
+
 def _update_sample_meters(scene, rack) -> None:
     fps = scene.render.fps / max(scene.render.fps_base, 0.0001)
     if fps <= 0:
@@ -356,6 +374,17 @@ def _update_sample_meters(scene, rack) -> None:
 
         strip = _find_sound_strip(scene, getattr(ch, "vse_channel", 1), scene.frame_current)
         if strip is None or not getattr(strip, "sound", None):
+            # O Beat Grid toca por conta própria (não é strip de SOM), então
+            # o medidor do canal cujo "Canal VSE" é o do strip BeatGrid lê o
+            # pico dos hits dele.
+            beat_peak = _beat_grid_peak_for_channel(scene, ch)
+            if beat_peak is not None:
+                peak = max(0.0, min(1.0, beat_peak * max(0.0, getattr(ch, "volume", 1.0))))
+                if peak > ch.meter_level:
+                    ch.meter_level = peak
+                else:
+                    ch.meter_level *= METER_DECAY
+                continue
             ch.meter_level *= METER_DECAY
             if DAW_LOG_METERS and scene.frame_current % 24 == 0:
                 print(f"[DAW][meter] '{ch.name}' (vse_channel={getattr(ch, 'vse_channel', '?')}) "
