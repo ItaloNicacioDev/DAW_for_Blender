@@ -768,6 +768,54 @@ class DAW_OT_SaveMixerStripPreset(Operator):
         return {'FINISHED'} if ok else {'CANCELLED'}
 
 
+class DAW_OT_MixerApplyInsertsToStrip(Operator):
+    """Processa o áudio de uma strip pela cadeia de inserts da faixa (EQ,
+    Compressor, Reverb, VST...) e cria uma nova strip com o resultado."""
+    bl_idname = "daw.mixer_apply_inserts_to_strip"
+    bl_label = "Aplicar Inserts a uma Strip"
+    bl_description = (
+        "Processa (offline) o áudio de uma strip pelos inserts ativos da faixa "
+        "e insere o resultado como uma nova strip. A strip original é mutada"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    track_index: IntProperty(default=-1)
+    strip_name: StringProperty(name="Strip de Origem", default="")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        seq = context.scene.sequence_editor
+        col = self.layout.column()
+        if seq is not None and hasattr(seq, "strips_all"):
+            col.prop_search(self, "strip_name", seq, "strips_all", text="Strip")
+        elif seq is not None and hasattr(seq, "sequences_all"):
+            col.prop_search(self, "strip_name", seq, "sequences_all", text="Strip")
+        else:
+            col.prop(self, "strip_name")
+
+    def execute(self, context):
+        from . import vst_bridge
+        from ..effects.bounce import bounce_strip
+
+        track = _track_for(context, self.track_index)
+        if track is None:
+            self.report({'ERROR'}, "Nenhuma faixa selecionada")
+            return {'CANCELLED'}
+        if not vst_bridge.has_active_inserts(track):
+            self.report({'WARNING'}, "A faixa não tem inserts ativos (habilitados e sem bypass)")
+            return {'CANCELLED'}
+
+        ok, message = bounce_strip(
+            context, self.strip_name,
+            lambda audio, sr: vst_bridge.apply_inserts_to_audio(track, audio, sr),
+            suffix="fx", subdir="inserts",
+        )
+        self.report({'INFO'} if ok else {'ERROR'}, message)
+        return {'FINISHED'} if ok else {'CANCELLED'}
+
+
 classes = [
     # Faixas
     DAW_OT_AddMixerTrack,
@@ -803,4 +851,6 @@ classes = [
     # Presets de channel strip
     DAW_OT_ApplyMixerStripPreset,
     DAW_OT_SaveMixerStripPreset,
+    # Bounce da cadeia de inserts
+    DAW_OT_MixerApplyInsertsToStrip,
 ]
