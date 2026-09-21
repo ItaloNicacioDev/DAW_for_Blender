@@ -1,10 +1,11 @@
 bl_info = {
     "name": "Blender DAW",
     "author": "Italo Nicacio Dev ",
-    "version": (0, 18, 14, ' - beta'),
+    "version": (0, 18, 15),          
     "blender": (4, 5, 0),
     "location": "DAW Workspace",
-    "description": "DAW completa integrada ao Blender",
+    "description": "DAW integrada ao Blender (beta)",
+    "warning": "Beta. Plugins VST3 só funcionam no Windows.",
     "category": "Audio",
 }
 
@@ -63,7 +64,7 @@ _MODULE_NAMES = [
     "render",
     "export",
     "playlist",
-    "browser",
+    # "browser",  # ainda sem UI/operadores (arquivos são stubs) -- reativar quando estiver pronto
 ]
 
 _SUBMODULES = []  # preenchido em _import_submodules(): lista de (name, module | None)
