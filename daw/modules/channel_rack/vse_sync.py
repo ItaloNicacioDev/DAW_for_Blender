@@ -35,10 +35,16 @@ from typing import Iterable
 
 # Liga prints de diagnóstico no console do Blender (Window > Toggle
 # System Console, no Windows) toda vez que este módulo escreve nas
-# strips -- desligue (False) depois de confirmar que está tudo ok.
-DAW_LOG_VSE_SYNC = True
+# strips. Desligado por padrão: arrastar um fader dispara o callback a cada
+# movimento do mouse e enchia o console (dezenas de linhas por segundo).
+DAW_LOG_VSE_SYNC = False
 
 _warned_mono_pan: set = set()
+
+# Canais que já avisaram "nenhuma strip nesse canal do VSE". O aviso é útil
+# (canal configurado no número errado), mas só precisa aparecer UMA vez por
+# canal -- ele volta a aparecer se o problema sumir e reaparecer.
+_warned_no_strip: set = set()
 
 
 def _all_strips(seq_editor):
@@ -110,15 +116,18 @@ def find_vse_channel_with_sound(scene, rack, exclude_index: int = -1) -> "int | 
 def sync_channel_to_vse(channel, scene, any_solo_active: bool) -> None:
     """Escreve o estado de UM canal do Channel Rack nas strips de som
     reais do VSE que estão no `channel.vse_channel` dele."""
-    strips = _sound_strips_on_channel(scene, getattr(channel, "vse_channel", 1))
+    vse_channel = getattr(channel, "vse_channel", 1)
+    key = (getattr(channel, "name", "?"), vse_channel)
+    strips = _sound_strips_on_channel(scene, vse_channel)
     if not strips:
-        if DAW_LOG_VSE_SYNC:
-            print(f"[DAW][vse_sync] Canal '{channel.name}' (vse_channel="
-                  f"{getattr(channel, 'vse_channel', '?')}) -- NENHUMA strip de "
-                  f"som encontrada nesse canal do VSE. Confira se o número do "
-                  f"'Canal VSE' do canal bate com o canal onde a strip está na "
-                  f"timeline.")
+        if key not in _warned_no_strip:
+            _warned_no_strip.add(key)
+            print(f"[DAW][vse_sync] Canal '{key[0]}' (vse_channel={vse_channel}) -- "
+                  f"nenhuma strip de som encontrada nesse canal do VSE. Confira se o "
+                  f"número do 'Canal VSE' do canal bate com o canal onde a strip está "
+                  f"na timeline. (Este aviso aparece uma vez por canal.)")
         return
+    _warned_no_strip.discard(key)
 
     # Solo: se QUALQUER canal do rack está em solo, todo canal que não
     # está em solo fica efetivamente mudo -- é assim que solo funciona
