@@ -27,20 +27,40 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:
     from .vst import VSTProgramParameter, VSTProgramType
 
-_VST_HOST_NATIVE_DIR = Path(__file__).resolve().parent.parent / "vst_host_native"
-if str(_VST_HOST_NATIVE_DIR) not in sys.path:
-    sys.path.insert(0, str(_VST_HOST_NATIVE_DIR))
+# O host VST3 nativo usa ctypes.WINFUNCTYPE / Win32 no topo dos módulos, o que
+# NÃO existe em macOS/Linux. Antes, o import incondicional abaixo derrubava o
+# pacote `vst` inteiro fora do Windows — e, como o mixer importa
+# `vst.properties`, derrubava o mixer junto. Agora o host só é importado no
+# Windows; nas outras plataformas o addon carrega normalmente e o VST fica
+# indisponível (is_available() == False, com mensagem explicando).
+_IS_WINDOWS = sys.platform == "win32"
+_HOST_IMPORT_ERROR: Optional[str] = None
 
-from native_host import VST3PluginInstance  # noqa: E402
+VST3PluginInstance = None  # type: ignore[assignment]
+_native_editor = None
 
-# ─── Instala o open_editor() correto (thread principal + sem PostQuitMessage)
-try:
-    import native_editor as _native_editor
-    _native_editor.install()
-except Exception as _e:
-    import traceback
-    print(f"[DAW] native_editor não carregou — editor de plugin pode travar/fechar o Blender: {_e}")
-    traceback.print_exc()
+if _IS_WINDOWS:
+    _VST_HOST_NATIVE_DIR = Path(__file__).resolve().parent.parent / "vst_host_native"
+    if str(_VST_HOST_NATIVE_DIR) not in sys.path:
+        sys.path.insert(0, str(_VST_HOST_NATIVE_DIR))
+
+    try:
+        from native_host import VST3PluginInstance  # noqa: E402
+    except Exception as _e:  # pragma: no cover - depende do Windows
+        import traceback
+        _HOST_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
+        print(f"[DAW] Host VST3 nativo não carregou — VST indisponível: {_HOST_IMPORT_ERROR}")
+        traceback.print_exc()
+
+    # ─── Instala o open_editor() correto (thread principal + sem PostQuitMessage)
+    if VST3PluginInstance is not None:
+        try:
+            import native_editor as _native_editor
+            _native_editor.install()
+        except Exception as _e:  # pragma: no cover - depende do Windows
+            import traceback
+            print(f"[DAW] native_editor não carregou — editor de plugin pode travar/fechar o Blender: {_e}")
+            traceback.print_exc()
 
 # Registro fraco de todas as pontes vivas -- só pra shutdown_worker()
 # conseguir fechar editores/threads abertos no unregister() do addon
@@ -65,6 +85,8 @@ class NativeVST3Bridge:
     # ------------------------------------------------------------------
 
     def load(self, path: str | Path, vst_type: "VSTProgramType") -> None:
+        if VST3PluginInstance is None:
+            raise RuntimeError(install_instructions())
         self.plugin_name = Path(path).stem
         self.vst_type = vst_type
         self._instance = VST3PluginInstance(str(path), sample_rate=self.sample_rate, block_size=self.block_size)
@@ -197,15 +219,17 @@ def is_available() -> bool:
     ctypes -- não depende de worker externo, Python embutido, nem
     nenhuma instalação extra do usuário. Só existe pro Windows (usa
     ctypes.windll e a API Win32 direto)."""
-    return sys.platform == "win32"
+    return _IS_WINDOWS and VST3PluginInstance is not None
 
 
 def install_instructions() -> str:
+    if _HOST_IMPORT_ERROR:
+        return f"O host VST3 nativo falhou ao carregar ({_HOST_IMPORT_ERROR}). Veja o console do Blender."
     return (
-        "O motor de VST nativo (daw/modules/vst_host_native) só funciona "
-        "no Windows -- ele fala diretamente com a API VST3 dos plugins e "
-        "com o Win32 via ctypes, sem processo externo nem dependências "
-        "pra instalar."
+        "O suporte a VST (host VST3 nativo) só funciona no Windows -- ele fala "
+        "diretamente com a API VST3 dos plugins e com o Win32 via ctypes, sem "
+        "processo externo nem dependências pra instalar. Em macOS/Linux o resto "
+        "da DAW funciona normalmente, mas plugins VST não podem ser carregados."
     )
 
 
