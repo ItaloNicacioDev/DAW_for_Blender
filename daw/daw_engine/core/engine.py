@@ -47,6 +47,22 @@ from .constants import EngineState, DEFAULT_BPM
 from ..mixer.mixer import Mixer
 
 
+@bpy.app.handlers.persistent
+def _engine_frame_change_post(scene, depsgraph=None):
+    """[FIX MEDIDOR PARADO] Handler de frame PERSISTENTE.
+
+    Antes o handler registrado era `self._update` (método ligado, sem
+    @persistent). O Blender REMOVE todo handler não-persistente a cada
+    load de arquivo (File > New > template DAW, abrir .blend, etc.), e
+    como `Engine._is_running` continua True, `start()` nunca registrava
+    de novo -- a ponte do Channel Rack (`channel_rack_bridge.tick`)
+    parava de rodar e os medidores ficavam mortos. Este wrapper de
+    módulo é decorado com @persistent, então sobrevive ao load."""
+    inst = Engine._instance
+    if inst is not None:
+        inst._update(scene, depsgraph)
+
+
 class Engine:
     """
     Singleton do motor DAW.
@@ -104,7 +120,7 @@ class Engine:
 
         # Guardamos a referência da *função* para poder removê-la depois
         # (bpy.app.handlers.append retorna None, não a função)
-        self._frame_handler = self._update
+        self._frame_handler = _engine_frame_change_post
 
         LOGGER.info("Engine", f"Motor DAW inicializado — BPM padrão: {DEFAULT_BPM}")
 
@@ -119,6 +135,9 @@ class Engine:
         """
         if self._is_running:
             LOGGER.warning("Engine", "start() chamado mas motor já está rodando.")
+            # Reanexa o handler se ele tiver sido removido (ex.: por um load de arquivo).
+            if self._frame_handler not in bpy.app.handlers.frame_change_post:
+                bpy.app.handlers.frame_change_post.append(self._frame_handler)
             return
 
         self.clock.start()
