@@ -29,7 +29,7 @@ Uso no motor de áudio (fora do Blender), a partir do modelo puro:
     chain.add_effect("REVERB")
 
     for slot in chain.active_slots():
-        apply_effect(slot.effect_type, slot.params_dict)  # no motor C++
+        dsp.process_effect(slot.effect_type, audio, sr, slot.params_dict)  # ver dsp.py
 
 Uso a partir da cena do Blender (RNA), dentro de um Operator/Panel:
     rack_props = context.scene.daw_effects
