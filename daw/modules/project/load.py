@@ -185,6 +185,17 @@ def _deserialize_playlist(pl_props, data: Dict[str, Any]) -> None:
     pl_props.playback.metronome_enabled = pb.get("metronome_enabled", False)
 
 
+def _restore_automation(scene, modules: Dict[str, Any]) -> None:
+    """Restaura os clips de automação (se o projeto tiver)."""
+    if "automation" not in modules:
+        return
+    try:
+        from ..automation import store as automation_store
+        automation_store.replace_clips(scene, automation_store.clips_from_data(modules["automation"]))
+    except Exception as e:
+        print(f"[DAW] Aviso ao restaurar automação: {e}")
+
+
 def deserialize_project(scene, data: Dict[str, Any]) -> bool:
     """Restaura o estado completo da DAW a partir de um dicionário."""
     modules = data.get("modules", {})
@@ -204,6 +215,8 @@ def deserialize_project(scene, data: Dict[str, Any]) -> bool:
     pl_props = getattr(scene, "daw_playlist", None)
     if pl_props is not None and "playlist" in modules:
         _deserialize_playlist(pl_props, modules["playlist"])
+
+    _restore_automation(scene, modules)
 
     # Metadados
     if "project_name" in data:
@@ -248,15 +261,15 @@ def load_project(filepath: str, context: bpy.context) -> bool:
         if pl_props is not None:
             _deserialize_playlist(pl_props, modules["playlist"])
     
-    # ════════════════════════════════════════════════════════════════
-    # NOVO: Restaurar VST (adicionar estas linhas)
-    # ════════════════════════════════════════════════════════════════
+    # VST
     if "vst" in modules:
         try:
             from ..vst import persistence as vst_persistence
             vst_persistence.restore_vst_state(scene, modules["vst"], context)
         except Exception as e:
             print(f"[DAW] Aviso ao restaurar VST: {e}")
-    # ════════════════════════════════════════════════════════════════
+
+    # Automação
+    _restore_automation(scene, modules)
     
     return True
