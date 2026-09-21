@@ -15,12 +15,9 @@ que `ui.py` já esperava (os `bl_idname` usados lá: daw.add_automation_clip,
 daw.generate_automation, daw.clear_automation_curve,
 daw.add_automation_point, daw.remove_automation_point).
 
-Armazenamento: os `AutomationClip` ficam num registro em memória por
-cena (`_clips_by_scene`) -- ainda não existe uma ponte com
-`daw_engine/core/timeline.py` real (o Scheduler ainda não lê esses
-clips durante a reprodução, igual ao Channel Rack). Isso é suficiente
-pra UI funcionar de ponta a ponta (criar clip, gerar/editar curva)
-enquanto essa ponte não é construída à parte.
+Armazenamento: ver `store.py` (cache em memória + JSON na própria cena,
+que vai junto com o .blend). Reprodução: ver `runtime.py` -- um handler
+de `frame_change_pre` aplica os valores das curvas no mixer.
 """
 from __future__ import annotations
 
@@ -28,19 +25,10 @@ import bpy
 from bpy.props import EnumProperty, FloatProperty, StringProperty
 from bpy.types import Operator
 
-from . import generators
+from . import generators, runtime
 from .clips import AutomationClip
 from .interpolation import InterpolationMode
-
-
-# ------------------------------------------------------------------
-# Armazenamento em memória (por cena) dos clips de automação
-# ------------------------------------------------------------------
-_clips_by_scene: dict = {}   # {scene.name: [AutomationClip, ...]}
-
-
-def get_clips(scene) -> list:
-    return _clips_by_scene.setdefault(scene.name, [])
+from .store import get_clips, save_clips
 
 
 def get_active_clip(scene, props):
@@ -85,12 +73,13 @@ class DAW_OT_AddAutomationClip(Operator):
         start = _playhead_seconds(scene)
 
         clip = AutomationClip(name=self.target_param, start=start, duration=self.duration)
-        clip.add_curve(self.target_param, 0.0, 1.0, 0.5)
+        clip.add_curve(self.target_param, *runtime.default_range(self.target_param))
 
         clips = get_clips(scene)
         clips.append(clip)
         props.selected_clip_index = len(clips) - 1
         props.active_param = self.target_param
+        save_clips(scene)
 
         self.report({'INFO'}, f"Clip de automação '{self.target_param}' criado em {start:.2f}s")
         _tag_redraw(context)
@@ -128,7 +117,9 @@ class DAW_OT_GenerateAutomation(Operator):
             clips.append(clip)
             props.selected_clip_index = len(clips) - 1
 
-        curve = clip.get_curve(self.target_param) or clip.add_curve(self.target_param, 0.0, 1.0, 0.5)
+        curve = clip.get_curve(self.target_param) or clip.add_curve(
+            self.target_param, *runtime.default_range(self.target_param)
+        )
         curve.clear()
 
         duration = clip.duration
@@ -146,6 +137,7 @@ class DAW_OT_GenerateAutomation(Operator):
             curve.add_point(pt.time, pt.value, pt.mode)
 
         props.active_param = self.target_param
+        save_clips(scene)
         self.report({'INFO'}, f"{self.generator_type} gerado para '{self.target_param}'")
         _tag_redraw(context)
         return {'FINISHED'}
@@ -172,6 +164,7 @@ class DAW_OT_ClearAutomationCurve(Operator):
             return {'CANCELLED'}
 
         curve.clear()
+        save_clips(scene)
         _tag_redraw(context)
         return {'FINISHED'}
 
@@ -195,13 +188,16 @@ class DAW_OT_AddAutomationPoint(Operator):
             self.report({'WARNING'}, "Nenhum clip de automação selecionado")
             return {'CANCELLED'}
 
-        curve = clip.get_curve(props.active_param) or clip.add_curve(props.active_param, 0.0, 1.0, 0.5)
+        curve = clip.get_curve(props.active_param) or clip.add_curve(
+            props.active_param, *runtime.default_range(props.active_param)
+        )
 
         time = _playhead_seconds(scene) - clip.start
         value = curve.evaluate(time) if len(curve) else curve.default_val
         mode = InterpolationMode(props.default_interpolation)
         curve.add_point(time, value, mode)
 
+        save_clips(scene)
         _tag_redraw(context)
         return {'FINISHED'}
 
@@ -230,6 +226,7 @@ class DAW_OT_RemoveAutomationPoint(Operator):
         nearest_idx = min(range(len(curve.points)), key=lambda i: abs(curve.points[i].time - time))
         curve.remove_point(nearest_idx)
 
+        save_clips(scene)
         _tag_redraw(context)
         return {'FINISHED'}
 
