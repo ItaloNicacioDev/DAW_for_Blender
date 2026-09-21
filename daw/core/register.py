@@ -89,7 +89,11 @@ class DAW_OT_LoadAudio(bpy.types.Operator):
 
         try:
             # Blender 4.4+: `strips`. Versões anteriores: `sequences`.
-            strips = getattr(seq, "strips", None) or seq.sequences
+            # [FIX] NÃO usar `getattr(...) or seq.sequences`: uma coleção
+            # vazia é falsy, então com o VSE vazio (primeiro clip) caía em
+            # `seq.sequences`, que não existe no Blender 5.x -> AttributeError
+            # e nenhum strip era criado.
+            strips = seq.strips if hasattr(seq, "strips") else seq.sequences
             strips.new_sound(
                 name=audio_name,
                 filepath=self.filepath,
