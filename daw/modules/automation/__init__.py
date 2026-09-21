@@ -11,6 +11,8 @@ Arquitetura:
     curves.py         — AutomationCurve: lista de ControlPoints + evaluate(t)
     clips.py          — AutomationClip: curva posicionada na timeline com start/duration
     generators.py     — fábrica de curvas comuns (fade, LFO, ramp, step)
+    store.py          — armazenamento dos clips por cena (cache + JSON na cena)
+    runtime.py        — aplica a automação no mixer durante a reprodução
     utils.py          — helpers: snap, sample_curve, apply_params_to_mixer
     properties.py     — PropertyGroups do Blender (estado da UI)
     operators.py      — Operators do Blender (ações de edição)
