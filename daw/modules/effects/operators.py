@@ -273,6 +273,61 @@ class DAW_OT_RemoveEQBand(Operator):
         return {'FINISHED'}
 
 
+class DAW_OT_EffectsApplyToStrip(Operator):
+    """Processa o áudio de uma strip pela cadeia de efeitos do canal e cria
+    uma nova strip com o resultado."""
+    bl_idname = "daw.effects_apply_to_strip"
+    bl_label = "Aplicar Efeitos a uma Strip"
+    bl_description = (
+        "Processa (offline) o áudio de uma strip pelos efeitos ativos deste canal "
+        "e insere o resultado como uma nova strip. A strip original é mutada"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    channel_index: IntProperty(default=-1)
+    chain_index: IntProperty(default=-1)
+    strip_name: StringProperty(name="Strip de Origem", default="")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        seq = context.scene.sequence_editor
+        col = self.layout.column()
+        if seq is not None and hasattr(seq, "strips_all"):
+            col.prop_search(self, "strip_name", seq, "strips_all", text="Strip")
+        elif seq is not None and hasattr(seq, "sequences_all"):
+            col.prop_search(self, "strip_name", seq, "sequences_all", text="Strip")
+        else:
+            col.prop(self, "strip_name")
+
+    def execute(self, context):
+        from . import dsp
+        from .bounce import bounce_strip
+
+        chain = _chain_for(context, self.channel_index, self.chain_index)
+        slots = [
+            {
+                "effect_type": s.effect_type,
+                "enabled": bool(s.enabled),
+                "bypass": bool(s.bypass),
+                "params": slot_params_to_dict(s),
+            }
+            for s in chain.slots
+        ]
+        if not any(s["enabled"] and not s["bypass"] for s in slots):
+            self.report({'WARNING'}, "Este canal não tem efeitos ativos (habilitados e sem bypass)")
+            return {'CANCELLED'}
+
+        ok, message = bounce_strip(
+            context, self.strip_name,
+            lambda audio, sr: dsp.apply_chain(slots, audio, sr),
+            suffix="fx", subdir="effects",
+        )
+        self.report({'INFO'} if ok else {'ERROR'}, message)
+        return {'FINISHED'} if ok else {'CANCELLED'}
+
+
 classes = [
     DAW_OT_AddEffect,
     DAW_OT_RemoveEffect,
@@ -283,4 +338,5 @@ classes = [
     DAW_OT_SaveEffectPreset,
     DAW_OT_AddEQBand,
     DAW_OT_RemoveEQBand,
+    DAW_OT_EffectsApplyToStrip,
 ]
