@@ -1,4 +1,4 @@
-# daw_engine/core/channel_rack_bridge.py
+# daw/core/channel_rack_bridge.py
 """
 Ponte entre o Channel Rack (scene.daw_channel_rack, módulo de UI em
 daw/modules/channel_rack/) e o motor de áudio de verdade (Engine.mixer,
