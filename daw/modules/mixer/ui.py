@@ -349,6 +349,10 @@ class DAW_PT_MixerInserts(Panel):
         op.track_index = mixer.active_track_index
         op.direction = "DOWN"
 
+        if len(track.inserts) > 0:
+            op = layout.operator("daw.mixer_apply_inserts_to_strip", icon='SOUND')
+            op.track_index = mixer.active_track_index
+
         if not (0 <= track.active_insert_index < len(track.inserts)):
             return
 
