@@ -9,7 +9,7 @@ Responsabilidade:
 
     Os parâmetros aqui definidos são apenas os valores iniciais de um
     InsertSlot.params; o processamento de áudio real de cada efeito é
-    responsabilidade do módulo daw.modules.effects (ou do motor C++), este
+    responsabilidade do módulo daw.modules.effects (ver effects/dsp.py), este
     arquivo só descreve o que existe e como inicializar/desenhar cada um.
 """
 from __future__ import annotations
