@@ -22,6 +22,7 @@ import gpu
 import blf
 import math
 import struct
+import time
 import aud
 from gpu_extras.batch import batch_for_shader
 from bpy.props import (BoolProperty, FloatProperty, IntProperty,
@@ -369,10 +370,76 @@ def _init_rows(state):
 _seq_running = False
 _seq_step    = 0
 
+# ── Sincronia com o strip "BeatGrid" do VSE ──────────────────────
+# [FIX] Antes o sequenciador tocava assim que o play começava, em
+# free-run, ignorando ONDE o strip está na timeline. Agora, com a
+# timeline tocando, o beat só soa enquanto o playhead está dentro do
+# strip, e o step é calculado a partir do início do strip.
+_last_abs_step = None          # último step (absoluto) disparado dentro do strip
+_clock         = {"frame": None, "t": 0.0}   # âncora p/ interpolar entre frames
+_strip_cache   = {"t": -1.0, "data": None}
+_beat_peak     = 0.0           # pico dos últimos hits (lido pela ponte do meter)
+
+
+def take_beat_peak() -> float:
+    """Devolve o pico dos hits desde a última leitura e zera (o decaimento
+    fica por conta de quem lê -- ver channel_rack_bridge)."""
+    global _beat_peak
+    p, _beat_peak = _beat_peak, 0.0
+    return p
+
+
+def beat_strip_info():
+    """(canal, frame_inicio, frame_fim, cena_do_sequencer) do strip 'BeatGrid',
+    ou None. Cache de 0.2 s pra não varrer o VSE a cada tick."""
+    now = time.perf_counter()
+    if now - _strip_cache["t"] < 0.2:
+        return _strip_cache["data"]
+    data = None
+    try:
+        scene = _sequencer_scene(bpy.context)
+        seq = scene.sequence_editor
+        if seq is not None:
+            all_strips = getattr(seq, "strips_all", None)
+            if all_strips is None:
+                all_strips = getattr(seq, "sequences_all", [])
+            for st in all_strips:
+                if st.name == "BeatGrid":
+                    data = (st.channel, st.frame_final_start, st.frame_final_end, scene)
+                    break
+    except Exception:
+        data = None
+    _strip_cache["t"] = now
+    _strip_cache["data"] = data
+    return data
+
+
+def _timeline_playing() -> bool:
+    try:
+        for win in bpy.context.window_manager.windows:
+            if win.screen.is_animation_playing:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _fire_row_hits(bg, cur):
+    global _beat_peak
+    has_solo = any(r.solo for r in bg.rows)
+    for row in bg.rows:
+        if row.muted:
+            continue
+        if has_solo and not row.solo:
+            continue
+        if row.get_step(cur):
+            play_drum(row.drum_type, row.volume)
+            _beat_peak = max(_beat_peak, float(row.volume))
+
 
 def _seq_tick():
     """Callback do bpy.app.timers — dispara sons do step atual e agenda o próximo."""
-    global _seq_running, _seq_step
+    global _seq_running, _seq_step, _last_abs_step
 
     if not _seq_running:
         return None  # retornar None cancela o timer
@@ -383,26 +450,42 @@ def _seq_tick():
         bpm     = max(1.0, bg.bpm)
         n_steps = max(1, bg.steps)
         swing   = bg.swing
-
-        cur = _seq_step % n_steps
-
         step_dur = 60.0 / bpm / 4.0
 
-        # Swing: steps ímpares atrasam ligeiramente
+        # ── Modo sincronizado: timeline tocando + strip BeatGrid existe ──
+        info = beat_strip_info() if _timeline_playing() else None
+        if info is not None:
+            _ch, s_start, s_end, sscene = info
+            fps   = sscene.render.fps / max(sscene.render.fps_base, 0.0001)
+            frame = sscene.frame_current
+            now   = time.perf_counter()
+            if _clock["frame"] != frame:
+                _clock["frame"], _clock["t"] = frame, now
+            # interpola entre dois frames pra não ter jitter de 1/fps
+            pos = frame + min(now - _clock["t"], 1.0 / fps) * fps
+
+            if not (s_start <= pos < s_end):
+                _last_abs_step = None      # fora do strip: silêncio
+                if bg.current_step != -1:
+                    bg.current_step = -1
+                return 0.004
+
+            elapsed = (pos - s_start) / fps
+            abs_step = int(elapsed / step_dur)
+            cur = abs_step % n_steps
+            swing_delay = step_dur * swing if cur % 2 == 1 else 0.0
+            if abs_step == _last_abs_step or (elapsed - abs_step * step_dur) < swing_delay:
+                return 0.004
+            _last_abs_step = abs_step
+            bg.current_step = cur
+            _fire_row_hits(bg, cur)
+            return 0.004
+
+        # ── Modo livre (preview pelo botão PLAY do Beat Grid) ──
+        cur = _seq_step % n_steps
         swing_delay = step_dur * swing if cur % 2 == 1 else 0.0
-
         bg.current_step = cur
-
-        has_solo = any(r.solo for r in bg.rows)
-
-        for row in bg.rows:
-            if row.muted:
-                continue
-            if has_solo and not row.solo:
-                continue
-            if row.get_step(cur):
-                play_drum(row.drum_type, row.volume)
-
+        _fire_row_hits(bg, cur)
         _seq_step = (cur + 1) % n_steps
         return max(0.001, step_dur + swing_delay)
 
@@ -412,19 +495,22 @@ def _seq_tick():
 
 
 def start_sequencer():
-    global _seq_running, _seq_step
+    global _seq_running, _seq_step, _last_abs_step
     if _seq_running:
         return
     _seq_running = True
     _seq_step    = 0
+    _last_abs_step = None
+    _clock["frame"] = None
     if not bpy.app.timers.is_registered(_seq_tick):
         bpy.app.timers.register(_seq_tick, first_interval=0.0)
     print("[BeatGrid] Sequenciador iniciado")
 
 
 def stop_sequencer():
-    global _seq_running
+    global _seq_running, _last_abs_step
     _seq_running = False
+    _last_abs_step = None
     try:
         bpy.context.scene.beat_grid.current_step = -1
     except Exception:
@@ -807,6 +893,7 @@ def _add_beat_strip(context):
             return
 
         strip.color = (0.82, 0.38, 0.12)
+        _strip_cache["t"] = -1.0
         print(f"[BeatGrid] Strip '{name}' criado no canal {ch} ({total_frames} frames) "
               f"na cena '{scene.name}' ✅")
         _redraw_sequencers(context)
