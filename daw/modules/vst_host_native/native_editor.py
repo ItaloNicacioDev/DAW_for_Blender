@@ -147,10 +147,14 @@ class EditorSession:
 
         def _proc(hwnd, msg, wparam, lparam):
             if msg == step4.WM_CLOSE:
-                # NÃO desmonta aqui: estamos dentro do dispatch do
-                # Blender. Só marca -- o timer fecha com calma.
+                # NÃO destrói a janela aqui. O VST3 exige que
+                # IPlugView::removed() rode ENQUANTO o HWND pai ainda
+                # existe -- destruir antes faz o plugin (JUCE/VSTGUI)
+                # mexer em janelas-filhas já mortas e derrubar o Blender.
+                # Só esconde e marca; o timer chama session.close(), que
+                # faz removed() -> setFrame(NULL) -> release -> DestroyWindow.
                 self._want_close = True
-                user32.DestroyWindow(hwnd)
+                user32.ShowWindow(hwnd, 0)  # SW_HIDE
                 return 0
             if msg == step4.WM_DESTROY:
                 # Nada de PostQuitMessage() -- isso fecharia o Blender.
@@ -319,6 +323,13 @@ class EditorSession:
         if self.view_vtbl is not None:
             try:
                 self.view_vtbl.removed(self.view_self)
+            except Exception:
+                pass
+            try:
+                # Desconecta o frame ANTES de liberar a view: senão o
+                # plugin pode chamar o HostPlugFrame (já liberado pelo
+                # Python) durante o release -> use-after-free.
+                self.view_vtbl.setFrame(self.view_self, None)
             except Exception:
                 pass
             try:
