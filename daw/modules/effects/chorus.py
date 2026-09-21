@@ -2,9 +2,9 @@
 """
 Modelo de parâmetros do efeito Chorus (sem dependência de bpy).
 
-O processamento de áudio real acontece no motor C++ (core/engine.py via
-daw_bridge); esta classe representa apenas o conjunto de parâmetros que é
-enviado ao motor e espelhado pela UI (ver properties.py / ui.py).
+O processamento de áudio real está em dsp.py (numpy, offline); esta classe
+representa apenas o conjunto de parâmetros, espelhado pela UI (ver
+properties.py / ui.py).
 """
 from __future__ import annotations
 
