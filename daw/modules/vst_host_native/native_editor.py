@@ -104,6 +104,48 @@ user32.PostMessageW.restype = wintypes.BOOL
 kernel32.GetLastError.argtypes = []
 kernel32.GetLastError.restype = wintypes.DWORD
 
+# ── Guarda do contexto OpenGL do Blender ─────────────────────────
+# Plugins JUCE/VSTGUI com renderer OpenGL ativam/desativam contextos
+# WGL na thread que chama createView()/attached(). Se saírem com a
+# thread SEM contexto (ou com o contexto do plugin), o Blender continua
+# achando que o contexto dele está ativo e o próximo draw da UI
+# (immVertex2f -> buffer mapeado = NULL) dá ACCESS_VIOLATION escrevendo
+# no endereço 0 -- é exatamente o crash do blender_crash.txt.
+try:
+    _opengl32 = ctypes.windll.opengl32
+    _opengl32.wglGetCurrentDC.argtypes = []
+    _opengl32.wglGetCurrentDC.restype = ctypes.c_void_p
+    _opengl32.wglGetCurrentContext.argtypes = []
+    _opengl32.wglGetCurrentContext.restype = ctypes.c_void_p
+    _opengl32.wglMakeCurrent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _opengl32.wglMakeCurrent.restype = wintypes.BOOL
+except Exception:  # pragma: no cover
+    _opengl32 = None
+
+_saved_gl = [None, None]  # (hdc, hglrc) do Blender
+
+
+def _gl_save():
+    if _opengl32 is None:
+        return
+    try:
+        dc, rc = _opengl32.wglGetCurrentDC(), _opengl32.wglGetCurrentContext()
+        if dc and rc:
+            _saved_gl[0], _saved_gl[1] = dc, rc
+    except Exception:
+        pass
+
+
+def _gl_restore():
+    if _opengl32 is None or not _saved_gl[1]:
+        return
+    try:
+        if _opengl32.wglGetCurrentContext() != _saved_gl[1]:
+            _opengl32.wglMakeCurrent(_saved_gl[0], _saved_gl[1])
+    except Exception:
+        pass
+
+
 ERROR_CLASS_ALREADY_EXISTS = 1410
 SWP_NOMOVE = 0x0002
 SWP_NOZORDER = 0x0004
@@ -207,7 +249,9 @@ class EditorSession:
         except Exception:
             pass
 
+        _gl_save()
         view_ptr_raw = inst._ctrl_full_vtbl.createView(inst._ctrl_self, step4.kEditor)
+        _gl_restore()
         if not view_ptr_raw:
             return False
 
@@ -237,6 +281,7 @@ class EditorSession:
         self.view_vtbl.setFrame(self.view_self, self.frame.ptr)
 
         hr = self.view_vtbl.attached(self.view_self, ctypes.c_void_p(self.hwnd), step4.kPlatformTypeHWND)
+        _gl_restore()
         if hr != step1.kResultOk:
             user32.DestroyWindow(self.hwnd)
             self.hwnd = None
@@ -251,6 +296,7 @@ class EditorSession:
 
         user32.ShowWindow(self.hwnd, step4.SW_SHOWNORMAL)
         user32.UpdateWindow(self.hwnd)
+        _gl_restore()
         try:
             user32.SetForegroundWindow(self.hwnd)
         except Exception:
@@ -366,6 +412,7 @@ class EditorSession:
 
         if self in _sessions:
             _sessions.remove(self)
+        _gl_restore()
 
     def request_close(self):
         self._want_close = True
@@ -378,6 +425,8 @@ class EditorSession:
 # ═══════════════════════════════════════════════════════════════
 
 def tick() -> float:
+    if _sessions:
+        _gl_restore()
     for session in list(_sessions):
         if not session.alive():
             try:
