@@ -16,8 +16,8 @@ Responsabilidade:
 
     Os valores padrão de `params` para cada tipo de efeito vêm do
     catálogo em `effects.py` (`default_params_for`); o processamento de
-    áudio real de cada efeito é responsabilidade de outro módulo (o
-    processamento em si, não a UI/estado) — aqui só vive o estado.
+    áudio real de cada efeito está em `effects/dsp.py` (ver
+    `vst_bridge.apply_inserts_to_audio`) — aqui só vive o estado.
 
 Arquitetura (ver mixer/__init__.py para o mapa completo do módulo):
     tracks.py   — MixerTrack: modelo puro de uma faixa
