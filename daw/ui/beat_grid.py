@@ -448,7 +448,8 @@ def stop_sequencer():
 _was_playing = False
 
 
-def _beat_grid_playback_pre(scene):
+@bpy.app.handlers.persistent
+def _beat_grid_playback_pre(scene, depsgraph=None):
     """
     Handler de render_pre / frame_change_pre:
     quando a timeline começa a tocar, inicia o sequenciador.
@@ -462,6 +463,10 @@ def _beat_grid_playback_pre(scene):
             if len(bg.rows) > 0:  # só inicia se Beat Grid tem linhas configuradas
                 bg.playing = True
                 start_sequencer()
+                # [FIX] Antes o strip só era criado clicando no PLAY da janela
+                # flutuante; tocar pela timeline/beat grid "ativo" não criava nada.
+                if not _beat_strip_exists(bpy.context):
+                    _add_beat_strip(bpy.context)
         elif not is_playing and _was_playing:
             # Timeline parou
             bg = scene.beat_grid
@@ -681,10 +686,49 @@ def _beat_grid_redraw():
 #  - Remove strip antigo antes de recriar (garante canal correto)
 # ═══════════════════════════════════════════════════════════════
 
+def _sequencer_scene(context):
+    """[FIX BLENDER 5.x] O VSE usa `context.sequencer_scene` (por workspace),
+    que pode ser DIFERENTE de `context.scene`. Criar o strip em
+    `context.scene` põe ele numa cena que o Sequencer não está mostrando.
+    Também cobre a janela flutuante do Beat Grid, onde o workspace não é o DAW."""
+    sc = getattr(context, "sequencer_scene", None)
+    if sc is not None:
+        return sc
+    try:
+        for win in context.window_manager.windows:
+            if any(a.type == 'SEQUENCE_EDITOR' for a in win.screen.areas):
+                sc = getattr(win.workspace, "sequencer_scene", None)
+                if sc is not None:
+                    return sc
+    except Exception:
+        pass
+    return context.scene
+
+
+def _redraw_sequencers(context):
+    try:
+        for win in context.window_manager.windows:
+            for area in win.screen.areas:
+                if area.type == 'SEQUENCE_EDITOR':
+                    area.tag_redraw()
+    except Exception:
+        pass
+
+
+def _beat_strip_exists(context) -> bool:
+    seq = _sequencer_scene(context).sequence_editor
+    if seq is None:
+        return False
+    all_strips = getattr(seq, "strips_all", None)
+    if all_strips is None:
+        all_strips = getattr(seq, "sequences_all", [])
+    return any(s.name == "BeatGrid" for s in all_strips)
+
+
 def _add_beat_strip(context):
     """Cria ou recria o strip COLOR no Sequencer representando o padrão de bateria."""
-    scene = context.scene
-    bg    = scene.beat_grid
+    scene = _sequencer_scene(context)
+    bg    = context.scene.beat_grid
     bg.strip_error = ""  # limpa erro anterior
 
     try:
@@ -699,7 +743,9 @@ def _add_beat_strip(context):
         total_frames = max(1, int(beat_frames * n_steps / 4))
 
         # ── Remove strip antigo se existir ──
-        strips_attr = getattr(seq, 'strips', None) or getattr(seq, 'sequences_all', [])
+        strips_attr = getattr(seq, 'strips_all', None)
+        if strips_attr is None:
+            strips_attr = getattr(seq, 'sequences_all', [])
         try:
             for s in list(strips_attr):
                 if s.name == name:
@@ -715,7 +761,7 @@ def _add_beat_strip(context):
 
         # ── Encontra canal livre ──
         try:
-            used = {s.channel for s in (getattr(seq, 'strips', None) or [])}
+            used = {s.channel for s in strips_attr}
         except Exception:
             used = set()
         ch = 1
@@ -761,7 +807,9 @@ def _add_beat_strip(context):
             return
 
         strip.color = (0.82, 0.38, 0.12)
-        print(f"[BeatGrid] Strip '{name}' criado no canal {ch} ({total_frames} frames) ✅")
+        print(f"[BeatGrid] Strip '{name}' criado no canal {ch} ({total_frames} frames) "
+              f"na cena '{scene.name}' ✅")
+        _redraw_sequencers(context)
 
     except Exception as e:
         print(f"[BeatGrid] Erro inesperado ao criar strip: {e}")
@@ -825,8 +873,8 @@ class DAW_OT_BeatGridModal(bpy.types.Operator):
                         stop_sequencer()
                     else:
                         bg.playing = True
-                        start_sequencer()
                         _add_beat_strip(context)
+                        start_sequencer()
 
                 elif typ == 'MUTE' and ri >= 0:
                     bg.rows[ri].muted = not bg.rows[ri].muted
@@ -909,6 +957,21 @@ class DAW_OT_OpenBeatGrid(bpy.types.Operator):
 #  PANEL — botão no N-Panel do Sequencer
 # ═══════════════════════════════════════════════════════════════
 
+class DAW_OT_BeatGridAddStrip(bpy.types.Operator):
+    bl_idname      = "daw.beat_grid_add_strip"
+    bl_label       = "Criar Strip no VSE"
+    bl_description = "Cria (ou recria) o strip do Beat Grid na cena do Sequencer"
+
+    def execute(self, context):
+        _add_beat_strip(context)
+        bg = context.scene.beat_grid
+        if bg.strip_error:
+            self.report({'ERROR'}, bg.strip_error)
+            return {'CANCELLED'}
+        self.report({'INFO'}, f"Strip 'BeatGrid' criado na cena '{_sequencer_scene(context).name}'")
+        return {'FINISHED'}
+
+
 class DAW_PT_BeatGrid(bpy.types.Panel):
     bl_label       = "Beat Grid"
     bl_idname      = "DAW_PT_beat_grid"
@@ -923,6 +986,7 @@ class DAW_PT_BeatGrid(bpy.types.Panel):
 
         layout.operator("daw.open_beat_grid", icon='SEQ_CHROMA_SCOPE',
                         text="Abrir Beat Grid ↗")
+        layout.operator("daw.beat_grid_add_strip", icon='ADD')
         layout.separator()
 
         box = layout.box()
@@ -949,7 +1013,7 @@ class DAW_PT_BeatGrid(bpy.types.Panel):
 
 classes = [
     BeatRow, BeatGridState,
-    DAW_OT_BeatGridModal, DAW_OT_OpenBeatGrid,
+    DAW_OT_BeatGridModal, DAW_OT_OpenBeatGrid, DAW_OT_BeatGridAddStrip,
     DAW_PT_BeatGrid,
 ]
 
