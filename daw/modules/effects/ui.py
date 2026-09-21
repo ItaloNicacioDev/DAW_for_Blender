@@ -244,6 +244,9 @@ class DAW_PT_Effects(Panel):
         op.channel_index = channel_index
         op.direction = "DOWN"
 
+        op = layout.operator("daw.effects_apply_to_strip", icon='SOUND')
+        op.channel_index = channel_index
+
         if not (0 <= chain.active_slot_index < len(chain.slots)):
             return
 
