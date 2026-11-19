@@ -1,0 +1,27 @@
+schema_version = "1.0.0"
+
+id = "daw_for_blender"
+version = "1.0.0"
+name = "DAW for Blender"
+tagline = "A complete digital audio workstation inside Blender"
+maintainer = "Italo Nicacio Dev <eufrasio.nicacio@gmail.com>"
+type = "add-on"
+
+blender_version_min = "4.5.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+copyright = [
+  "2026 Italo Nicacio Dev",
+]
+
+tags = [
+  "Audio",
+  "Sequencer",
+]
+
+[permissions]
+files = "Read and write audio projects, recordings and exports"
+network = "Check for and download addon updates"
