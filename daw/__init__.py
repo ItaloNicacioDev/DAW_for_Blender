@@ -4,8 +4,8 @@ bl_info = {
     "version": (1, 0, 0),          
     "blender": (4, 5, 0),
     "location": "DAW Workspace",
-    "description": "DAW integrada ao Blender (beta)",
-    "warning": "Beta. Plugins VST3 só funcionam no Windows.",
+    "description": "DAW integrada ao Blender ",
+    "warning": " Plugins VST3 só funcionam no Windows.",
     "category": "Audio",
 }
 

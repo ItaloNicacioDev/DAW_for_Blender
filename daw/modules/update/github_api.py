@@ -65,7 +65,7 @@ def fetch_latest_release() -> dict:
 
     Tenta primeiro o endpoint oficial "/releases/latest" (só retorna
     release estável, não pre-release). Se não houver nenhuma release
-    estável publicada ainda (404 — comum durante a fase beta, onde tudo
+    estável publicada ainda (404 — comum durante a fase , onde tudo
     é pre-release), cai para a listagem "/releases" — que inclui
     pre-releases — e pega o primeiro item (mais recente).
     """
